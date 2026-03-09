@@ -1,0 +1,20 @@
+# Core orchestration
+langchain-core>=0.3.0
+langgraph>=0.2.0
+pydantic>=2.6.0
+
+# Gemini
+langchain-google-genai>=2.0.0
+
+# Slack
+slack-bolt>=1.18.1
+slack-sdk>=3.27.0
+
+# Google Sheets
+google-api-python-client>=2.118.0
+google-auth-httplib2>=0.2.0
+google-auth-oauthlib>=1.2.0
+
+# Environment
+python-dotenv>=1.0.1
+typing-extensions>=4.9.0
