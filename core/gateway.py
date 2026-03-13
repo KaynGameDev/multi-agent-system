@@ -1,86 +1,74 @@
 from __future__ import annotations
 
-from typing import Literal
-
-from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
+from langchain_core.messages import HumanMessage, SystemMessage
 
-from core.config import load_settings
 from core.state import AgentState, RouteName
 
 
 class RouteDecision(BaseModel):
-    route: Literal["project_task_agent", "general_chat_agent"] = Field(
-        description="Which specialist should answer the user's latest request."
-    )
-    reason: str = Field(
-        description="A brief explanation of why this route was chosen."
-    )
+    route: RouteName = Field(description="The next agent that should handle the request.")
+    reason: str = Field(description="Brief reason for the routing decision.")
 
 
 GATEWAY_PROMPT = (
-    "You are the routing gateway for Jade Agent. "
-    "Your only job is to choose the best specialist for the user's latest message.\n\n"
-    "Available specialists:\n"
-    "- project_task_agent: questions about project tasks, owners, assignees, deadlines, milestones, roadmaps, or the Google Sheets tracker.\n"
-    "- general_chat_agent: greetings, chit-chat, general questions, writing help, explanations, and anything that does not require the project tracker.\n\n"
-    "Always return one route and a short reason."
+    "You are the gateway router for Jade Games Ltd.'s multi-agent system. "
+    "Your job is to classify the user's latest message and choose the correct agent.\n\n"
+    "Available routes:\n"
+    "- project_task_agent: Use for project tracker questions, assignees, deadlines, schedules, priorities, "
+    "iterations, project status, or anything that likely requires Google Sheets data.\n"
+    "- general_chat_agent: Use for greetings, casual chat, and general knowledge questions that do not require project data.\n\n"
+    "Return the best route and a short reason."
 )
 
 
 class GatewayNode:
     def __init__(self, llm) -> None:
         self.router = llm.with_structured_output(RouteDecision)
-        self.settings = load_settings()
 
     def __call__(self, state: AgentState) -> dict:
-        messages = [SystemMessage(content=GATEWAY_PROMPT), *state["messages"]]
+        messages = state.get("messages", [])
+        latest_user_message = self._get_latest_user_message(messages)
 
-        try:
-            decision = self.router.invoke(messages)
+        if not latest_user_message:
             return {
-                "route": decision.route,
-                "route_reason": decision.reason,
-            }
-        except Exception:
-            fallback_route = classify_with_keywords(state, self.settings.project_lookup_keywords)
-            return {
-                "route": fallback_route,
-                "route_reason": "Fallback keyword routing.",
+                "route": "general_chat_agent",
+                "route_reason": "No user message found; defaulting to general chat.",
             }
 
+        decision = self.router.invoke(
+            [
+                SystemMessage(content=GATEWAY_PROMPT),
+                HumanMessage(content=latest_user_message),
+            ]
+        )
 
-def classify_with_keywords(
-    state: AgentState,
-    project_keywords: tuple[str, ...],
-) -> RouteName:
-    user_text = get_latest_user_text(state).lower()
+        return {
+            "route": decision.route,
+            "route_reason": decision.reason,
+        }
 
-    for keyword in project_keywords:
-        if keyword in user_text:
-            return "project_task_agent"
+    def _get_latest_user_message(self, messages) -> str:
+        for message in reversed(messages):
+            content = getattr(message, "content", "")
+            text = self._stringify_content(content)
+            if text:
+                return text
+        return ""
 
-    return "general_chat_agent"
+    def _stringify_content(self, content) -> str:
+        if isinstance(content, str):
+            return content
 
+        if isinstance(content, list):
+            parts: list[str] = []
+            for item in content:
+                if isinstance(item, str):
+                    parts.append(item)
+                elif isinstance(item, dict):
+                    text = item.get("text") or item.get("content")
+                    if isinstance(text, str):
+                        parts.append(text)
+            return "\n".join(part for part in parts if part).strip()
 
-def get_latest_user_text(state: AgentState) -> str:
-    for message in reversed(state["messages"]):
-        if isinstance(message, HumanMessage):
-            return stringify_message_content(message.content)
-    return ""
-
-
-def stringify_message_content(content) -> str:
-    if isinstance(content, str):
-        return content
-
-    parts: list[str] = []
-    if isinstance(content, list):
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                text = item.get("text") or item.get("content")
-                if isinstance(text, str):
-                    parts.append(text)
-    return " ".join(parts).strip()
+        return str(content)

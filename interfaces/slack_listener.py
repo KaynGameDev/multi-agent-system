@@ -7,8 +7,10 @@ from slack_bolt import App
 from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from core.config import Settings
+from core.identity_map import build_user_identity_context, resolve_identity
+from core.slack_formatting import to_slack_mrkdwn
 
-MENTION_PATTERN = re.compile(r"<@[A-Z0-9]+>")
+MENTION_PATTERN = re.compile(r"<@([A-Z0-9]+)>")
 
 
 class SlackListener:
@@ -55,18 +57,20 @@ class SlackListener:
         self._add_thinking_reaction(channel_id, message_ts)
 
         try:
+            user_context = self._load_user_context(user_id)
             initial_state = {
                 "messages": [HumanMessage(content=text)],
                 "user_id": user_id,
                 "channel_id": channel_id,
+                **user_context,
             }
             final_state = self.agent_graph.invoke(
                 initial_state,
                 config={"configurable": {"thread_id": self._build_thread_id(event, user_id)}},
             )
-            final_text = self._extract_final_text(final_state)
+            final_text = to_slack_mrkdwn(self._extract_final_text(final_state))
         except Exception as exc:
-            final_text = f"I hit an error while processing that request: {exc}"
+            final_text = to_slack_mrkdwn(f"I hit an error while processing that request: {exc}")
         finally:
             self._remove_thinking_reaction(channel_id, message_ts)
 
@@ -79,7 +83,23 @@ class SlackListener:
         cleaned = raw_text.strip()
         if is_mention:
             cleaned = MENTION_PATTERN.sub("", cleaned).strip()
-        return cleaned
+
+        cleaned = self._replace_user_mentions(cleaned)
+        return cleaned.strip()
+
+    def _replace_user_mentions(self, text: str) -> str:
+        def replace_match(match: re.Match[str]) -> str:
+            mentioned_user_id = match.group(1)
+            identity = self._load_user_context(mentioned_user_id)
+            return (
+                identity.get("user_sheet_name")
+                or identity.get("user_google_name")
+                or identity.get("user_display_name")
+                or identity.get("user_real_name")
+                or f"user_{mentioned_user_id}"
+            )
+
+        return MENTION_PATTERN.sub(replace_match, text)
 
     def _build_thread_id(self, event, user_id: str) -> str:
         channel_id = event.get("channel", "unknown-channel")
@@ -111,6 +131,47 @@ class SlackListener:
             return "\n".join(part for part in parts if part).strip()
 
         return str(content)
+
+    def _load_user_context(self, user_id: str) -> dict:
+        try:
+            response = self.app.client.users_info(user=user_id)
+            user = response.get("user", {})
+            profile = user.get("profile", {})
+            display_name = profile.get("display_name") or user.get("name") or ""
+            real_name = profile.get("real_name") or user.get("real_name") or ""
+            email = profile.get("email", "")
+
+            identity_context = build_user_identity_context(
+                slack_display_name=display_name,
+                slack_real_name=real_name,
+                email=email,
+            )
+            if identity_context:
+                return identity_context
+
+            fallback_identity = (
+                resolve_identity(display_name)
+                or resolve_identity(real_name)
+                or resolve_identity(email)
+            )
+            if fallback_identity:
+                return {
+                    "user_display_name": display_name or real_name,
+                    "user_real_name": real_name,
+                    "user_email": email,
+                    "user_google_name": fallback_identity["google_name"],
+                    "user_sheet_name": fallback_identity["sheet_name"],
+                    "user_job_title": fallback_identity["job_title"],
+                    "user_mapped_slack_name": fallback_identity["slack_name"],
+                }
+
+            return {
+                "user_display_name": display_name or real_name,
+                "user_real_name": real_name,
+                "user_email": email,
+            }
+        except Exception:
+            return {}
 
     def _add_thinking_reaction(self, channel_id: str, timestamp: str | None) -> None:
         if not timestamp:

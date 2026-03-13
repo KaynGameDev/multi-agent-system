@@ -10,46 +10,57 @@ from core.state import AgentState
 from tools.google_sheets import get_project_sheet_overview, read_project_tasks
 
 
-PROJECT_TOOLS = [read_project_tasks, get_project_sheet_overview]
+def build_graph(llm, checkpointer=None):
+    tools = [
+        read_project_tasks,
+        get_project_sheet_overview,
+    ]
 
+    gateway_node = GatewayNode(llm)
+    general_chat_agent_node = GeneralChatAgentNode(llm)
+    project_task_agent_node = ProjectTaskAgentNode(llm, tools)
+    project_tools_node = ToolNode(tools)
 
-def build_agent_graph(llm, checkpointer=None):
-    workflow = StateGraph(AgentState)
+    graph = StateGraph(AgentState)
 
-    workflow.add_node("gateway", GatewayNode(llm))
-    workflow.add_node("general_chat_agent", GeneralChatAgentNode(llm))
-    workflow.add_node("project_task_agent", ProjectTaskAgentNode(llm, PROJECT_TOOLS))
-    workflow.add_node(
-        "project_tools",
-        ToolNode(PROJECT_TOOLS, handle_tool_errors=True),
-    )
+    graph.add_node("gateway", gateway_node)
+    graph.add_node("general_chat_agent", general_chat_agent_node)
+    graph.add_node("project_task_agent", project_task_agent_node)
+    graph.add_node("project_tools", project_tools_node)
 
-    workflow.add_edge(START, "gateway")
-    workflow.add_conditional_edges(
+    graph.add_edge(START, "gateway")
+
+    graph.add_conditional_edges(
         "gateway",
-        route_from_gateway,
+        route_after_gateway,
         {
-            "project_task_agent": "project_task_agent",
             "general_chat_agent": "general_chat_agent",
+            "project_task_agent": "project_task_agent",
         },
     )
 
-    workflow.add_conditional_edges(
+    graph.add_edge("general_chat_agent", END)
+
+    graph.add_conditional_edges(
         "project_task_agent",
         tools_condition,
         {
             "tools": "project_tools",
-            END: END,
+            "__end__": END,
         },
     )
-    workflow.add_edge("project_tools", "project_task_agent")
-    workflow.add_edge("general_chat_agent", END)
 
-    return workflow.compile(checkpointer=checkpointer)
+    graph.add_edge("project_tools", "project_task_agent")
+
+    return graph.compile(checkpointer=checkpointer)
 
 
-def route_from_gateway(state: AgentState) -> str:
+def build_agent_graph(llm, checkpointer=None):
+    return build_graph(llm, checkpointer=checkpointer)
+
+
+def route_after_gateway(state: AgentState) -> str:
     route = state.get("route", "general_chat_agent")
-    if route not in {"project_task_agent", "general_chat_agent"}:
-        return "general_chat_agent"
-    return route
+    if route == "project_task_agent":
+        return "project_task_agent"
+    return "general_chat_agent"

@@ -78,6 +78,10 @@ def validate_bootstrap_settings(settings: Settings) -> None:
         missing.append("SLACK_APP_TOKEN")
     if not settings.google_api_key:
         missing.append("GOOGLE_API_KEY")
+    if not settings.google_application_credentials:
+        missing.append("GOOGLE_APPLICATION_CREDENTIALS")
+    if not settings.jade_project_sheet_id:
+        missing.append("JADE_PROJECT_SHEET_ID")
 
     if missing:
         joined = ", ".join(missing)

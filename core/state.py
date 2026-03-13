@@ -1,9 +1,10 @@
 from __future__ import annotations
 
 from typing import Annotated, Literal
-from typing_extensions import TypedDict
+
 from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
+from typing_extensions import TypedDict
 
 RouteName = Literal["project_task_agent", "general_chat_agent"]
 
@@ -14,3 +15,10 @@ class AgentState(TypedDict, total=False):
     route_reason: str
     user_id: str
     channel_id: str
+    user_display_name: str
+    user_real_name: str
+    user_email: str
+    user_google_name: str
+    user_sheet_name: str
+    user_job_title: str
+    user_mapped_slack_name: str
