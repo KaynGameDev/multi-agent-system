@@ -85,9 +85,9 @@ def main() -> None:
     print("=== PERSON LOOKUP TEST ===")
     sample_names = ["刘煜", "@K - Liu Yu", "kayn@songkegame.com"]
     for name in sample_names:
-        matches = client.search_tasks(assignee=name, limit=3)
-        print(f"Lookup: {name} -> {len(matches)} match(es)")
-        for match in matches[:3]:
+        result = client.search_tasks(assignee=name, limit=3)
+        print(f"Lookup: {name} -> {result.total_count} match(es)")
+        for match in result.records[:3]:
             print(json.dumps(match, ensure_ascii=False, indent=2))
         print()
 

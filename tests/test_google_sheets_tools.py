@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from tools.google_sheets import get_project_sheet_overview, parse_sheet_date, read_project_tasks
+from tools.google_sheets import TaskSearchResult, get_project_sheet_overview, parse_sheet_date, read_project_tasks
 
 
 SAMPLE_RECORD = {
@@ -30,7 +30,7 @@ SAMPLE_RECORD = {
 class GoogleSheetsToolTests(unittest.TestCase):
     @patch("tools.google_sheets.client.search_tasks")
     def test_read_project_tasks_returns_structured_payload(self, mock_search_tasks) -> None:
-        mock_search_tasks.return_value = [SAMPLE_RECORD]
+        mock_search_tasks.return_value = TaskSearchResult(records=[SAMPLE_RECORD], total_count=1)
 
         result = read_project_tasks.invoke({"assignee": "@K - Liu Yu", "limit": 1})
 
@@ -100,6 +100,21 @@ class GoogleSheetsToolTests(unittest.TestCase):
             [task["content"] for task in result["tasks"]],
             ["周一任务", "周六任务", "周日任务"],
         )
+
+    @patch("tools.google_sheets.client.get_records")
+    def test_read_project_tasks_reports_total_match_count_beyond_limit(self, mock_get_records) -> None:
+        mock_get_records.return_value = [
+            {**SAMPLE_RECORD, "内容": "周一任务", "end": "2026-03-09"},
+            {**SAMPLE_RECORD, "内容": "周六任务", "end": "2026-03-14"},
+            {**SAMPLE_RECORD, "内容": "周日任务", "end": "2026-03-15"},
+        ]
+
+        result = read_project_tasks.invoke({"due_scope": "this_week", "as_of_date": "2026-03-13", "limit": 1})
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["match_count"], 3)
+        self.assertEqual(len(result["tasks"]), 1)
+        self.assertEqual(result["tasks"][0]["content"], "周一任务")
 
     def test_parse_sheet_date_supports_dates_without_year(self) -> None:
         parsed = parse_sheet_date("3/14", reference_date=parse_sheet_date("2026-03-13"))

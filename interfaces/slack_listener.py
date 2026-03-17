@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 
 from langchain_core.messages import HumanMessage
@@ -11,6 +12,7 @@ from core.identity_map import build_user_identity_context, resolve_identity
 from core.slack_formatting import to_slack_mrkdwn
 
 MENTION_PATTERN = re.compile(r"<@([A-Z0-9]+)>")
+logger = logging.getLogger(__name__)
 
 
 class SlackListener:
@@ -66,15 +68,20 @@ class SlackListener:
             }
             final_state = self.agent_graph.invoke(
                 initial_state,
-                config={"configurable": {"thread_id": self._build_thread_id(event, user_id)}},
+                config={"configurable": {"thread_id": self._build_thread_id(event)}},
             )
             final_text = to_slack_mrkdwn(self._extract_final_text(final_state))
         except Exception as exc:
+            logger.exception("Failed while processing Slack event", extra={"channel_id": channel_id, "user_id": user_id})
             final_text = to_slack_mrkdwn(f"I hit an error while processing that request: {exc}")
         finally:
             self._remove_thinking_reaction(channel_id, message_ts)
 
-        say(text=final_text, channel=channel_id)
+        reply_kwargs = {"text": final_text, "channel": channel_id}
+        reply_thread_ts = self._build_reply_thread_ts(event)
+        if reply_thread_ts:
+            reply_kwargs["thread_ts"] = reply_thread_ts
+        say(**reply_kwargs)
 
     def _extract_text(self, raw_text: str, is_mention: bool) -> str:
         if not raw_text:
@@ -101,10 +108,18 @@ class SlackListener:
 
         return MENTION_PATTERN.sub(replace_match, text)
 
-    def _build_thread_id(self, event, user_id: str) -> str:
+    def _build_thread_id(self, event) -> str:
         channel_id = event.get("channel", "unknown-channel")
+        if event.get("channel_type") == "im":
+            return channel_id
+
         root_ts = event.get("thread_ts") or event.get("ts") or "root"
-        return f"{channel_id}:{root_ts}:{user_id}"
+        return f"{channel_id}:{root_ts}"
+
+    def _build_reply_thread_ts(self, event) -> str | None:
+        if event.get("channel_type") == "im":
+            return None
+        return event.get("thread_ts") or event.get("ts")
 
     def _extract_final_text(self, final_state: dict) -> str:
         messages = final_state.get("messages") or []

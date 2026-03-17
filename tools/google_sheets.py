@@ -83,6 +83,12 @@ class DateFilterOptions:
     end_date_to: date | None
 
 
+@dataclass(frozen=True)
+class TaskSearchResult:
+    records: list[dict[str, str]]
+    total_count: int
+
+
 class GoogleSheetsClient:
     def __init__(self) -> None:
         self._service = None
@@ -138,7 +144,7 @@ class GoogleSheetsClient:
         iteration: str = "",
         date_filters: DateFilterOptions | None = None,
         limit: int = 10,
-    ) -> list[dict[str, str]]:
+    ) -> TaskSearchResult:
         query = query.strip().lower()
         assignee = normalize_sheet_identity(assignee).strip().lower()
         project = project.strip().lower()
@@ -146,8 +152,10 @@ class GoogleSheetsClient:
         priority = priority.strip().lower()
         iteration = iteration.strip().lower()
 
+        normalized_limit = max(limit, 1)
         matches: list[dict[str, str]] = []
         dated_matches: list[tuple[date, dict[str, str]]] = []
+        total_count = 0
         has_date_filters = date_filters is not None and (
             bool(date_filters.due_scope) or date_filters.end_date_from is not None or date_filters.end_date_to is not None
         )
@@ -204,18 +212,22 @@ class GoogleSheetsClient:
                 if date_filters.end_date_to is not None and end_date > date_filters.end_date_to:
                     continue
 
+                total_count += 1
                 dated_matches.append((end_date, record))
                 continue
 
-            matches.append(record)
-            if len(matches) >= max(limit, 1):
-                break
+            total_count += 1
+            if len(matches) < normalized_limit:
+                matches.append(record)
 
         if has_date_filters:
             dated_matches.sort(key=lambda item: item[0])
-            return [record for _, record in dated_matches[: max(limit, 1)]]
+            return TaskSearchResult(
+                records=[record for _, record in dated_matches[:normalized_limit]],
+                total_count=total_count,
+            )
 
-        return matches
+        return TaskSearchResult(records=matches, total_count=total_count)
 
     def _get_service(self):
         if self._service is not None:
@@ -308,7 +320,7 @@ def read_project_tasks(
     )
 
     try:
-        matches = client.search_tasks(
+        search_result = client.search_tasks(
             query=query,
             assignee=assignee,
             project=project,
@@ -327,10 +339,17 @@ def read_project_tasks(
             "tasks": [],
         }
 
+    if isinstance(search_result, TaskSearchResult):
+        matches = search_result.records
+        match_count = search_result.total_count
+    else:
+        matches = search_result
+        match_count = len(matches)
+
     result: dict[str, object] = {
         "ok": True,
         "filters": filters,
-        "match_count": len(matches),
+        "match_count": match_count,
         "tasks": [project_record_to_task(record, reference_date=date_filters.as_of_date) for record in matches],
     }
     date_context = build_date_context(date_filters)
