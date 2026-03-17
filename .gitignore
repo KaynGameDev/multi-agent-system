@@ -56,6 +56,10 @@ logs/
 *.tmp
 *.bak
 
+# Local knowledge documents
+data/knowledge/*
+!data/knowledge/.gitkeep
+
 # PyInstaller
 *.manifest
 *.spec

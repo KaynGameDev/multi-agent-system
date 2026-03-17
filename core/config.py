@@ -21,6 +21,17 @@ DEFAULT_PROJECT_KEYWORDS = (
     "sprint",
 )
 
+DEFAULT_KNOWLEDGE_BASE_DIR = "data/knowledge"
+DEFAULT_KNOWLEDGE_FILE_TYPES = (
+    ".md",
+    ".txt",
+    ".rst",
+    ".csv",
+    ".tsv",
+    ".xlsx",
+    ".xlsm",
+)
+
 
 @dataclass(frozen=True)
 class Settings:
@@ -35,6 +46,8 @@ class Settings:
     project_sheet_cache_ttl_seconds: int
     slack_thinking_reaction: str
     project_lookup_keywords: tuple[str, ...]
+    knowledge_base_dir: str
+    knowledge_file_types: tuple[str, ...]
 
 
 _cached_settings: Settings | None = None
@@ -52,6 +65,12 @@ def load_settings(force_reload: bool = False) -> Settings:
         for item in keywords_value.split(",")
         if item.strip()
     ) or DEFAULT_PROJECT_KEYWORDS
+    knowledge_file_types_value = os.getenv("KNOWLEDGE_FILE_TYPES", "")
+    knowledge_file_types = tuple(
+        normalize_knowledge_file_type(item)
+        for item in knowledge_file_types_value.split(",")
+        if item.strip()
+    ) or DEFAULT_KNOWLEDGE_FILE_TYPES
 
     _cached_settings = Settings(
         slack_bot_token=os.getenv("SLACK_BOT_TOKEN", ""),
@@ -65,6 +84,8 @@ def load_settings(force_reload: bool = False) -> Settings:
         project_sheet_cache_ttl_seconds=int(os.getenv("PROJECT_SHEET_CACHE_TTL_SECONDS", "30")),
         slack_thinking_reaction=os.getenv("SLACK_THINKING_REACTION", "eyes"),
         project_lookup_keywords=keywords,
+        knowledge_base_dir=os.getenv("KNOWLEDGE_BASE_DIR", DEFAULT_KNOWLEDGE_BASE_DIR).strip() or DEFAULT_KNOWLEDGE_BASE_DIR,
+        knowledge_file_types=knowledge_file_types,
     )
     return _cached_settings
 
@@ -86,3 +107,12 @@ def validate_bootstrap_settings(settings: Settings) -> None:
     if missing:
         joined = ", ".join(missing)
         raise RuntimeError(f"Missing required environment variables: {joined}")
+
+
+def normalize_knowledge_file_type(value: str) -> str:
+    cleaned = value.strip().lower()
+    if not cleaned:
+        return ""
+    if not cleaned.startswith("."):
+        cleaned = f".{cleaned}"
+    return cleaned

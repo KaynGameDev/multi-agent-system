@@ -10,6 +10,8 @@ GENERAL_CHAT_PROMPT = (
     "Handle greetings, casual conversation, and general questions that do not require project sheet data. "
     "If the user is asking about project tasks, assignees, schedules, deadlines, priorities, or project tracker content, "
     "do not invent an answer; those should be handled by the project-task flow instead. "
+    "If the user is asking about internal architecture, setup instructions, repository documentation, or company process docs, "
+    "do not invent an answer; those should be handled by the knowledge-agent flow instead. "
     "Format final answers for Slack mrkdwn, not standard Markdown. "
     "Use *single asterisks* for bold, not double asterisks. "
     "Avoid Markdown headings like # or ##. "

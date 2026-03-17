@@ -36,6 +36,8 @@ def build_settings() -> Settings:
         project_sheet_cache_ttl_seconds=30,
         slack_thinking_reaction="eyes",
         project_lookup_keywords=("task",),
+        knowledge_base_dir="/tmp/knowledge",
+        knowledge_file_types=(".md", ".xlsx"),
     )
 
 

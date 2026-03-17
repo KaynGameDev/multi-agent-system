@@ -6,8 +6,10 @@ A lean LangGraph + Slack + Gemini starter for a company-facing multi-agent assis
 
 - `gateway` decides which specialist should handle the request
 - `project_task_agent` answers questions that depend on the Google Sheets project tracker
+- `knowledge_agent` answers questions about internal docs, architecture, and setup guidance
 - `general_chat_agent` handles greetings, general chat, and everything outside the project tracker
 - `project_tools` executes Google Sheets tools when the project agent decides they are needed
+- `knowledge_tools` search and read repository documentation when the knowledge agent needs evidence
 
 ## Why this shape
 
@@ -49,6 +51,8 @@ Optional:
 - `PROJECT_SHEET_RANGE` (default: `Tasks!A1:Z`)
 - `PROJECT_SHEET_CACHE_TTL_SECONDS` (default: `30`)
 - `SLACK_THINKING_REACTION` (default: `eyes`)
+- `KNOWLEDGE_BASE_DIR` (default: `data/knowledge`)
+- `KNOWLEDGE_FILE_TYPES` (default: `.md,.txt,.rst,.csv,.tsv,.xlsx,.xlsm`)
 
 ## Slack setup
 
@@ -75,4 +79,6 @@ python main.py
 
 - Conversation memory is handled with a LangGraph checkpointer keyed by Slack thread/channel.
 - The Google Sheets tool is cached briefly to avoid reading the whole sheet on every request.
+- The knowledge agent reads local files from `KNOWLEDGE_BASE_DIR`; the default local folder is [`data/knowledge/`](/Users/kayngame/jade_ai_core/data/knowledge/).
+- Excel exports from Google Sheets should be placed in `KNOWLEDGE_BASE_DIR` as `.xlsx` or `.xlsm` files.
 - Do **not** commit `.env`, `credentials.json`, `.venv`, or IDE folders.

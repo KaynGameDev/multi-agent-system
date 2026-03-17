@@ -30,6 +30,7 @@ Agents reason about tasks and decide when to call tools.
 Agents include:
 • project_task_agent
 • general_chat_agent
+• knowledge_agent
 
 Agents should be responsible for reasoning but not platform formatting.
 
@@ -39,6 +40,7 @@ A gateway agent decides which worker agent should handle the user request.
 Routing currently supports:
 • project_task_agent
 • general_chat_agent
+• knowledge_agent
 
 The gateway uses an LLM classification step to determine intent.
 
@@ -53,6 +55,9 @@ START
 
 General chat route:
 gateway → general_chat_agent → END
+
+Knowledge route:
+gateway → knowledge_agent → tools → knowledge_agent → END
 
 Project query route:
 gateway → project_task_agent → tools → project_task_agent → END
@@ -185,11 +190,18 @@ Current Agents
 GeneralChatAgent
 Handles greetings and general conversation.
 
+KnowledgeAgent
+Handles internal documentation, architecture, setup, and repository guidance questions.
+
+Current v1 knowledge source:
+• local files under `KNOWLEDGE_BASE_DIR`
+• recommended default folder: `data/knowledge/`
+• supported formats include Markdown/text and Excel exports (`.xlsx`, `.xlsm`)
+
 ProjectTaskAgent
 Handles queries that require project data and can call tools.
 
 Future agents that may be added:
-• knowledge_agent (RAG)
 • jira_agent
 • document_agent
 • calendar_agent

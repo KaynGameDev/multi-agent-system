@@ -1,12 +1,12 @@
 from __future__ import annotations
 
-from typing import Annotated, Literal
+from typing import Annotated
 
 from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
-RouteName = Literal["project_task_agent", "general_chat_agent"]
+RouteName = str
 
 
 class AgentState(TypedDict, total=False):
