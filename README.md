@@ -66,6 +66,7 @@ Recommended scopes/events:
   - `im:history`
   - `reactions:write` (optional, for the “thinking” reaction)
 - Event subscriptions:
+  - `app_home_opened`
   - `app_mention`
   - `message.im`
 

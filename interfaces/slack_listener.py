@@ -10,6 +10,7 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 from core.config import Settings
 from core.identity_map import build_user_identity_context, resolve_identity
 from core.slack_formatting import to_slack_mrkdwn
+from interfaces.slack_home import build_home_view
 
 MENTION_PATTERN = re.compile(r"<@([A-Z0-9]+)>")
 logger = logging.getLogger(__name__)
@@ -28,8 +29,15 @@ class SlackListener:
         handler.start()
 
     def _register_handlers(self) -> None:
+        self.app.event("app_home_opened")(self.handle_app_home_opened)
         self.app.event("app_mention")(self.handle_app_mention)
         self.app.event("message")(self.handle_message_event)
+
+    def handle_app_home_opened(self, event) -> None:
+        user_id = event.get("user")
+        if not user_id:
+            return
+        self.publish_home_view(user_id)
 
     def handle_app_mention(self, event, say) -> None:
         self.process_and_respond(event=event, say=say, is_mention=True)
@@ -187,6 +195,16 @@ class SlackListener:
             }
         except Exception:
             return {}
+
+    def publish_home_view(self, user_id: str) -> None:
+        try:
+            user_context = self._load_user_context(user_id)
+            self.app.client.views_publish(
+                user_id=user_id,
+                view=build_home_view(user_context),
+            )
+        except Exception:
+            logger.exception("Failed to publish Slack Home view", extra={"user_id": user_id})
 
     def _add_thinking_reaction(self, channel_id: str, timestamp: str | None) -> None:
         if not timestamp:

@@ -12,9 +12,30 @@ class DummyGraph:
         return {"messages": []}
 
 
+class DummyClient:
+    def __init__(self) -> None:
+        self.views_publish_calls = []
+
+    def views_publish(self, *, user_id, view):
+        self.views_publish_calls.append({"user_id": user_id, "view": view})
+
+    def users_info(self, *, user):
+        return {
+            "user": {
+                "name": "kayn",
+                "real_name": "Kayn",
+                "profile": {
+                    "display_name": "Kayn",
+                    "real_name": "Kayn",
+                    "email": "",
+                },
+            }
+        }
+
+
 class DummyApp:
     def __init__(self) -> None:
-        self.client = object()
+        self.client = DummyClient()
 
     def event(self, _name: str):
         def register(listener):
@@ -84,6 +105,18 @@ class SlackListenerTests(unittest.TestCase):
         }
 
         self.assertIsNone(self.listener._build_reply_thread_ts(event))
+
+    def test_handle_app_home_opened_publishes_home_view(self) -> None:
+        event = {
+            "user": "U123",
+        }
+
+        self.listener.handle_app_home_opened(event)
+
+        self.assertEqual(len(self.listener.app.client.views_publish_calls), 1)
+        published = self.listener.app.client.views_publish_calls[0]
+        self.assertEqual(published["user_id"], "U123")
+        self.assertEqual(published["view"]["type"], "home")
 
 
 if __name__ == "__main__":
