@@ -26,6 +26,14 @@ def bootstrap_system() -> SlackListener:
     return SlackListener(agent_graph=agent_graph, settings=settings)
 
 
-if __name__ == "__main__":
+def main() -> int:
     listener = bootstrap_system()
-    listener.start()
+    try:
+        listener.start()
+    except KeyboardInterrupt:
+        print("\nStopping Jade Agent...")
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

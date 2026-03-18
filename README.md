@@ -46,7 +46,7 @@ Required:
 - `GOOGLE_APPLICATION_CREDENTIALS`
 
 Optional:
-- `GEMINI_MODEL` (default: `gemini-2.5-flash`)
+- `GEMINI_MODEL` (default: `gemini-3-flash-preview`)
 - `GEMINI_TEMPERATURE` (default: `0.2`)
 - `PROJECT_SHEET_RANGE` (default: `Tasks!A1:Z`)
 - `PROJECT_SHEET_CACHE_TTL_SECONDS` (default: `30`)

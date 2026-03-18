@@ -28,7 +28,7 @@ def build_settings() -> Settings:
         slack_bot_token="xoxb-test",
         slack_app_token="xapp-test",
         google_api_key="test-key",
-        gemini_model="gemini-2.5-flash",
+        gemini_model="gemini-3-flash-preview",
         gemini_temperature=0.2,
         google_application_credentials="/tmp/fake-creds.json",
         jade_project_sheet_id="sheet-id",
