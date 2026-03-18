@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 import re
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
 
@@ -11,6 +12,24 @@ from openpyxl import load_workbook
 from core.config import load_settings
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+@dataclass(frozen=True)
+class KnowledgeBlock:
+    kind: str
+    title: str
+    content: str
+    start_line: int
+    end_line: int
+
+
+@dataclass(frozen=True)
+class KnowledgeDocumentIndex:
+    path: Path
+    metadata: dict[str, str]
+    content: str
+    lines: list[str]
+    blocks: list[KnowledgeBlock]
 
 
 def get_knowledge_base_root() -> Path:
@@ -65,16 +84,8 @@ def load_knowledge_document(path: Path) -> str:
 
 
 def build_document_metadata(path: Path) -> dict[str, str]:
-    root = get_knowledge_base_root()
     content = load_knowledge_document(path)
-    relative_path = safe_relative_path(path, root)
-    title = extract_document_title(content, default=humanize_path_name(path))
-    return {
-        "name": path.name,
-        "title": title,
-        "path": relative_path,
-        "file_type": path.suffix.lower(),
-    }
+    return build_document_metadata_from_content(path, content)
 
 
 def safe_relative_path(path: Path, root: Path) -> str:
@@ -96,6 +107,272 @@ def extract_document_title(content: str, *, default: str) -> str:
         if stripped:
             return stripped
     return default
+
+
+def build_document_index(path: Path) -> KnowledgeDocumentIndex:
+    content = load_knowledge_document(path)
+    lines = content.splitlines()
+    metadata = build_document_metadata_from_content(path, content)
+    blocks = extract_document_blocks(lines)
+    return KnowledgeDocumentIndex(
+        path=path,
+        metadata=metadata,
+        content=content,
+        lines=lines,
+        blocks=blocks,
+    )
+
+
+def build_document_metadata_from_content(path: Path, content: str) -> dict[str, str]:
+    root = get_knowledge_base_root()
+    relative_path = safe_relative_path(path, root)
+    title = extract_document_title(content, default=humanize_path_name(path))
+    return {
+        "name": path.name,
+        "title": title,
+        "path": relative_path,
+        "file_type": path.suffix.lower(),
+    }
+
+
+def extract_document_blocks(lines: list[str]) -> list[KnowledgeBlock]:
+    if not lines:
+        return []
+
+    heading_entries = [
+        (index, heading_level(line), heading_text(line))
+        for index, line in enumerate(lines)
+        if is_markdown_heading(line)
+    ]
+
+    blocks: list[KnowledgeBlock] = []
+    if heading_entries:
+        start_from = 0
+        if heading_entries[0][0] == 0 and heading_entries[0][1] == 1:
+            start_from = 1
+
+        for entry_index in range(start_from, len(heading_entries)):
+            line_index, level, title = heading_entries[entry_index]
+            block_end = len(lines)
+            for next_line_index, next_level, _ in heading_entries[entry_index + 1 :]:
+                if next_level <= level:
+                    block_end = next_line_index
+                    break
+            block_lines = [line.rstrip() for line in lines[line_index:block_end] if line.strip()]
+            if not block_lines:
+                continue
+            blocks.append(
+                KnowledgeBlock(
+                    kind=classify_block(block_lines),
+                    title=title,
+                    content="\n".join(block_lines).strip(),
+                    start_line=line_index + 1,
+                    end_line=block_end,
+                )
+            )
+
+    if blocks:
+        return blocks
+
+    return extract_freeform_blocks(lines)
+
+
+def extract_freeform_blocks(lines: list[str]) -> list[KnowledgeBlock]:
+    blocks: list[KnowledgeBlock] = []
+    line_index = 0
+    while line_index < len(lines):
+        line = lines[line_index].rstrip()
+        if not line.strip():
+            line_index += 1
+            continue
+
+        if is_markdown_table_start(lines, line_index):
+            start = line_index
+            table_lines = [line]
+            line_index += 1
+            while line_index < len(lines) and lines[line_index].strip().startswith("|"):
+                table_lines.append(lines[line_index].rstrip())
+                line_index += 1
+            blocks.append(
+                KnowledgeBlock(
+                    kind="table",
+                    title="Table",
+                    content="\n".join(table_lines).strip(),
+                    start_line=start + 1,
+                    end_line=line_index,
+                )
+            )
+            continue
+
+        start = line_index
+        block_lines = [line]
+        line_index += 1
+        while line_index < len(lines):
+            next_line = lines[line_index].rstrip()
+            if not next_line.strip():
+                break
+            if is_markdown_table_start(lines, line_index):
+                break
+            block_lines.append(next_line)
+            line_index += 1
+
+        blocks.append(
+            KnowledgeBlock(
+                kind=classify_block(block_lines),
+                title=block_title_from_lines(block_lines),
+                content="\n".join(block_lines).strip(),
+                start_line=start + 1,
+                end_line=line_index,
+            )
+        )
+
+    return blocks
+
+
+def heading_text(line: str) -> str:
+    return re.sub(r"^\s*#{1,6}\s+", "", line).strip()
+
+
+def classify_block(lines: list[str]) -> str:
+    body_lines = [line.strip() for line in lines if line.strip()]
+    if not body_lines:
+        return "paragraph"
+    if any(line.startswith("|") for line in body_lines):
+        return "table"
+    if any(is_list_like_line(line) for line in body_lines[1:] or body_lines):
+        return "list"
+    return "section"
+
+
+def block_title_from_lines(lines: list[str]) -> str:
+    for line in lines:
+        stripped = line.strip()
+        if stripped:
+            return stripped[:80]
+    return "Block"
+
+
+def is_list_like_line(line: str) -> bool:
+    stripped = line.strip()
+    return stripped.startswith("- ") or is_numbered_item(stripped) or is_bullet_item(stripped)
+
+
+def is_markdown_table_start(lines: list[str], index: int) -> bool:
+    if index + 1 >= len(lines):
+        return False
+    current = lines[index].strip()
+    next_line = lines[index + 1].strip()
+    return current.startswith("|") and bool(re.match(r"^\|\s*:?-{3,}", next_line))
+
+
+def score_block(block: KnowledgeBlock, query: str, terms: list[str]) -> int:
+    combined_text = "\n".join(part for part in (block.title, block.content) if part).lower()
+    score = 0
+    normalized_query = query.strip().lower()
+    if normalized_query and normalized_query in combined_text:
+        score += max(8, len(terms) * 2)
+
+    for term in terms:
+        score += combined_text.count(term)
+
+    if score > 0 and block.kind == "section":
+        score += 1
+    return score
+
+
+def find_best_matching_block(
+    blocks: list[KnowledgeBlock],
+    query: str,
+    terms: list[str],
+    *,
+    preferred_kinds: tuple[str, ...] = (),
+) -> KnowledgeBlock | None:
+    best_block: KnowledgeBlock | None = None
+    best_score = 0
+    best_span = 0
+
+    for block in blocks:
+        score = score_block(block, query, terms)
+        if preferred_kinds and block.kind in preferred_kinds:
+            score += 2
+        span = max(block.end_line - block.start_line + 1, 1)
+        if score > best_score or (score == best_score and score > 0 and (best_block is None or span < best_span)):
+            best_score = score
+            best_block = block
+            best_span = span
+
+    return best_block if best_score > 0 else None
+
+
+def build_block_snippet(block: KnowledgeBlock, *, max_lines: int = 5) -> str:
+    lines = [line.rstrip() for line in block.content.splitlines() if line.strip()]
+    return "\n".join(lines[:max_lines]).strip()
+
+
+def build_document_excerpt(
+    *,
+    document_index: KnowledgeDocumentIndex,
+    section_query: str,
+    max_lines: int,
+) -> dict[str, object]:
+    normalized_query = section_query.strip()
+    if normalized_query:
+        terms = normalize_query_terms(normalized_query)
+        preferred_block = find_best_matching_block(
+            document_index.blocks,
+            normalized_query,
+            terms,
+            preferred_kinds=("section", "list", "table"),
+        )
+        if preferred_block is not None:
+            excerpt_lines = preferred_block.content.splitlines()[:max_lines]
+            return {
+                "start_line": preferred_block.start_line,
+                "end_line": preferred_block.start_line + len(excerpt_lines) - 1,
+                "content": "\n".join(excerpt_lines).strip(),
+                "truncated": len(preferred_block.content.splitlines()) > max_lines,
+                "block_type": preferred_block.kind,
+                "section_title": preferred_block.title,
+            }
+
+    if document_index.blocks:
+        excerpt_lines: list[str] = []
+        start_line = document_index.blocks[0].start_line
+        end_line = start_line
+        consumed_blocks = 0
+        for block in document_index.blocks:
+            block_lines = [line.rstrip() for line in block.content.splitlines() if line.strip()]
+            remaining = max_lines - len(excerpt_lines)
+            if remaining <= 0:
+                break
+            excerpt_lines.extend(block_lines[:remaining])
+            end_line = block.start_line + min(len(block_lines), remaining) - 1
+            consumed_blocks += 1
+            if len(excerpt_lines) >= max_lines:
+                break
+        total_lines = sum(
+            len([line for line in block.content.splitlines() if line.strip()])
+            for block in document_index.blocks
+        )
+        return {
+            "start_line": start_line,
+            "end_line": end_line,
+            "content": "\n".join(excerpt_lines).strip(),
+            "truncated": total_lines > len(excerpt_lines),
+            "block_type": document_index.blocks[0].kind,
+            "section_title": document_index.blocks[0].title if consumed_blocks == 1 else "",
+        }
+
+    lines = document_index.lines
+    excerpt_lines = [line.rstrip() for line in lines[:max_lines] if line.strip()]
+    return {
+        "start_line": 1,
+        "end_line": len(excerpt_lines),
+        "content": "\n".join(excerpt_lines).strip(),
+        "truncated": len(lines) > len(excerpt_lines),
+        "block_type": "document",
+        "section_title": document_index.metadata.get("title", ""),
+    }
 
 
 def normalize_query_terms(query: str) -> list[str]:
@@ -208,10 +485,11 @@ def locate_section(lines: list[str], section_query: str) -> tuple[int, int]:
 
 def render_delimited_file_as_text(path: Path, *, delimiter: str) -> str:
     title = humanize_path_name(path)
-    lines = [f"# {title}", f"## Table: {path.name}"]
+    lines = [f"# {title}"]
     with path.open("r", encoding="utf-8", errors="replace", newline="") as handle:
         reader = csv.reader(handle, delimiter=delimiter)
-        lines.extend(render_row_stream(reader))
+        rows = [[cell.strip() for cell in row] for row in reader]
+        lines.extend(render_sheet_rows(rows))
     return "\n".join(line for line in lines if line).strip()
 
 
@@ -226,64 +504,165 @@ def render_workbook_as_text(path: Path) -> str:
 
         for worksheet in workbook.worksheets:
             lines.append(f"## Sheet: {worksheet.title}")
-            lines.extend(
-                render_row_stream(
-                    (
-                        [format_cell_value(value) for value in row]
-                        for row in worksheet.iter_rows(values_only=True)
-                    )
-                )
-            )
+            rows = [
+                [format_cell_value(value) for value in row]
+                for row in worksheet.iter_rows(values_only=True)
+            ]
+            lines.extend(render_sheet_rows(rows))
     finally:
         workbook.close()
 
     return "\n".join(line for line in lines if line).strip()
 
 
-def render_row_stream(rows: Iterable[list[str]]) -> list[str]:
+def render_sheet_rows(rows: Iterable[list[str]]) -> list[str]:
+    normalized_rows = [trim_trailing_empty_cells(list(row)) for row in rows]
     rendered_lines: list[str] = []
-    header: list[str] | None = None
-    saw_content = False
+    row_index = 0
 
-    for row_index, row in enumerate(rows, start=1):
-        normalized_row = [cell.strip() for cell in row]
-        if not any(normalized_row):
+    while row_index < len(normalized_rows):
+        row = normalized_rows[row_index]
+        if not has_non_empty_cells(row):
+            row_index += 1
             continue
 
-        saw_content = True
-        if header is None:
-            header = build_header_row(normalized_row)
-            rendered_lines.append(f"Columns: {' | '.join(header)}")
+        if is_table_block_start(normalized_rows, row_index):
+            block_rows, row_index = consume_table_block(normalized_rows, row_index)
+            rendered_lines.extend(render_table_block(block_rows))
             continue
 
-        rendered_row = format_row_with_header(normalized_row, header)
-        if rendered_row:
-            rendered_lines.append(f"Row {row_index}: {rendered_row}")
+        rendered_line = render_sparse_row(row)
+        if rendered_line:
+            rendered_lines.append(rendered_line)
+        row_index += 1
 
-    if not saw_content:
+    if not rendered_lines:
         rendered_lines.append("(empty)")
 
     return rendered_lines
 
 
-def build_header_row(row: list[str]) -> list[str]:
+def trim_trailing_empty_cells(row: list[str]) -> list[str]:
+    trimmed = list(row)
+    while trimmed and not trimmed[-1].strip():
+        trimmed.pop()
+    return trimmed
+
+
+def has_non_empty_cells(row: list[str]) -> bool:
+    return any(cell.strip() for cell in row)
+
+
+def get_non_empty_positions(row: list[str]) -> list[int]:
+    return [index for index, cell in enumerate(row) if cell.strip()]
+
+
+def render_sparse_row(row: list[str]) -> str:
+    positions = get_non_empty_positions(row)
+    if not positions:
+        return ""
+
+    if len(positions) == 1:
+        return render_single_value_row(row[positions[0]].strip(), positions[0])
+
+    indent = "  " * max(positions[0] - 1, 0)
+    values = [cell.strip() for cell in row if cell.strip()]
+    return f"{indent}{' | '.join(escape_table_cell(value) for value in values)}"
+
+
+def render_single_value_row(value: str, column_index: int) -> str:
+    indent = "  " * max(column_index - 1, 0)
+    cleaned = value.strip()
+    if not cleaned:
+        return ""
+
+    if is_bullet_item(cleaned):
+        return f"{indent}- {strip_bullet_marker(cleaned)}"
+    if is_numbered_item(cleaned):
+        return f"{indent}{cleaned}"
+
+    heading_level = min(6, 2 + max(column_index - 1, 0))
+    return f"{'#' * heading_level} {cleaned.rstrip('：:').strip()}"
+
+
+def is_bullet_item(value: str) -> bool:
+    return bool(re.match(r"^[·•●▪◦\-*+]\s*", value))
+
+
+def strip_bullet_marker(value: str) -> str:
+    return re.sub(r"^[·•●▪◦\-*+]\s*", "", value).strip()
+
+
+def is_numbered_item(value: str) -> bool:
+    return bool(
+        re.match(r"^(?:[（(]?\d+[)）.、]|[A-Za-z]\.)\s*", value)
+    )
+
+
+def is_table_block_start(rows: list[list[str]], start_index: int) -> bool:
+    current_positions = get_non_empty_positions(rows[start_index])
+    if len(current_positions) <= 1:
+        return False
+    if start_index + 1 >= len(rows):
+        return False
+    next_positions = get_non_empty_positions(rows[start_index + 1])
+    return len(next_positions) > 1
+
+
+def consume_table_block(rows: list[list[str]], start_index: int) -> tuple[list[list[str]], int]:
+    block: list[list[str]] = []
+    row_index = start_index
+    while row_index < len(rows):
+        row = rows[row_index]
+        if not has_non_empty_cells(row):
+            break
+        if len(get_non_empty_positions(row)) <= 1:
+            break
+        block.append(row)
+        row_index += 1
+    return block, row_index
+
+
+def render_table_block(rows: list[list[str]]) -> list[str]:
+    min_column = min(get_non_empty_positions(row)[0] for row in rows)
+    max_column = max(get_non_empty_positions(row)[-1] for row in rows)
+
+    trimmed_rows = [
+        [row[index].strip() if index < len(row) else "" for index in range(min_column, max_column + 1)]
+        for row in rows
+    ]
+    header = build_table_header(trimmed_rows[0])
+    rendered_lines = [
+        f"| {' | '.join(header)} |",
+        f"| {' | '.join('---' for _ in header)} |",
+    ]
+
+    previous_first_value = ""
+    for row in trimmed_rows[1:]:
+        padded_row = row + [""] * (len(header) - len(row))
+        if not any(cell.strip() for cell in padded_row):
+            continue
+        if not padded_row[0].strip() and previous_first_value:
+            padded_row[0] = previous_first_value
+        if padded_row[0].strip():
+            previous_first_value = padded_row[0].strip()
+        rendered_lines.append(
+            f"| {' | '.join(escape_table_cell(cell.strip()) or ' ' for cell in padded_row[:len(header)])} |"
+        )
+
+    return rendered_lines
+
+
+def build_table_header(row: list[str]) -> list[str]:
     headers: list[str] = []
     for index, value in enumerate(row, start=1):
-        header_value = value or f"column_{index}"
-        headers.append(header_value)
+        header_value = value.strip() or f"column_{index}"
+        headers.append(escape_table_cell(header_value))
     return headers
 
 
-def format_row_with_header(row: list[str], header: list[str]) -> str:
-    parts: list[str] = []
-    column_count = max(len(row), len(header))
-    for index in range(column_count):
-        header_value = header[index] if index < len(header) else f"column_{index + 1}"
-        cell_value = row[index] if index < len(row) else ""
-        if not cell_value:
-            continue
-        parts.append(f"{header_value}: {cell_value}")
-    return " | ".join(parts)
+def escape_table_cell(value: str) -> str:
+    return value.replace("|", "/").strip()
 
 
 def format_cell_value(value) -> str:
@@ -335,20 +714,20 @@ def search_knowledge_documents(query: str, limit: int = 5) -> dict[str, object]:
     matches: list[dict[str, object]] = []
 
     for path in get_knowledge_document_paths():
-        content = load_knowledge_document(path)
-        score = score_document(content, query, terms)
-        if score <= 0:
+        document_index = build_document_index(path)
+        best_block = find_best_matching_block(document_index.blocks, query, terms)
+        if best_block is None:
             continue
-
-        lines = content.splitlines()
-        match_index = find_best_match_line(lines, query, terms)
-        metadata = build_document_metadata(path)
+        score = score_block(best_block, query, terms)
         matches.append(
             {
-                **metadata,
+                **document_index.metadata,
                 "score": score,
-                "line_number": match_index + 1,
-                "snippet": build_snippet(lines, match_index),
+                "line_number": best_block.start_line,
+                "end_line": best_block.end_line,
+                "snippet": build_block_snippet(best_block),
+                "block_type": best_block.kind,
+                "section_title": best_block.title,
             }
         )
 
@@ -376,19 +755,22 @@ def read_knowledge_document(document_name: str, section_query: str = "", max_lin
         }
 
     normalized_max_lines = max(max_lines, 1)
-    content = load_knowledge_document(path)
-    lines = content.splitlines()
-    start, end = locate_section(lines, section_query)
-    excerpt_lines = lines[start:min(end, start + normalized_max_lines)]
-    metadata = build_document_metadata(path)
+    document_index = build_document_index(path)
+    excerpt = build_document_excerpt(
+        document_index=document_index,
+        section_query=section_query,
+        max_lines=normalized_max_lines,
+    )
 
     return {
         "ok": True,
         **context,
-        "document": metadata,
+        "document": document_index.metadata,
         "section_query": section_query.strip(),
-        "start_line": start + 1,
-        "end_line": start + len(excerpt_lines),
-        "content": "\n".join(excerpt_lines).strip(),
-        "truncated": start + len(excerpt_lines) < end,
+        "start_line": excerpt["start_line"],
+        "end_line": excerpt["end_line"],
+        "content": excerpt["content"],
+        "truncated": excerpt["truncated"],
+        "block_type": excerpt["block_type"],
+        "section_title": excerpt["section_title"],
     }

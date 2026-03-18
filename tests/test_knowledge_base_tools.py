@@ -34,6 +34,26 @@ class KnowledgeBaseToolTests(unittest.TestCase):
             encoding="utf-8",
         )
 
+        (self.knowledge_root / "feature_spec.csv").write_text(
+            "\n".join(
+                [
+                    "前言,,,,",
+                    "设计目的,,,,",
+                    ",·提升活跃付费率，提高付费,,,",
+                    "服务器,,,,",
+                    ",·礼包配置,,,",
+                    ",,礼包奖励发放规则：,,",
+                    ",,,1.礼包奖励由保底奖励和暴击奖励组成,",
+                    ",,每日限购：,,",
+                    ",,,1.每日限购5次（配置），次日0点重置,",
+                    ",,礼包名称,钻石,金币,限购次数",
+                    ",,精品,143,160000,5",
+                    ",,进阶,330,380000,5",
+                ]
+            ),
+            encoding="utf-8",
+        )
+
         workbook = Workbook()
         summary_sheet = workbook.active
         summary_sheet.title = "Summary"
@@ -50,7 +70,7 @@ class KnowledgeBaseToolTests(unittest.TestCase):
 
         self.settings = SimpleNamespace(
             knowledge_base_dir=str(self.knowledge_root),
-            knowledge_file_types=(".md", ".xlsx"),
+            knowledge_file_types=(".md", ".csv", ".xlsx"),
         )
 
     def test_list_knowledge_documents_uses_local_knowledge_directory(self) -> None:
@@ -58,11 +78,11 @@ class KnowledgeBaseToolTests(unittest.TestCase):
             result = list_knowledge_documents.invoke({})
 
         self.assertTrue(result["ok"])
-        self.assertEqual(result["document_count"], 2)
+        self.assertEqual(result["document_count"], 3)
         self.assertEqual(result["knowledge_base_dir"], str(self.knowledge_root.resolve()))
         self.assertEqual(
             [document["name"] for document in result["documents"]],
-            ["architecture.md", "operations.xlsx"],
+            ["architecture.md", "feature_spec.csv", "operations.xlsx"],
         )
 
     def test_search_knowledge_documents_finds_spreadsheet_content(self) -> None:
@@ -73,6 +93,8 @@ class KnowledgeBaseToolTests(unittest.TestCase):
         self.assertEqual(result["match_count"], 1)
         self.assertEqual(result["documents"][0]["name"], "operations.xlsx")
         self.assertIn("Use the VPN before opening Slack.", result["documents"][0]["snippet"])
+        self.assertEqual(result["documents"][0]["block_type"], "table")
+        self.assertEqual(result["documents"][0]["section_title"], "Sheet: Summary")
 
     def test_read_knowledge_document_reads_matching_sheet_section(self) -> None:
         with patch("tools.knowledge_base.load_settings", return_value=self.settings):
@@ -88,6 +110,37 @@ class KnowledgeBaseToolTests(unittest.TestCase):
         self.assertEqual(result["document"]["name"], "operations.xlsx")
         self.assertIn("## Sheet: Routing", result["content"])
         self.assertIn("knowledge_agent", result["content"])
+        self.assertEqual(result["block_type"], "table")
+        self.assertEqual(result["section_title"], "Sheet: Routing")
+
+    def test_read_knowledge_document_renders_sparse_csv_sections_semantically(self) -> None:
+        with patch("tools.knowledge_base.load_settings", return_value=self.settings):
+            result = read_knowledge_document.invoke(
+                {
+                    "document_name": "feature_spec",
+                    "section_query": "礼包奖励发放规则",
+                    "max_lines": 20,
+                }
+            )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["document"]["name"], "feature_spec.csv")
+        self.assertIn("### 礼包奖励发放规则", result["content"])
+        self.assertIn("1.礼包奖励由保底奖励和暴击奖励组成", result["content"])
+        self.assertNotIn("column_", result["content"])
+        self.assertEqual(result["block_type"], "list")
+        self.assertEqual(result["section_title"], "礼包奖励发放规则")
+
+    def test_search_knowledge_documents_uses_semantic_csv_snippets(self) -> None:
+        with patch("tools.knowledge_base.load_settings", return_value=self.settings):
+            result = search_knowledge_documents.invoke({"query": "每日限购", "limit": 5})
+
+        self.assertTrue(result["ok"])
+        self.assertGreaterEqual(result["match_count"], 1)
+        self.assertIn("### 每日限购", result["documents"][0]["snippet"])
+        self.assertNotIn("column_", result["documents"][0]["snippet"])
+        self.assertIn(result["documents"][0]["block_type"], {"list", "table"})
+        self.assertEqual(result["documents"][0]["section_title"], "每日限购")
 
 
 if __name__ == "__main__":

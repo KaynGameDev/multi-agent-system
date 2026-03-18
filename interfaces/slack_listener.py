@@ -21,12 +21,21 @@ class SlackListener:
         self.agent_graph = agent_graph
         self.settings = settings
         self.app = App(token=settings.slack_bot_token)
+        self._handler: SocketModeHandler | None = None
         self._register_handlers()
 
     def start(self) -> None:
-        handler = SocketModeHandler(self.app, self.settings.slack_app_token)
+        self._handler = SocketModeHandler(self.app, self.settings.slack_app_token)
         print("⚡ Jade Agent is listening on Slack...")
-        handler.start()
+        self._handler.start()
+
+    def stop(self) -> None:
+        if self._handler is None:
+            return
+        try:
+            self._handler.close()
+        finally:
+            self._handler = None
 
     def _register_handlers(self) -> None:
         self.app.event("app_home_opened")(self.handle_app_home_opened)
@@ -70,6 +79,7 @@ class SlackListener:
             user_context = self._load_user_context(user_id)
             initial_state = {
                 "messages": [HumanMessage(content=text)],
+                "interface_name": "slack",
                 "user_id": user_id,
                 "channel_id": channel_id,
                 **user_context,

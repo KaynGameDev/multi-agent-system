@@ -1,9 +1,11 @@
 Project Name: Jade Games Multi-Agent System (MAS)
 
 Overview
-We are building a company-level AI Multi-Agent System in Python to power an internal Slack AI assistant. The system is designed using LangGraph and LangChain and integrates with company tools such as Google Sheets to answer operational questions like project tasks, ownership, schedules, and status.
+We are building a company-level AI Multi-Agent System in Python to power an internal chat assistant. The system is designed using LangGraph and LangChain and integrates with company tools such as Google Sheets to answer operational questions like project tasks, ownership, schedules, and status.
 
-The assistant currently runs as a Slack bot using Slack Bolt Socket Mode.
+The assistant currently runs as:
+• a Slack bot using Slack Bolt Socket Mode
+• a Telegram bot using the Telegram Bot API long-polling interface
 
 Primary goals:
 • Provide a scalable multi-agent architecture
@@ -64,14 +66,14 @@ gateway → project_task_agent → tools → project_task_agent → END
 
 This allows tool-calling loops.
 
-5. Slack Interface Layer
-SlackListener is responsible for:
-• receiving Slack events
-• resolving Slack user identity
+5. Interface Layer
+Interface listeners are responsible for:
+• receiving platform events
+• resolving user identity where possible
 • invoking the graph
-• formatting output before sending to Slack
+• formatting output for the target platform
 
-Slack formatting is applied only at the boundary.
+Slack formatting is applied only at the Slack boundary.
 
 Formatting Strategy
 We use a 3-layer formatting approach:
@@ -176,15 +178,18 @@ general_chat_agent
 project_task_agent
 tool execution
 
-Slack Entry Point
+Interface Entry Points
 Slack integration is implemented in:
 interfaces/slack_listener.py
 
+Telegram integration is implemented in:
+interfaces/telegram_listener.py
+
 Responsibilities:
-• handle Slack events
-• resolve Slack user identity
+• handle incoming platform events
+• resolve user identity when available
 • send messages to the graph
-• apply Slack formatting before sending responses
+• apply interface-specific formatting before sending responses
 
 Current Agents
 GeneralChatAgent

@@ -13,6 +13,7 @@ class AgentState(TypedDict, total=False):
     messages: Annotated[list[AnyMessage], add_messages]
     route: RouteName
     route_reason: str
+    interface_name: str
     user_id: str
     channel_id: str
     user_display_name: str

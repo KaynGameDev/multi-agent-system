@@ -1,6 +1,6 @@
 # Jade Agent Multi-Agent System
 
-A lean LangGraph + Slack + Gemini starter for a company-facing multi-agent assistant.
+A lean LangGraph + Slack/Telegram + Gemini starter for a company-facing multi-agent assistant.
 
 ## Current architecture
 
@@ -29,6 +29,7 @@ agents/workers/
   project_task_agent.py
 interfaces/
   slack_listener.py
+  telegram_listener.py
 tools/
   google_sheets.py
 main.py
@@ -39,13 +40,16 @@ main.py
 Copy `.env.example` to `.env` and fill in the values.
 
 Required:
-- `SLACK_BOT_TOKEN`
-- `SLACK_APP_TOKEN`
 - `GOOGLE_API_KEY`
 - `JADE_PROJECT_SHEET_ID`
 - `GOOGLE_APPLICATION_CREDENTIALS`
 
+Interface configuration:
+- Slack: `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN`
+- Telegram: `TELEGRAM_BOT_TOKEN`
+
 Optional:
+- `TELEGRAM_ALLOWED_CHAT_IDS` (comma-separated chat IDs to allow; default: allow all chats the bot is added to)
 - `GEMINI_MODEL` (default: `gemini-3-flash-preview`)
 - `GEMINI_TEMPERATURE` (default: `0.2`)
 - `PROJECT_SHEET_RANGE` (default: `Tasks!A1:Z`)
@@ -70,6 +74,17 @@ Recommended scopes/events:
   - `app_mention`
   - `message.im`
 
+## Telegram setup
+
+- Create a Telegram bot with BotFather and set `TELEGRAM_BOT_TOKEN`.
+- Add the bot to the target group or supergroup.
+- The bot answers all private chats.
+- In groups and supergroups, the bot answers when:
+  - it is mentioned
+  - a user replies to one of its messages
+  - a user sends `/jade <question>` or `/ask <question>`
+- `TELEGRAM_ALLOWED_CHAT_IDS` can be used to restrict which chats the bot will answer in.
+
 ## Run
 
 ```bash
@@ -78,7 +93,7 @@ python main.py
 
 ## Notes
 
-- Conversation memory is handled with a LangGraph checkpointer keyed by Slack thread/channel.
+- Conversation memory is handled with a LangGraph checkpointer keyed by interface thread/channel.
 - The Google Sheets tool is cached briefly to avoid reading the whole sheet on every request.
 - The knowledge agent reads local files from `KNOWLEDGE_BASE_DIR`; the default local folder is [`data/knowledge/`](/Users/kayngame/jade_ai_core/data/knowledge/).
 - Excel exports from Google Sheets should be placed in `KNOWLEDGE_BASE_DIR` as `.xlsx` or `.xlsm` files.

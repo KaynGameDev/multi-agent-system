@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Sequence
+from threading import Thread
+
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.checkpoint.memory import InMemorySaver
@@ -7,9 +10,10 @@ from langgraph.checkpoint.memory import InMemorySaver
 from core.config import load_settings, validate_bootstrap_settings
 from core.graph import build_agent_graph
 from interfaces.slack_listener import SlackListener
+from interfaces.telegram_listener import TelegramListener
 
 
-def bootstrap_system() -> SlackListener:
+def bootstrap_system() -> list[object]:
     load_dotenv()
     settings = load_settings(force_reload=True)
     validate_bootstrap_settings(settings)
@@ -22,16 +26,53 @@ def bootstrap_system() -> SlackListener:
     checkpointer = InMemorySaver()
     agent_graph = build_agent_graph(llm, checkpointer=checkpointer)
 
+    listeners: list[object] = []
+    if settings.slack_bot_token and settings.slack_app_token:
+        listeners.append(SlackListener(agent_graph=agent_graph, settings=settings))
+    if settings.telegram_bot_token:
+        listeners.append(TelegramListener(agent_graph=agent_graph, settings=settings))
+    if not listeners:
+        raise RuntimeError("No communication interface is configured.")
+
     print("⚙ Compiled Jade Agent graph.")
-    return SlackListener(agent_graph=agent_graph, settings=settings)
+    return listeners
+
+
+def _start_background_listeners(listeners: Sequence[object]) -> list[Thread]:
+    threads: list[Thread] = []
+    for listener in listeners:
+        thread = Thread(
+            target=listener.start,
+            name=listener.__class__.__name__,
+            daemon=True,
+        )
+        thread.start()
+        threads.append(thread)
+    return threads
+
+
+def _stop_listener(listener: object) -> None:
+    stop = getattr(listener, "stop", None)
+    if callable(stop):
+        try:
+            stop()
+        except Exception:
+            pass
 
 
 def main() -> int:
-    listener = bootstrap_system()
+    listeners = bootstrap_system()
     try:
-        listener.start()
+        if len(listeners) == 1:
+            listeners[0].start()
+        else:
+            _start_background_listeners(listeners[:-1])
+            listeners[-1].start()
     except KeyboardInterrupt:
         print("\nStopping Jade Agent...")
+    finally:
+        for listener in reversed(listeners):
+            _stop_listener(listener)
     return 0
 
 

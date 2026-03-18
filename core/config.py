@@ -37,6 +37,8 @@ DEFAULT_KNOWLEDGE_FILE_TYPES = (
 class Settings:
     slack_bot_token: str
     slack_app_token: str
+    telegram_bot_token: str
+    telegram_allowed_chat_ids: tuple[str, ...]
     google_api_key: str
     gemini_model: str
     gemini_temperature: float
@@ -65,6 +67,12 @@ def load_settings(force_reload: bool = False) -> Settings:
         for item in keywords_value.split(",")
         if item.strip()
     ) or DEFAULT_PROJECT_KEYWORDS
+    telegram_allowed_chat_ids_value = os.getenv("TELEGRAM_ALLOWED_CHAT_IDS", "")
+    telegram_allowed_chat_ids = tuple(
+        item.strip()
+        for item in telegram_allowed_chat_ids_value.split(",")
+        if item.strip()
+    )
     knowledge_file_types_value = os.getenv("KNOWLEDGE_FILE_TYPES", "")
     knowledge_file_types = tuple(
         normalize_knowledge_file_type(item)
@@ -75,6 +83,8 @@ def load_settings(force_reload: bool = False) -> Settings:
     _cached_settings = Settings(
         slack_bot_token=os.getenv("SLACK_BOT_TOKEN", ""),
         slack_app_token=os.getenv("SLACK_APP_TOKEN", ""),
+        telegram_bot_token=os.getenv("TELEGRAM_BOT_TOKEN", ""),
+        telegram_allowed_chat_ids=telegram_allowed_chat_ids,
         google_api_key=os.getenv("GOOGLE_API_KEY", ""),
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-3-flash-preview"),
         gemini_temperature=float(os.getenv("GEMINI_TEMPERATURE", "0.2")),
@@ -92,10 +102,12 @@ def load_settings(force_reload: bool = False) -> Settings:
 
 def validate_bootstrap_settings(settings: Settings) -> None:
     missing: list[str] = []
+    slack_configured = bool(settings.slack_bot_token and settings.slack_app_token)
+    partial_slack_config = bool(settings.slack_bot_token or settings.slack_app_token) and not slack_configured
 
-    if not settings.slack_bot_token:
+    if partial_slack_config and not settings.slack_bot_token:
         missing.append("SLACK_BOT_TOKEN")
-    if not settings.slack_app_token:
+    if partial_slack_config and not settings.slack_app_token:
         missing.append("SLACK_APP_TOKEN")
     if not settings.google_api_key:
         missing.append("GOOGLE_API_KEY")
@@ -107,6 +119,12 @@ def validate_bootstrap_settings(settings: Settings) -> None:
     if missing:
         joined = ", ".join(missing)
         raise RuntimeError(f"Missing required environment variables: {joined}")
+
+    if not slack_configured and not settings.telegram_bot_token:
+        raise RuntimeError(
+            "At least one interface must be configured: Slack "
+            "(SLACK_BOT_TOKEN + SLACK_APP_TOKEN) or Telegram (TELEGRAM_BOT_TOKEN)."
+        )
 
 
 def normalize_knowledge_file_type(value: str) -> str:

@@ -14,6 +14,8 @@ KNOWLEDGE_AGENT_PROMPT = (
     "Answer questions about internal documentation, architecture, setup, workflow, and operational guidance that are documented in the knowledge base. "
     "Use the knowledge tools whenever the answer depends on internal docs or project documentation. "
     "Do not invent undocumented behavior. If the documentation is missing or unclear, say so plainly. "
+    "After using a knowledge tool, answer the user's question directly instead of repeating raw tool output unless the user explicitly asks to see the document or excerpt. "
+    "For spreadsheet or CSV-style documents, extract the relevant rules, limits, steps, or conclusions instead of reciting raw rows. "
     "Write concise, plain Markdown. "
     "When helpful, mention which document you used."
 )
@@ -39,6 +41,38 @@ REFERENTIAL_KNOWLEDGE_QUERY_PATTERNS = (
     r"详情",
 )
 
+LIST_KNOWLEDGE_QUERY_PATTERNS = (
+    r"\blist\b.*\bdocs?\b",
+    r"\bshow\b.*\bdocs?\b",
+    r"\bwhat docs\b",
+    r"\bwhat documents\b",
+    r"\bavailable docs?\b",
+    r"\bavailable documents\b",
+    r"有哪些文档",
+    r"文档列表",
+)
+
+READ_KNOWLEDGE_QUERY_PATTERNS = (
+    r"\bread\b",
+    r"\bshow\b.*\bdoc",
+    r"\bopen\b.*\bdoc",
+    r"\bsection\b",
+    r"\bdocument\b",
+    r"\bfull text\b",
+    r"\boriginal text\b",
+    r"\braw\b",
+    r"\bexcerpt\b",
+    r"\bshow me\b",
+    r"\bread that\b",
+    r"\bshow that\b",
+    r"\bdetails?\b",
+    r"\b全文\b",
+    r"\b原文\b",
+    r"\b内容\b",
+    r"\b读一下\b",
+    r"\b展示\b",
+)
+
 
 class KnowledgeAgentNode:
     def __init__(self, llm, tools: list) -> None:
@@ -55,14 +89,14 @@ class KnowledgeAgentNode:
 
 
 def build_knowledge_response(state: AgentState) -> str | None:
+    latest_user_text = get_latest_user_text(state)
     latest_messages = state.get("messages", [])
     if latest_messages:
         latest_message = latest_messages[-1]
         payload = get_tool_payload(latest_message)
-        if payload is not None:
+        if payload is not None and should_render_latest_tool_payload(latest_user_text, payload):
             return render_knowledge_payload(payload)
 
-    latest_user_text = get_latest_user_text(state)
     if not should_render_knowledge_follow_up(latest_user_text):
         return None
 
@@ -77,6 +111,20 @@ def should_render_knowledge_follow_up(user_text: str) -> bool:
     if not normalized:
         return False
     return any(re.search(pattern, normalized) for pattern in REFERENTIAL_KNOWLEDGE_QUERY_PATTERNS)
+
+
+def should_render_latest_tool_payload(user_text: str, payload: dict) -> bool:
+    normalized = user_text.strip().lower()
+    if not normalized:
+        return False
+
+    if payload.get("ok") is False:
+        return True
+    if is_list_like_payload(payload):
+        return any(re.search(pattern, normalized) for pattern in LIST_KNOWLEDGE_QUERY_PATTERNS)
+    if is_read_like_payload(payload):
+        return any(re.search(pattern, normalized) for pattern in READ_KNOWLEDGE_QUERY_PATTERNS)
+    return False
 
 
 def get_latest_user_text(state: AgentState) -> str:
@@ -125,3 +173,11 @@ def get_tool_payload(message) -> dict | None:
     if not is_knowledge_payload(payload):
         return None
     return payload
+
+
+def is_list_like_payload(payload: dict) -> bool:
+    return isinstance(payload.get("documents"), list) and "document" not in payload
+
+
+def is_read_like_payload(payload: dict) -> bool:
+    return isinstance(payload.get("document"), dict) and "content" in payload

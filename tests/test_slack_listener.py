@@ -8,7 +8,11 @@ from interfaces.slack_listener import SlackListener
 
 
 class DummyGraph:
+    def __init__(self) -> None:
+        self.invocations: list[dict] = []
+
     def invoke(self, initial_state, config=None):
+        self.invocations.append({"initial_state": initial_state, "config": config})
         return {"messages": []}
 
 
@@ -48,6 +52,8 @@ def build_settings() -> Settings:
     return Settings(
         slack_bot_token="xoxb-test",
         slack_app_token="xapp-test",
+        telegram_bot_token="",
+        telegram_allowed_chat_ids=(),
         google_api_key="test-key",
         gemini_model="gemini-3-flash-preview",
         gemini_temperature=0.2,
@@ -117,6 +123,27 @@ class SlackListenerTests(unittest.TestCase):
         published = self.listener.app.client.views_publish_calls[0]
         self.assertEqual(published["user_id"], "U123")
         self.assertEqual(published["view"]["type"], "home")
+
+    def test_process_and_respond_sets_slack_interface_name(self) -> None:
+        say_calls = []
+
+        def say(**kwargs):
+            say_calls.append(kwargs)
+
+        event = {
+            "user": "U123",
+            "channel": "D123",
+            "channel_type": "im",
+            "ts": "1710.600",
+            "text": "hello",
+        }
+
+        self.listener.process_and_respond(event=event, say=say, is_mention=False)
+
+        self.assertEqual(len(say_calls), 1)
+        self.assertEqual(len(self.listener.agent_graph.invocations), 1)
+        invocation = self.listener.agent_graph.invocations[0]
+        self.assertEqual(invocation["initial_state"]["interface_name"], "slack")
 
 
 if __name__ == "__main__":

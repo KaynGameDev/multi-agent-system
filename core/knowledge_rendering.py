@@ -107,6 +107,8 @@ def format_document_block(index: int, document: dict, *, include_snippet: bool =
     title = first_non_empty(document.get("title"), document.get("name"), "Untitled document")
     path = first_non_empty(document.get("path"))
     file_type = first_non_empty(document.get("file_type"))
+    section_title = first_non_empty(document.get("section_title"))
+    block_type = first_non_empty(document.get("block_type"))
     snippet = compact_snippet(first_non_empty(document.get("snippet")))
 
     lines = [f"{index}. {title}"]
@@ -114,6 +116,8 @@ def format_document_block(index: int, document: dict, *, include_snippet: bool =
         [
             labeled_value("Path", path),
             labeled_value("Type", file_type),
+            labeled_value("Section", section_title),
+            labeled_value("Block", block_type),
         ]
     )
     if metadata:

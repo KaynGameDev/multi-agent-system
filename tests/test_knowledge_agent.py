@@ -58,11 +58,11 @@ class DummyLLM:
 
 
 class KnowledgeAgentTests(unittest.TestCase):
-    def test_latest_knowledge_tool_message_renders_deterministically(self) -> None:
+    def test_latest_knowledge_tool_message_renders_deterministically_for_list_request(self) -> None:
         node = KnowledgeAgentNode(DummyLLM(fail_on_invoke=True), tools=[])
         state = {
             "messages": [
-                HumanMessage(content="Search the docs"),
+                HumanMessage(content="List the docs"),
                 ToolMessage(content=json.dumps(LIST_PAYLOAD), tool_call_id="tool-1"),
             ]
         }
@@ -93,8 +93,8 @@ class KnowledgeAgentTests(unittest.TestCase):
         node = KnowledgeAgentNode(llm, tools=[])
         state = {
             "messages": [
-                ToolMessage(content=json.dumps(LIST_PAYLOAD), tool_call_id="tool-1"),
                 HumanMessage(content="Explain the reward logic in simple terms"),
+                ToolMessage(content=json.dumps(READ_PAYLOAD), tool_call_id="tool-1"),
             ]
         }
 
@@ -103,7 +103,7 @@ class KnowledgeAgentTests(unittest.TestCase):
         self.assertEqual(llm.invocations, 1)
         self.assertEqual(result["messages"][0].content, "Synthesized answer from the model")
 
-    def test_rendered_read_output_survives_slack_boundary_formatting(self) -> None:
+    def test_explicit_read_request_renders_read_payload_deterministically(self) -> None:
         node = KnowledgeAgentNode(DummyLLM(fail_on_invoke=True), tools=[])
         state = {
             "messages": [
