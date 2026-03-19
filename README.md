@@ -57,6 +57,8 @@ Optional:
 - `SLACK_THINKING_REACTION` (default: `eyes`)
 - `KNOWLEDGE_BASE_DIR` (default: `data/knowledge`)
 - `KNOWLEDGE_FILE_TYPES` (default: `.md,.txt,.rst,.csv,.tsv,.xlsx,.xlsm`)
+- `KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH` (default: `data/knowledge/google_sheets_catalog.json`)
+- `KNOWLEDGE_GOOGLE_SHEETS_CACHE_TTL_SECONDS` (default: `120`)
 
 ## Slack setup
 
@@ -96,5 +98,13 @@ python main.py
 - Conversation memory is handled with a LangGraph checkpointer keyed by interface thread/channel.
 - The Google Sheets tool is cached briefly to avoid reading the whole sheet on every request.
 - The knowledge agent reads local files from `KNOWLEDGE_BASE_DIR`; the default local folder is [`data/knowledge/`](/Users/kayngame/jade_ai_core/data/knowledge/).
+- The knowledge agent can also read curated online Google Sheets listed in `KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH`.
 - Excel exports from Google Sheets should be placed in `KNOWLEDGE_BASE_DIR` as `.xlsx` or `.xlsm` files.
+- The online-sheet catalog is a JSON file with one document per spreadsheet. Use [`data/knowledge/google_sheets_catalog.example.json`](/Users/kayngame/jade_ai_core/data/knowledge/google_sheets_catalog.example.json) as the template.
+- Each catalog entry supports:
+  - `spreadsheet_id`
+  - `title`
+  - `aliases`
+  - `tabs` to allow specific tabs only
+  - `ranges` to restrict tab reads to a specific A1 range
 - Do **not** commit `.env`, `credentials.json`, `.venv`, or IDE folders.

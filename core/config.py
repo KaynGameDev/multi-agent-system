@@ -31,6 +31,8 @@ DEFAULT_KNOWLEDGE_FILE_TYPES = (
     ".xlsx",
     ".xlsm",
 )
+DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH = "data/knowledge/google_sheets_catalog.json"
+DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CACHE_TTL_SECONDS = 120
 
 
 @dataclass(frozen=True)
@@ -50,6 +52,8 @@ class Settings:
     project_lookup_keywords: tuple[str, ...]
     knowledge_base_dir: str
     knowledge_file_types: tuple[str, ...]
+    knowledge_google_sheets_catalog_path: str = DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH
+    knowledge_google_sheets_cache_ttl_seconds: int = DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CACHE_TTL_SECONDS
 
 
 _cached_settings: Settings | None = None
@@ -96,6 +100,19 @@ def load_settings(force_reload: bool = False) -> Settings:
         project_lookup_keywords=keywords,
         knowledge_base_dir=os.getenv("KNOWLEDGE_BASE_DIR", DEFAULT_KNOWLEDGE_BASE_DIR).strip() or DEFAULT_KNOWLEDGE_BASE_DIR,
         knowledge_file_types=knowledge_file_types,
+        knowledge_google_sheets_catalog_path=(
+            os.getenv(
+                "KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH",
+                DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH,
+            ).strip()
+            or DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH
+        ),
+        knowledge_google_sheets_cache_ttl_seconds=int(
+            os.getenv(
+                "KNOWLEDGE_GOOGLE_SHEETS_CACHE_TTL_SECONDS",
+                str(DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CACHE_TTL_SECONDS),
+            )
+        ),
     )
     return _cached_settings
 

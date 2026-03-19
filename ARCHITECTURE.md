@@ -202,6 +202,15 @@ Current v1 knowledge source:
 • local files under `KNOWLEDGE_BASE_DIR`
 • recommended default folder: `data/knowledge/`
 • supported formats include Markdown/text and Excel exports (`.xlsx`, `.xlsm`)
+• curated online Google Sheets listed in `KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH`
+
+Online knowledge-sheet catalog:
+• one JSON entry per spreadsheet
+• each entry defines `spreadsheet_id`
+• optional `title` and `aliases` improve document resolution
+• optional `tabs` restricts which tabs are searchable
+• optional `ranges` restricts tab reads to approved A1 ranges
+• online sheets are rendered into the same semantic block pipeline used for local CSV/XLSX docs
 
 ProjectTaskAgent
 Handles queries that require project data and can call tools.

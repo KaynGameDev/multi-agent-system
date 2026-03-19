@@ -59,6 +59,7 @@ logs/
 # Local knowledge documents
 data/knowledge/*
 !data/knowledge/.gitkeep
+!data/knowledge/google_sheets_catalog.example.json
 
 # PyInstaller
 *.manifest

@@ -97,6 +97,8 @@ class GoogleSheetsClient:
     def get_records(self, force_refresh: bool = False) -> list[dict[str, str]]:
         settings = load_settings()
         now = time.time()
+        if not settings.jade_project_sheet_id:
+            raise RuntimeError("JADE_PROJECT_SHEET_ID is not set.")
 
         if (
             not force_refresh
@@ -230,29 +232,35 @@ class GoogleSheetsClient:
         return TaskSearchResult(records=matches, total_count=total_count)
 
     def _get_service(self):
-        if self._service is not None:
-            return self._service
-
-        settings = load_settings()
-
-        if not settings.google_application_credentials:
-            raise RuntimeError("GOOGLE_APPLICATION_CREDENTIALS is not set.")
-        if not settings.jade_project_sheet_id:
-            raise RuntimeError("JADE_PROJECT_SHEET_ID is not set.")
-
-        credentials_path = Path(settings.google_application_credentials)
-        if not credentials_path.exists():
-            raise RuntimeError(f"Google credentials file not found: {credentials_path}")
-
-        credentials = service_account.Credentials.from_service_account_file(
-            os.fspath(credentials_path),
-            scopes=SCOPES,
-        )
-        self._service = build("sheets", "v4", credentials=credentials)
+        if self._service is None:
+            self._service = get_google_sheets_service()
         return self._service
 
 
 client = GoogleSheetsClient()
+_shared_service = None
+
+
+def get_google_sheets_service():
+    global _shared_service
+
+    if _shared_service is not None:
+        return _shared_service
+
+    settings = load_settings()
+    if not settings.google_application_credentials:
+        raise RuntimeError("GOOGLE_APPLICATION_CREDENTIALS is not set.")
+
+    credentials_path = Path(settings.google_application_credentials)
+    if not credentials_path.exists():
+        raise RuntimeError(f"Google credentials file not found: {credentials_path}")
+
+    credentials = service_account.Credentials.from_service_account_file(
+        os.fspath(credentials_path),
+        scopes=SCOPES,
+    )
+    _shared_service = build("sheets", "v4", credentials=credentials)
+    return _shared_service
 
 
 @tool

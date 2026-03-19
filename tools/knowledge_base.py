@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import csv
+import json
 import re
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Iterable
@@ -9,9 +11,22 @@ from typing import Iterable
 from langchain_core.tools import tool
 from openpyxl import load_workbook
 
-from core.config import load_settings
+from core.config import DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH, load_settings
+from tools.google_sheets import get_google_sheets_service
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
+
+
+@dataclass(frozen=True)
+class KnowledgeSource:
+    source_id: str
+    source_type: str
+    metadata: dict[str, str]
+    aliases: tuple[str, ...] = ()
+    local_path: Path | None = None
+    spreadsheet_id: str = ""
+    tabs: tuple[str, ...] = ()
+    tab_ranges: dict[str, str] | None = None
 
 
 @dataclass(frozen=True)
@@ -25,11 +40,29 @@ class KnowledgeBlock:
 
 @dataclass(frozen=True)
 class KnowledgeDocumentIndex:
-    path: Path
+    path: str
     metadata: dict[str, str]
     content: str
     lines: list[str]
     blocks: list[KnowledgeBlock]
+
+
+@dataclass(frozen=True)
+class GoogleSheetsKnowledgeCatalogEntry:
+    spreadsheet_id: str
+    title: str
+    aliases: tuple[str, ...]
+    tabs: tuple[str, ...]
+    tab_ranges: dict[str, str]
+
+
+@dataclass
+class KnowledgeIndexCacheEntry:
+    created_at: float
+    index: KnowledgeDocumentIndex
+
+
+_google_sheet_index_cache: dict[str, KnowledgeIndexCacheEntry] = {}
 
 
 def get_knowledge_base_root() -> Path:
@@ -43,6 +76,24 @@ def get_knowledge_base_root() -> Path:
 def get_supported_knowledge_file_types() -> tuple[str, ...]:
     settings = load_settings()
     return tuple(file_type.lower() for file_type in settings.knowledge_file_types)
+
+
+def get_google_sheets_catalog_path() -> Path:
+    settings = load_settings()
+    configured_path = getattr(
+        settings,
+        "knowledge_google_sheets_catalog_path",
+        DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH,
+    )
+    resolved_path = Path(configured_path).expanduser()
+    if not resolved_path.is_absolute():
+        resolved_path = PROJECT_ROOT / resolved_path
+    return resolved_path.resolve()
+
+
+def get_google_sheets_cache_ttl_seconds() -> int:
+    settings = load_settings()
+    return max(int(getattr(settings, "knowledge_google_sheets_cache_ttl_seconds", 120)), 1)
 
 
 def get_knowledge_document_paths() -> list[Path]:
@@ -69,6 +120,101 @@ def is_hidden_path(path: Path, root: Path) -> bool:
     except ValueError:
         relative_path = path
     return any(part.startswith(".") for part in relative_path.parts)
+
+
+def get_knowledge_sources() -> list[KnowledgeSource]:
+    sources = [build_local_knowledge_source(path) for path in get_knowledge_document_paths()]
+    sources.extend(build_google_sheet_knowledge_sources())
+    return sources
+
+
+def build_local_knowledge_source(path: Path) -> KnowledgeSource:
+    metadata = build_document_metadata(path)
+    metadata["source_type"] = "local_file"
+    return KnowledgeSource(
+        source_id=f"local:{path.resolve()}",
+        source_type="local_file",
+        metadata=metadata,
+        aliases=(),
+        local_path=path,
+    )
+
+
+def build_google_sheet_knowledge_sources() -> list[KnowledgeSource]:
+    sources: list[KnowledgeSource] = []
+    for entry in load_google_sheets_catalog_entries():
+        metadata = {
+            "name": entry.title or entry.spreadsheet_id,
+            "title": entry.title or entry.spreadsheet_id,
+            "path": f"google_sheets/{entry.spreadsheet_id}",
+            "file_type": "google_sheet",
+            "source_type": "google_sheet",
+            "spreadsheet_id": entry.spreadsheet_id,
+        }
+        sources.append(
+            KnowledgeSource(
+                source_id=f"google_sheet:{entry.spreadsheet_id}",
+                source_type="google_sheet",
+                metadata=metadata,
+                aliases=entry.aliases,
+                spreadsheet_id=entry.spreadsheet_id,
+                tabs=entry.tabs,
+                tab_ranges=entry.tab_ranges,
+            )
+        )
+    return sources
+
+
+def load_google_sheets_catalog_entries() -> list[GoogleSheetsKnowledgeCatalogEntry]:
+    catalog_path = get_google_sheets_catalog_path()
+    if not catalog_path.exists():
+        return []
+
+    raw_catalog = json.loads(catalog_path.read_text(encoding="utf-8"))
+    if isinstance(raw_catalog, dict):
+        raw_entries = raw_catalog.get("documents", [])
+    elif isinstance(raw_catalog, list):
+        raw_entries = raw_catalog
+    else:
+        raise RuntimeError("Google Sheets knowledge catalog must be a JSON object or list.")
+
+    entries: list[GoogleSheetsKnowledgeCatalogEntry] = []
+    for raw_entry in raw_entries:
+        if not isinstance(raw_entry, dict):
+            continue
+        spreadsheet_id = str(raw_entry.get("spreadsheet_id", "")).strip()
+        if not spreadsheet_id:
+            continue
+
+        title = str(raw_entry.get("title", "")).strip() or spreadsheet_id
+        aliases = tuple(
+            alias.strip()
+            for alias in raw_entry.get("aliases", [])
+            if isinstance(alias, str) and alias.strip()
+        )
+        tabs = tuple(
+            tab.strip()
+            for tab in raw_entry.get("tabs", [])
+            if isinstance(tab, str) and tab.strip()
+        )
+        raw_ranges = raw_entry.get("ranges", {})
+        tab_ranges = {
+            str(tab).strip(): str(range_value).strip()
+            for tab, range_value in raw_ranges.items()
+            if str(tab).strip() and str(range_value).strip()
+        } if isinstance(raw_ranges, dict) else {}
+
+        entries.append(
+            GoogleSheetsKnowledgeCatalogEntry(
+                spreadsheet_id=spreadsheet_id,
+                title=title,
+                aliases=aliases,
+                tabs=tabs,
+                tab_ranges=tab_ranges,
+            )
+        )
+
+    return entries
 
 
 def load_knowledge_document(path: Path) -> str:
@@ -109,13 +255,52 @@ def extract_document_title(content: str, *, default: str) -> str:
     return default
 
 
-def build_document_index(path: Path) -> KnowledgeDocumentIndex:
-    content = load_knowledge_document(path)
+def build_document_index(source: KnowledgeSource) -> KnowledgeDocumentIndex:
+    if source.source_type == "google_sheet":
+        return build_google_sheet_document_index(source)
+    if source.local_path is None:
+        raise RuntimeError(f"Local knowledge source is missing a file path: {source.source_id}")
+
+    content = load_knowledge_document(source.local_path)
+    metadata = build_document_metadata_from_content(source.local_path, content)
+    metadata["source_type"] = "local_file"
+    return build_document_index_from_content(
+        document_path=metadata.get("path", source.local_path.name),
+        content=content,
+        metadata=metadata,
+    )
+
+
+def build_google_sheet_document_index(source: KnowledgeSource) -> KnowledgeDocumentIndex:
+    cached_entry = _google_sheet_index_cache.get(source.source_id)
+    cache_ttl_seconds = get_google_sheets_cache_ttl_seconds()
+    now = time.time()
+    if cached_entry is not None and now - cached_entry.created_at < cache_ttl_seconds:
+        return cached_entry.index
+
+    content, metadata = fetch_google_sheet_document_content(source)
+    index = build_document_index_from_content(
+        document_path=metadata.get("path", source.source_id),
+        content=content,
+        metadata=metadata,
+    )
+    _google_sheet_index_cache[source.source_id] = KnowledgeIndexCacheEntry(
+        created_at=now,
+        index=index,
+    )
+    return index
+
+
+def build_document_index_from_content(
+    *,
+    document_path: str,
+    content: str,
+    metadata: dict[str, str],
+) -> KnowledgeDocumentIndex:
     lines = content.splitlines()
-    metadata = build_document_metadata_from_content(path, content)
     blocks = extract_document_blocks(lines)
     return KnowledgeDocumentIndex(
-        path=path,
+        path=document_path,
         metadata=metadata,
         content=content,
         lines=lines,
@@ -133,6 +318,96 @@ def build_document_metadata_from_content(path: Path, content: str) -> dict[str, 
         "path": relative_path,
         "file_type": path.suffix.lower(),
     }
+
+
+def fetch_google_sheet_document_content(source: KnowledgeSource) -> tuple[str, dict[str, str]]:
+    if not source.spreadsheet_id:
+        raise RuntimeError(f"Google Sheet knowledge source is missing a spreadsheet ID: {source.source_id}")
+
+    service = get_google_sheets_service()
+    spreadsheet = service.spreadsheets().get(spreadsheetId=source.spreadsheet_id).execute()
+    spreadsheet_properties = spreadsheet.get("properties", {})
+    spreadsheet_title = str(spreadsheet_properties.get("title", "")).strip() or source.metadata.get(
+        "title",
+        source.spreadsheet_id,
+    )
+    available_tabs = [
+        str(sheet.get("properties", {}).get("title", "")).strip()
+        for sheet in spreadsheet.get("sheets", [])
+        if str(sheet.get("properties", {}).get("title", "")).strip()
+    ]
+    tabs_to_fetch = resolve_google_sheet_tabs(source, available_tabs)
+
+    if not tabs_to_fetch:
+        content = f"# {spreadsheet_title}\n(empty spreadsheet)"
+        return content, build_google_sheet_metadata(source, spreadsheet_title)
+
+    requested_ranges = [
+        build_google_sheet_a1_range(tab_name, (source.tab_ranges or {}).get(tab_name, ""))
+        for tab_name in tabs_to_fetch
+    ]
+    values_result = (
+        service.spreadsheets()
+        .values()
+        .batchGet(spreadsheetId=source.spreadsheet_id, ranges=requested_ranges)
+        .execute()
+    )
+    value_ranges = values_result.get("valueRanges", [])
+
+    lines = [f"# {spreadsheet_title}"]
+    for index, tab_name in enumerate(tabs_to_fetch):
+        lines.append(f"## Sheet: {tab_name}")
+        value_range = value_ranges[index] if index < len(value_ranges) else {}
+        rows = [
+            [format_cell_value(cell) for cell in row]
+            for row in value_range.get("values", [])
+            if isinstance(row, list)
+        ]
+        lines.extend(render_sheet_rows(rows))
+
+    return "\n".join(line for line in lines if line).strip(), build_google_sheet_metadata(source, spreadsheet_title)
+
+
+def build_google_sheet_metadata(source: KnowledgeSource, title: str) -> dict[str, str]:
+    return {
+        "name": title,
+        "title": title,
+        "path": source.metadata.get("path", f"google_sheets/{source.spreadsheet_id}"),
+        "file_type": "google_sheet",
+        "source_type": "google_sheet",
+        "spreadsheet_id": source.spreadsheet_id,
+    }
+
+
+def resolve_google_sheet_tabs(source: KnowledgeSource, available_tabs: list[str]) -> list[str]:
+    if source.tabs:
+        requested_tabs = list(source.tabs)
+    elif source.tab_ranges:
+        requested_tabs = list(source.tab_ranges.keys())
+    else:
+        requested_tabs = list(available_tabs)
+
+    missing_tabs = [tab for tab in requested_tabs if tab not in available_tabs]
+    if missing_tabs:
+        raise RuntimeError(
+            "Google Sheets knowledge source is configured with missing tabs: "
+            + ", ".join(missing_tabs)
+        )
+    return requested_tabs
+
+
+def build_google_sheet_a1_range(tab_name: str, configured_range: str) -> str:
+    normalized_range = configured_range.strip()
+    if not normalized_range:
+        return quote_google_sheet_name(tab_name)
+    if "!" in normalized_range:
+        return normalized_range
+    return f"{quote_google_sheet_name(tab_name)}!{normalized_range}"
+
+
+def quote_google_sheet_name(tab_name: str) -> str:
+    escaped_name = tab_name.replace("'", "''")
+    return f"'{escaped_name}'"
 
 
 def extract_document_blocks(lines: list[str]) -> list[KnowledgeBlock]:
@@ -429,27 +704,35 @@ def heading_level(line: str) -> int:
     return len(match.group(1))
 
 
-def resolve_document(document_name: str) -> Path | None:
+def resolve_document(document_name: str) -> KnowledgeSource | None:
     normalized_query = document_name.strip().lower()
     if not normalized_query:
         return None
 
-    exact_matches: list[Path] = []
-    partial_matches: list[Path] = []
+    exact_matches: list[KnowledgeSource] = []
+    partial_matches: list[KnowledgeSource] = []
 
-    for path in get_knowledge_document_paths():
-        metadata = build_document_metadata(path)
+    for source in get_knowledge_sources():
         candidates = {
-            path.name.lower(),
-            path.stem.lower(),
-            metadata["title"].lower(),
-            metadata["path"].lower(),
+            str(value).strip().lower()
+            for value in [
+                source.metadata.get("name", ""),
+                source.metadata.get("title", ""),
+                source.metadata.get("path", ""),
+                source.spreadsheet_id,
+                *(alias for alias in source.aliases),
+            ]
+            if str(value).strip()
         }
+        if source.local_path is not None:
+            candidates.add(source.local_path.name.lower())
+            candidates.add(source.local_path.stem.lower())
+
         if normalized_query in candidates:
-            exact_matches.append(path)
+            exact_matches.append(source)
             continue
         if any(normalized_query in candidate for candidate in candidates):
-            partial_matches.append(path)
+            partial_matches.append(source)
 
     if exact_matches:
         return exact_matches[0]
@@ -675,18 +958,31 @@ def format_cell_value(value) -> str:
 
 def build_knowledge_base_context() -> dict[str, object]:
     root = get_knowledge_base_root()
+    catalog_path = get_google_sheets_catalog_path()
     return {
         "knowledge_base_dir": str(root),
         "exists": root.exists() and root.is_dir(),
         "supported_file_types": list(get_supported_knowledge_file_types()),
+        "google_sheets_catalog_path": str(catalog_path),
+        "google_sheets_catalog_exists": catalog_path.exists(),
     }
 
 
 @tool
 def list_knowledge_documents() -> dict[str, object]:
-    """List the internal documents available to the knowledge agent."""
+    """List knowledge documents available to the knowledge agent."""
     context = build_knowledge_base_context()
-    documents = [build_document_metadata(path) for path in get_knowledge_document_paths()]
+    try:
+        documents = [source.metadata for source in get_knowledge_sources()]
+    except Exception as exc:
+        return {
+            "ok": False,
+            **context,
+            "error": str(exc),
+            "document_count": 0,
+            "documents": [],
+        }
+
     return {
         "ok": True,
         **context,
@@ -697,7 +993,7 @@ def list_knowledge_documents() -> dict[str, object]:
 
 @tool
 def search_knowledge_documents(query: str, limit: int = 5) -> dict[str, object]:
-    """Search local knowledge documents and return structured matches."""
+    """Search knowledge documents from local files and curated online sheets."""
     normalized_limit = max(limit, 1)
     context = build_knowledge_base_context()
     if not query.strip():
@@ -713,8 +1009,20 @@ def search_knowledge_documents(query: str, limit: int = 5) -> dict[str, object]:
     terms = normalize_query_terms(query)
     matches: list[dict[str, object]] = []
 
-    for path in get_knowledge_document_paths():
-        document_index = build_document_index(path)
+    try:
+        sources = get_knowledge_sources()
+    except Exception as exc:
+        return {
+            "ok": False,
+            **context,
+            "error": str(exc),
+            "query": query,
+            "match_count": 0,
+            "documents": [],
+        }
+
+    for source in sources:
+        document_index = build_document_index(source)
         best_block = find_best_matching_block(document_index.blocks, query, terms)
         if best_block is None:
             continue
@@ -743,10 +1051,19 @@ def search_knowledge_documents(query: str, limit: int = 5) -> dict[str, object]:
 
 @tool
 def read_knowledge_document(document_name: str, section_query: str = "", max_lines: int = 80) -> dict[str, object]:
-    """Read a local knowledge document, optionally focusing on a matching section."""
+    """Read a knowledge document, optionally focusing on a matching section."""
     context = build_knowledge_base_context()
-    path = resolve_document(document_name)
-    if path is None:
+    try:
+        source = resolve_document(document_name)
+    except Exception as exc:
+        return {
+            "ok": False,
+            **context,
+            "error": str(exc),
+            "document_name": document_name,
+        }
+
+    if source is None:
         return {
             "ok": False,
             **context,
@@ -755,7 +1072,7 @@ def read_knowledge_document(document_name: str, section_query: str = "", max_lin
         }
 
     normalized_max_lines = max(max_lines, 1)
-    document_index = build_document_index(path)
+    document_index = build_document_index(source)
     excerpt = build_document_excerpt(
         document_index=document_index,
         section_query=section_query,
