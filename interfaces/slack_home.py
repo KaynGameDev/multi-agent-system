@@ -29,7 +29,7 @@ def build_home_view(user_context: dict | None = None) -> dict:
                     "type": "mrkdwn",
                     "text": (
                         f"*Hi {display_name}.* I'm your internal Slack assistant.\n"
-                        "I can help with project tracker questions, internal documentation, and general chat."
+                        "I can help with project tracker questions, internal documentation, document conversion, and general chat."
                         f"{identity_line}"
                     ),
                 },
@@ -43,6 +43,7 @@ def build_home_view(user_context: dict | None = None) -> dict:
                         "*What I can help with*\n"
                         "• Project tracker: task owners, deadlines, overdue items, and weekly workload\n"
                         "• Documentation: summarize design docs, setup docs, and internal workflow notes\n"
+                        "• Conversion: upload a supported design document and I can rebuild it into the canonical knowledge format\n"
                         "• General help: quick questions and everyday chat"
                     ),
                 },
@@ -55,6 +56,7 @@ def build_home_view(user_context: dict | None = None) -> dict:
                         "*Try asking*\n"
                         "• What are my tasks due this week?\n"
                         "• Summarize the latest design document in knowledge base\n"
+                        "• Convert this uploaded feature spec into the canonical package\n"
                         "• What does our architecture say about tool formatting?"
                     ),
                 },

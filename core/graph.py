@@ -5,17 +5,20 @@ from collections.abc import Iterable, Sequence
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
+from agents.workers.document_conversion_agent import DocumentConversionAgentNode
 from agents.workers.general_chat_agent import GeneralChatAgentNode
 from agents.workers.knowledge_agent import KnowledgeAgentNode
 from agents.workers.project_task_agent import ProjectTaskAgentNode
 from core.agent_registry import AgentRegistration
+from core.config import load_settings
 from core.gateway import GatewayNode
 from core.state import AgentState
 from tools.google_sheets import get_project_sheet_overview, read_project_tasks
 from tools.knowledge_base import list_knowledge_documents, read_knowledge_document, search_knowledge_documents
 
 
-def build_default_agent_registrations() -> tuple[AgentRegistration, ...]:
+def build_default_agent_registrations(settings=None) -> tuple[AgentRegistration, ...]:
+    resolved_settings = settings or load_settings()
     knowledge_tools = (
         list_knowledge_documents,
         search_knowledge_documents,
@@ -47,11 +50,19 @@ def build_default_agent_registrations() -> tuple[AgentRegistration, ...]:
             build_node=lambda llm, tools=project_tools: ProjectTaskAgentNode(llm, list(tools)),
             tools=project_tools,
         ),
+        AgentRegistration(
+            name="document_conversion_agent",
+            description=(
+                "Use for Slack-driven design document conversion, canonical knowledge package staging, "
+                "follow-up questions about missing conversion fields, and approval-gated publishing."
+            ),
+            build_node=lambda llm, settings=resolved_settings: DocumentConversionAgentNode(llm, settings=settings),
+        ),
     )
 
 
-def normalize_agent_registrations(agent_registrations: Sequence[AgentRegistration] | None) -> tuple[AgentRegistration, ...]:
-    registrations = tuple(agent_registrations or build_default_agent_registrations())
+def normalize_agent_registrations(agent_registrations: Sequence[AgentRegistration] | None, *, settings=None) -> tuple[AgentRegistration, ...]:
+    registrations = tuple(agent_registrations or build_default_agent_registrations(settings=settings))
     if not registrations:
         raise ValueError("At least one agent registration is required.")
 
@@ -94,8 +105,15 @@ def resolve_gateway_route(
     return default_route
 
 
-def build_graph(llm, checkpointer=None, *, agent_registrations: Sequence[AgentRegistration] | None = None, default_route: str | None = None):
-    registrations = normalize_agent_registrations(agent_registrations)
+def build_graph(
+    llm,
+    checkpointer=None,
+    *,
+    agent_registrations: Sequence[AgentRegistration] | None = None,
+    default_route: str | None = None,
+    settings=None,
+):
+    registrations = normalize_agent_registrations(agent_registrations, settings=settings)
     resolved_default_route = resolve_default_route(registrations, default_route=default_route)
 
     gateway_node = GatewayNode(
@@ -143,10 +161,18 @@ def build_graph(llm, checkpointer=None, *, agent_registrations: Sequence[AgentRe
     return graph.compile(checkpointer=checkpointer)
 
 
-def build_agent_graph(llm, checkpointer=None, *, agent_registrations: Sequence[AgentRegistration] | None = None, default_route: str | None = None):
+def build_agent_graph(
+    llm,
+    checkpointer=None,
+    *,
+    agent_registrations: Sequence[AgentRegistration] | None = None,
+    default_route: str | None = None,
+    settings=None,
+):
     return build_graph(
         llm,
         checkpointer=checkpointer,
         agent_registrations=agent_registrations,
         default_route=default_route,
+        settings=settings,
     )

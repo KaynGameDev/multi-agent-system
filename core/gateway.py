@@ -58,6 +58,14 @@ class GatewayNode:
         self.router = llm.with_structured_output(self.route_decision_model)
 
     def __call__(self, state: AgentState) -> dict:
+        requested_route = str(state.get("route", "")).strip()
+        if requested_route in self.valid_routes:
+            reason = str(state.get("route_reason", "")).strip() or f"Route override selected {requested_route}."
+            return {
+                "route": requested_route,
+                "route_reason": reason,
+            }
+
         messages = state.get("messages", [])
         latest_user_message = self._get_latest_user_message(messages)
 

@@ -5,7 +5,6 @@ We are building a company-level AI Multi-Agent System in Python to power an inte
 
 The assistant currently runs as:
 • a Slack bot using Slack Bolt Socket Mode
-• a Telegram bot using the Telegram Bot API long-polling interface
 
 Primary goals:
 • Provide a scalable multi-agent architecture
@@ -33,6 +32,7 @@ Agents include:
 • project_task_agent
 • general_chat_agent
 • knowledge_agent
+• document_conversion_agent
 
 Agents should be responsible for reasoning but not platform formatting.
 
@@ -43,6 +43,7 @@ Routing currently supports:
 • project_task_agent
 • general_chat_agent
 • knowledge_agent
+• document_conversion_agent
 
 The gateway uses an LLM classification step to determine intent.
 
@@ -182,9 +183,6 @@ Interface Entry Points
 Slack integration is implemented in:
 interfaces/slack_listener.py
 
-Telegram integration is implemented in:
-interfaces/telegram_listener.py
-
 Responsibilities:
 • handle incoming platform events
 • resolve user identity when available
@@ -214,6 +212,9 @@ Online knowledge-sheet catalog:
 
 ProjectTaskAgent
 Handles queries that require project data and can call tools.
+
+DocumentConversionAgent
+Handles Slack-uploaded design docs, asks follow-up questions when required conversion fields are missing, stages canonical knowledge packages, and publishes only after approval.
 
 Future agents that may be added:
 • jira_agent

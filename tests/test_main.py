@@ -24,12 +24,10 @@ class DummyListener:
         self.stopped = True
 
 
-def build_settings(*, include_slack: bool = True, include_telegram: bool = False) -> Settings:
+def build_settings(*, include_slack: bool = True) -> Settings:
     return Settings(
         slack_bot_token="xoxb-test" if include_slack else "",
         slack_app_token="xapp-test" if include_slack else "",
-        telegram_bot_token="telegram-token" if include_telegram else "",
-        telegram_allowed_chat_ids=(),
         google_api_key="test-key",
         gemini_model="gemini-3-flash-preview",
         gemini_temperature=0.2,
@@ -55,21 +53,20 @@ class MainTests(unittest.TestCase):
         self.assertIn("Stopping Jade Agent...", stdout.getvalue())
 
     def test_main_stops_all_listeners_after_interrupt(self) -> None:
-        slack_listener = DummyListener()
-        telegram_listener = DummyListener(should_interrupt=True)
+        primary_listener = DummyListener()
+        secondary_listener = DummyListener(should_interrupt=True)
 
-        with patch("main.bootstrap_system", return_value=[slack_listener, telegram_listener]):
+        with patch("main.bootstrap_system", return_value=[primary_listener, secondary_listener]):
             with patch("main._start_background_listeners", return_value=[]):
                 exit_code = main.main()
 
         self.assertEqual(exit_code, 0)
-        self.assertTrue(slack_listener.stopped)
-        self.assertTrue(telegram_listener.stopped)
+        self.assertTrue(primary_listener.stopped)
+        self.assertTrue(secondary_listener.stopped)
 
-    def test_bootstrap_system_builds_enabled_listeners(self) -> None:
-        settings = build_settings(include_slack=True, include_telegram=True)
+    def test_bootstrap_system_builds_enabled_listener(self) -> None:
+        settings = build_settings(include_slack=True)
         slack_listener = DummyListener()
-        telegram_listener = DummyListener()
 
         with patch("main.load_dotenv"):
             with patch("main.load_settings", return_value=settings):
@@ -77,10 +74,9 @@ class MainTests(unittest.TestCase):
                     with patch("main.ChatGoogleGenerativeAI", return_value=object()):
                         with patch("main.build_agent_graph", return_value=object()):
                             with patch("main.SlackListener", return_value=slack_listener):
-                                with patch("main.TelegramListener", return_value=telegram_listener):
-                                    listeners = main.bootstrap_system()
+                                listeners = main.bootstrap_system()
 
-        self.assertEqual(listeners, [slack_listener, telegram_listener])
+        self.assertEqual(listeners, [slack_listener])
 
 
 if __name__ == "__main__":

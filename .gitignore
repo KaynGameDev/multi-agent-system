@@ -60,6 +60,13 @@ logs/
 data/knowledge/*
 !data/knowledge/.gitkeep
 !data/knowledge/google_sheets_catalog.example.json
+!data/knowledge/company/
+!data/knowledge/company/**
+!data/knowledge/games/
+!data/knowledge/games/**
+
+# Conversion workflow state
+data/conversion/
 
 # PyInstaller
 *.manifest

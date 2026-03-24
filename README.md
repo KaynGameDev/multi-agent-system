@@ -1,12 +1,13 @@
 # Jade Agent Multi-Agent System
 
-A lean LangGraph + Slack/Telegram + Gemini starter for a company-facing multi-agent assistant.
+A lean LangGraph + Slack + Gemini starter for a company-facing multi-agent assistant.
 
 ## Current architecture
 
 - `gateway` decides which specialist should handle the request
 - `project_task_agent` answers questions that depend on the Google Sheets project tracker
 - `knowledge_agent` answers questions about internal docs, architecture, and setup guidance
+- `document_conversion_agent` handles Slack-driven design document conversion into canonical AI-friendly knowledge packages
 - `general_chat_agent` handles greetings, general chat, and everything outside the project tracker
 - `project_tools` executes Google Sheets tools when the project agent decides they are needed
 - `knowledge_tools` search and read repository documentation when the knowledge agent needs evidence
@@ -29,7 +30,6 @@ agents/workers/
   project_task_agent.py
 interfaces/
   slack_listener.py
-  telegram_listener.py
 tools/
   google_sheets.py
 main.py
@@ -46,10 +46,8 @@ Required:
 
 Interface configuration:
 - Slack: `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN`
-- Telegram: `TELEGRAM_BOT_TOKEN`
 
 Optional:
-- `TELEGRAM_ALLOWED_CHAT_IDS` (comma-separated chat IDs to allow; default: allow all chats the bot is added to)
 - `GEMINI_MODEL` (default: `gemini-3-flash-preview`)
 - `GEMINI_TEMPERATURE` (default: `0.2`)
 - `PROJECT_SHEET_RANGE` (default: `Tasks!A1:Z`)
@@ -59,6 +57,7 @@ Optional:
 - `KNOWLEDGE_FILE_TYPES` (default: `.md,.txt,.rst,.csv,.tsv,.xlsx,.xlsm`)
 - `KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH` (default: `data/knowledge/google_sheets_catalog.json`)
 - `KNOWLEDGE_GOOGLE_SHEETS_CACHE_TTL_SECONDS` (default: `120`)
+- `CONVERSION_WORK_DIR` (default: `data/conversion`)
 
 ## Slack setup
 
@@ -76,17 +75,6 @@ Recommended scopes/events:
   - `app_mention`
   - `message.im`
 
-## Telegram setup
-
-- Create a Telegram bot with BotFather and set `TELEGRAM_BOT_TOKEN`.
-- Add the bot to the target group or supergroup.
-- The bot answers all private chats.
-- In groups and supergroups, the bot answers when:
-  - it is mentioned
-  - a user replies to one of its messages
-  - a user sends `/jade <question>` or `/ask <question>`
-- `TELEGRAM_ALLOWED_CHAT_IDS` can be used to restrict which chats the bot will answer in.
-
 ## Run
 
 ```bash
@@ -99,6 +87,8 @@ python main.py
 - The Google Sheets tool is cached briefly to avoid reading the whole sheet on every request.
 - The knowledge agent reads local files from `KNOWLEDGE_BASE_DIR`; the default local folder is [`data/knowledge/`](/Users/kayngame/jade_ai_core/data/knowledge/).
 - The knowledge agent can also read curated online Google Sheets listed in `KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH`.
+- The document conversion flow stages Slack-uploaded source files and session state under `CONVERSION_WORK_DIR`.
+- Approved canonical packages are written into the knowledge base under `data/knowledge/games/<game_slug>/<market_slug>/<feature_slug>/`.
 - Excel exports from Google Sheets should be placed in `KNOWLEDGE_BASE_DIR` as `.xlsx` or `.xlsm` files.
 - The online-sheet catalog is a JSON file with one document per spreadsheet. Use [`data/knowledge/google_sheets_catalog.example.json`](/Users/kayngame/jade_ai_core/data/knowledge/google_sheets_catalog.example.json) as the template.
 - Each catalog entry supports:

@@ -10,7 +10,6 @@ from langgraph.checkpoint.memory import InMemorySaver
 from core.config import load_settings, validate_bootstrap_settings
 from core.graph import build_agent_graph
 from interfaces.slack_listener import SlackListener
-from interfaces.telegram_listener import TelegramListener
 
 
 def bootstrap_system() -> list[object]:
@@ -24,13 +23,11 @@ def bootstrap_system() -> list[object]:
     )
 
     checkpointer = InMemorySaver()
-    agent_graph = build_agent_graph(llm, checkpointer=checkpointer)
+    agent_graph = build_agent_graph(llm, checkpointer=checkpointer, settings=settings)
 
     listeners: list[object] = []
     if settings.slack_bot_token and settings.slack_app_token:
         listeners.append(SlackListener(agent_graph=agent_graph, settings=settings))
-    if settings.telegram_bot_token:
-        listeners.append(TelegramListener(agent_graph=agent_graph, settings=settings))
     if not listeners:
         raise RuntimeError("No communication interface is configured.")
 

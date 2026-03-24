@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import tempfile
 import unittest
 from unittest.mock import patch
 
 from core.config import Settings
 from interfaces.slack_listener import SlackListener
+from tools.document_conversion import UPLOAD_ONLY_FALLBACK_TEXT
 
 
 class DummyGraph:
@@ -52,8 +54,6 @@ def build_settings() -> Settings:
     return Settings(
         slack_bot_token="xoxb-test",
         slack_app_token="xapp-test",
-        telegram_bot_token="",
-        telegram_allowed_chat_ids=(),
         google_api_key="test-key",
         gemini_model="gemini-3-flash-preview",
         gemini_temperature=0.2,
@@ -65,15 +65,25 @@ def build_settings() -> Settings:
         project_lookup_keywords=("task",),
         knowledge_base_dir="/tmp/knowledge",
         knowledge_file_types=(".md", ".xlsx"),
+        conversion_work_dir="/tmp/jade_conversion_tests",
     )
 
 
 class SlackListenerTests(unittest.TestCase):
     def setUp(self) -> None:
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temp_dir.cleanup)
         app_patcher = patch("interfaces.slack_listener.App", return_value=DummyApp())
         self.addCleanup(app_patcher.stop)
         app_patcher.start()
-        self.listener = SlackListener(agent_graph=DummyGraph(), settings=build_settings())
+        settings = build_settings()
+        settings = Settings(
+            **{
+                **settings.__dict__,
+                "conversion_work_dir": self.temp_dir.name,
+            }
+        )
+        self.listener = SlackListener(agent_graph=DummyGraph(), settings=settings)
 
     def test_build_thread_id_uses_channel_for_direct_messages(self) -> None:
         event = {
@@ -144,6 +154,66 @@ class SlackListenerTests(unittest.TestCase):
         self.assertEqual(len(self.listener.agent_graph.invocations), 1)
         invocation = self.listener.agent_graph.invocations[0]
         self.assertEqual(invocation["initial_state"]["interface_name"], "slack")
+
+    def test_process_and_respond_routes_file_share_to_document_conversion_agent(self) -> None:
+        say_calls = []
+
+        def say(**kwargs):
+            say_calls.append(kwargs)
+
+        event = {
+            "user": "U123",
+            "channel": "D123",
+            "channel_type": "im",
+            "ts": "1710.601",
+            "text": "",
+            "subtype": "file_share",
+            "files": [
+                {
+                    "id": "F123",
+                    "name": "design.md",
+                    "mimetype": "text/markdown",
+                    "filetype": "md",
+                    "url_private": "https://example.com/design.md",
+                    "url_private_download": "https://example.com/design.md",
+                }
+            ],
+        }
+
+        self.listener.process_and_respond(event=event, say=say, is_mention=False)
+
+        invocation = self.listener.agent_graph.invocations[0]
+        self.assertEqual(invocation["initial_state"]["route"], "document_conversion_agent")
+        self.assertEqual(invocation["initial_state"]["messages"][0].content, UPLOAD_ONLY_FALLBACK_TEXT)
+        self.assertEqual(invocation["initial_state"]["uploaded_files"][0]["id"], "F123")
+        self.assertEqual(len(say_calls), 1)
+
+    def test_handle_message_event_processes_channel_reply_for_active_conversion_session(self) -> None:
+        say_calls = []
+
+        def say(**kwargs):
+            say_calls.append(kwargs)
+
+        self.listener.conversion_store.create_session(
+            thread_id="C123:1710.700",
+            channel_id="C123",
+            user_id="U123",
+        )
+        event = {
+            "user": "U123",
+            "channel": "C123",
+            "channel_type": "channel",
+            "thread_ts": "1710.700",
+            "ts": "1710.701",
+            "text": "Here is the missing market info",
+        }
+
+        self.listener.handle_message_event(event=event, say=say)
+
+        invocation = self.listener.agent_graph.invocations[0]
+        self.assertEqual(invocation["initial_state"]["route"], "document_conversion_agent")
+        self.assertTrue(invocation["initial_state"]["conversion_session_id"])
+        self.assertEqual(len(say_calls), 1)
 
 
 if __name__ == "__main__":

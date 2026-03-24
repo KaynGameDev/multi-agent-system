@@ -14,6 +14,7 @@ class AgentState(TypedDict, total=False):
     route: RouteName
     route_reason: str
     interface_name: str
+    thread_id: str
     user_id: str
     channel_id: str
     user_display_name: str
@@ -23,3 +24,11 @@ class AgentState(TypedDict, total=False):
     user_sheet_name: str
     user_job_title: str
     user_mapped_slack_name: str
+    uploaded_files: list[dict[str, str]]
+    conversion_session_id: str
+    target_game_slug: str
+    target_market_slug: str
+    target_feature_slug: str
+    conversion_status: str
+    missing_required_fields: list[str]
+    approval_state: str

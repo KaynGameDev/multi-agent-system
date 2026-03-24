@@ -23,13 +23,6 @@ SLACK_FORMAT_PROMPT = (
     "Avoid oversized headings and noisy formatting."
 )
 
-TELEGRAM_FORMAT_PROMPT = (
-    "The current interface is Telegram. "
-    "Write concise plain text or very light Markdown that stays readable even if Telegram Markdown parsing is not applied. "
-    "Prefer short paragraphs and simple numbered or dash lists. "
-    "Do not use Slack-specific syntax, raw HTML, or formatting that depends on Slack rendering."
-)
-
 DEFAULT_FORMAT_PROMPT = (
     "Write concise, plain Markdown that stays readable across chat interfaces."
 )
@@ -50,6 +43,4 @@ def build_general_chat_prompt(state: AgentState) -> str:
     format_prompt = DEFAULT_FORMAT_PROMPT
     if interface_name == "slack":
         format_prompt = SLACK_FORMAT_PROMPT
-    elif interface_name == "telegram":
-        format_prompt = TELEGRAM_FORMAT_PROMPT
     return "\n\n".join((GENERAL_CHAT_BASE_PROMPT, format_prompt))

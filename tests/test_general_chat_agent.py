@@ -34,21 +34,20 @@ class GeneralChatAgentTests(unittest.TestCase):
         self.assertIn("Slack boundary converts it to mrkdwn", prompt)
         self.assertIn("Avoid raw Slack entities", prompt)
 
-    def test_telegram_prompt_uses_telegram_specific_format_guidance(self) -> None:
+    def test_unknown_interface_uses_default_format_guidance(self) -> None:
         llm = DummyLLM()
         node = GeneralChatAgentNode(llm)
 
         node(
             {
-                "interface_name": "telegram",
+                "interface_name": "unknown",
                 "messages": [HumanMessage(content="hello there")],
             }
         )
 
         prompt = llm.last_messages[0].content
-        self.assertIn("The current interface is Telegram.", prompt)
-        self.assertIn("stays readable even if Telegram Markdown parsing is not applied", prompt)
-        self.assertIn("Do not use Slack-specific syntax", prompt)
+        self.assertIn("Write concise, plain Markdown", prompt)
+        self.assertNotIn("The current interface is Slack.", prompt)
 
 
 if __name__ == "__main__":

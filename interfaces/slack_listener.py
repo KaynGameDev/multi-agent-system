@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+from pathlib import Path
 
 from langchain_core.messages import HumanMessage
 from slack_bolt import App
@@ -11,6 +12,7 @@ from core.config import Settings
 from core.identity_map import build_user_identity_context, resolve_identity
 from core.slack_formatting import to_slack_mrkdwn
 from interfaces.slack_home import build_home_view
+from tools.document_conversion import ConversionSessionStore, UPLOAD_ONLY_FALLBACK_TEXT
 
 MENTION_PATTERN = re.compile(r"<@([A-Z0-9]+)>")
 logger = logging.getLogger(__name__)
@@ -21,6 +23,8 @@ class SlackListener:
         self.agent_graph = agent_graph
         self.settings = settings
         self.app = App(token=settings.slack_bot_token)
+        self.conversion_store = ConversionSessionStore(self._resolve_path(settings.conversion_work_dir))
+        self._bot_user_id = self._load_bot_user_id()
         self._handler: SocketModeHandler | None = None
         self._register_handlers()
 
@@ -54,23 +58,35 @@ class SlackListener:
     def handle_message_event(self, event, say) -> None:
         if event.get("bot_id"):
             return
-        if event.get("subtype"):
+        subtype = str(event.get("subtype", "")).strip()
+        if subtype and subtype != "file_share":
             return
-        if event.get("channel_type") != "im":
+        if event.get("channel_type") != "im" and not (
+            self._has_active_conversion_session(event) or self._contains_bot_mention(event.get("text", ""))
+        ):
             return
 
-        self.process_and_respond(event=event, say=say, is_mention=False)
+        self.process_and_respond(
+            event=event,
+            say=say,
+            is_mention=self._contains_bot_mention(event.get("text", "")),
+        )
 
     def process_and_respond(self, event, say, is_mention: bool) -> None:
         user_id = event.get("user")
         channel_id = event.get("channel")
         message_ts = event.get("ts")
+        thread_id = self._build_thread_id(event)
+        uploaded_files = self._extract_uploaded_files(event)
+        active_session = self.conversion_store.get_active_session_by_thread(thread_id)
 
         if not user_id or not channel_id:
             return
 
         text = self._extract_text(event.get("text", ""), is_mention=is_mention)
-        if not text:
+        if not text and uploaded_files:
+            text = UPLOAD_ONLY_FALLBACK_TEXT
+        if not text and not uploaded_files:
             return
 
         self._add_thinking_reaction(channel_id, message_ts)
@@ -80,13 +96,21 @@ class SlackListener:
             initial_state = {
                 "messages": [HumanMessage(content=text)],
                 "interface_name": "slack",
+                "thread_id": thread_id,
                 "user_id": user_id,
                 "channel_id": channel_id,
+                "uploaded_files": uploaded_files,
                 **user_context,
             }
+            if uploaded_files or active_session is not None:
+                initial_state["route"] = "document_conversion_agent"
+                initial_state["route_reason"] = "Slack document conversion session."
+            if active_session is not None:
+                initial_state["conversion_session_id"] = active_session.session_id
+
             final_state = self.agent_graph.invoke(
                 initial_state,
-                config={"configurable": {"thread_id": self._build_thread_id(event)}},
+                config={"configurable": {"thread_id": thread_id}},
             )
             final_text = to_slack_mrkdwn(self._extract_final_text(final_state))
         except Exception as exc:
@@ -205,6 +229,57 @@ class SlackListener:
             }
         except Exception:
             return {}
+
+    def _extract_uploaded_files(self, event) -> list[dict[str, str]]:
+        files = event.get("files")
+        if not isinstance(files, list):
+            return []
+
+        extracted: list[dict[str, str]] = []
+        for file_payload in files:
+            if not isinstance(file_payload, dict):
+                continue
+            file_id = str(file_payload.get("id", "")).strip()
+            name = str(file_payload.get("name") or file_payload.get("title") or file_id).strip()
+            if not file_id or not name:
+                continue
+            extracted.append(
+                {
+                    "id": file_id,
+                    "name": name,
+                    "title": str(file_payload.get("title", "")).strip(),
+                    "mimetype": str(file_payload.get("mimetype", "")).strip(),
+                    "filetype": str(file_payload.get("filetype", "")).strip(),
+                    "url_private": str(file_payload.get("url_private", "")).strip(),
+                    "url_private_download": str(file_payload.get("url_private_download", "")).strip(),
+                    "user": str(file_payload.get("user") or event.get("user") or "").strip(),
+                }
+            )
+        return extracted
+
+    def _has_active_conversion_session(self, event) -> bool:
+        return self.conversion_store.has_active_session(self._build_thread_id(event))
+
+    def _contains_bot_mention(self, text: str) -> bool:
+        if not self._bot_user_id or not text:
+            return False
+        return f"<@{self._bot_user_id}>" in text
+
+    def _load_bot_user_id(self) -> str:
+        try:
+            auth_test = getattr(self.app.client, "auth_test", None)
+            if callable(auth_test):
+                response = auth_test()
+                return str(response.get("user_id", "")).strip()
+        except Exception:
+            return ""
+        return ""
+
+    def _resolve_path(self, configured_value: str) -> Path:
+        configured_path = Path(configured_value or self.settings.conversion_work_dir).expanduser()
+        if configured_path.is_absolute():
+            return configured_path.resolve()
+        return (Path(__file__).resolve().parent.parent / configured_path).resolve()
 
     def publish_home_view(self, user_id: str) -> None:
         try:
