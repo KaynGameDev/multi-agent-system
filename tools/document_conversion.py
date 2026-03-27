@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 import json
+import logging
+import os
 import re
 import shutil
 import sqlite3
@@ -15,7 +17,10 @@ from typing import Any
 from uuid import uuid4
 
 from core.config import DEFAULT_KNOWLEDGE_BASE_DIR, load_settings
+from tools.conversion_google_sources import GoogleDocumentReference, fetch_google_document_source
 from tools.knowledge_base import load_knowledge_document
+
+logger = logging.getLogger(__name__)
 
 
 SUPPORTED_CONVERSION_FILE_TYPES = (".md", ".txt", ".csv", ".tsv", ".xlsx", ".xlsm")
@@ -113,6 +118,20 @@ class StageResult:
     package_path: Path
     populated_modules: list[str]
     missing_optional_modules: list[str]
+
+
+class SlackFileDownloadError(RuntimeError):
+    def __init__(self, source_name: str, details: str) -> None:
+        self.source_name = source_name
+        self.details = details
+        super().__init__(f"Unable to download Slack file {source_name}: {details}")
+
+
+class GoogleDocumentAccessError(RuntimeError):
+    def __init__(self, source_name: str, details: str) -> None:
+        self.source_name = source_name
+        self.details = details
+        super().__init__(f"Unable to access Google document {source_name}: {details}")
 
 
 def utc_now_iso() -> str:
@@ -655,11 +674,101 @@ def persist_uploaded_file(
     request = urllib.request.Request(download_url)
     request.add_header("Authorization", f"Bearer {slack_bot_token}")
     try:
-        with urllib.request.urlopen(request) as response, destination_path.open("wb") as handle:
-            shutil.copyfileobj(response, handle)
-    except urllib.error.URLError as exc:
-        raise RuntimeError(f"Unable to download Slack file {source_name}: {exc}") from exc
+        _download_with_retry(request, destination_path, source_name=source_name)
+    except SlackFileDownloadError:
+        logger.debug(
+            "Slack file download failed source=%s session=%s destination=%s",
+            source_name,
+            session_id,
+            destination_path,
+        )
+        if destination_path.exists():
+            destination_path.unlink(missing_ok=True)
+        raise
     return destination_path
+
+
+def persist_google_document_reference(
+    store: ConversionSessionStore,
+    session_id: str,
+    reference: GoogleDocumentReference,
+) -> tuple[Path, str, str]:
+    upload_dir = build_upload_directory(store, session_id)
+    source_name = reference.url or reference.document_id
+    try:
+        title, source_type, content = fetch_google_document_source(reference)
+    except Exception as exc:  # pragma: no cover - exact upstream exception depends on Google client
+        raise GoogleDocumentAccessError(source_name, str(exc)) from exc
+
+    safe_name = sanitize_filename(title or reference.document_id)
+    destination_path = upload_dir / f"{uuid4().hex}_{safe_name}.md"
+    destination_path.write_text(content, encoding="utf-8")
+    original_name = f"{title or reference.document_id}.md"
+    return destination_path, original_name, source_type
+
+
+def _download_with_retry(request: urllib.request.Request, destination_path: Path, *, source_name: str) -> None:
+    default_error: Exception | None = None
+    try:
+        _download_to_path(request, destination_path)
+        return
+    except (urllib.error.HTTPError, urllib.error.URLError) as exc:
+        default_error = exc
+        logger.debug(
+            "Slack file download attempt failed source=%s error=%s",
+            source_name,
+            exc,
+        )
+
+    retry_without_proxy = _should_retry_without_proxy(default_error)
+    if not retry_without_proxy:
+        raise SlackFileDownloadError(source_name, str(default_error)) from default_error
+
+    logger.debug("Retrying Slack file download without proxy source=%s", source_name)
+    proxyless_opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+    try:
+        _download_to_path(request, destination_path, opener=proxyless_opener)
+        return
+    except (urllib.error.HTTPError, urllib.error.URLError) as exc:
+        details = f"{default_error}; retry without proxy failed: {exc}"
+        logger.debug(
+            "Slack file download retry without proxy failed source=%s error=%s",
+            source_name,
+            exc,
+        )
+        raise SlackFileDownloadError(source_name, details) from exc
+
+
+def _download_to_path(
+    request: urllib.request.Request,
+    destination_path: Path,
+    *,
+    opener=None,
+) -> None:
+    open_fn = opener.open if opener is not None else urllib.request.urlopen
+    with open_fn(request, timeout=30) as response, destination_path.open("wb") as handle:
+        shutil.copyfileobj(response, handle)
+
+
+def _should_retry_without_proxy(error: Exception | None) -> bool:
+    if error is None:
+        return False
+    error_text = str(error).lower()
+    if "tunnel connection failed" in error_text or "proxy" in error_text:
+        return True
+
+    return any(
+        os.getenv(name)
+        for name in (
+            "HTTP_PROXY",
+            "HTTPS_PROXY",
+            "ALL_PROXY",
+            "http_proxy",
+            "https_proxy",
+            "all_proxy",
+        )
+    )
+
 
 
 def ingest_uploaded_files(
@@ -669,9 +778,10 @@ def ingest_uploaded_files(
     *,
     slack_bot_token: str,
     author: str,
-) -> tuple[list[ConversionSourceRecord], list[str]]:
+) -> tuple[list[ConversionSourceRecord], list[str], list[str]]:
     ingested: list[ConversionSourceRecord] = []
     skipped: list[str] = []
+    download_failures: list[str] = []
     existing = {source.slack_file_id for source in store.list_sources(session.session_id)}
 
     for uploaded_file in uploaded_files:
@@ -684,12 +794,22 @@ def ingest_uploaded_files(
         if slack_file_id in existing:
             continue
 
-        raw_path = persist_uploaded_file(
-            store,
-            session.session_id,
-            uploaded_file,
-            slack_bot_token=slack_bot_token,
-        )
+        try:
+            raw_path = persist_uploaded_file(
+                store,
+                session.session_id,
+                uploaded_file,
+                slack_bot_token=slack_bot_token,
+            )
+        except SlackFileDownloadError as exc:
+            download_failures.append(f"{original_name}: {exc.details}")
+            logger.debug(
+                "Skipping uploaded file after Slack download failure session=%s file=%s details=%s",
+                session.session_id,
+                original_name,
+                exc.details,
+            )
+            continue
         ingested.append(
             store.add_source(
                 session.session_id,
@@ -704,7 +824,56 @@ def ingest_uploaded_files(
         )
         existing.add(slack_file_id)
 
-    return ingested, skipped
+    return ingested, skipped, download_failures
+
+
+def ingest_google_document_references(
+    store: ConversionSessionStore,
+    session: ConversionSessionRecord,
+    google_document_references: list[GoogleDocumentReference],
+    *,
+    author: str,
+) -> tuple[list[ConversionSourceRecord], list[str]]:
+    ingested: list[ConversionSourceRecord] = []
+    access_failures: list[str] = []
+    existing = {source.slack_file_id for source in store.list_sources(session.session_id)}
+
+    for reference in google_document_references:
+        external_source_id = f"{reference.document_type}:{reference.document_id}"
+        if external_source_id in existing:
+            continue
+
+        try:
+            raw_path, original_name, source_type = persist_google_document_reference(
+                store,
+                session.session_id,
+                reference,
+            )
+        except GoogleDocumentAccessError as exc:
+            access_failures.append(f"{reference.url}: {exc.details}")
+            logger.debug(
+                "Skipping Google document after access failure session=%s source=%s details=%s",
+                session.session_id,
+                reference.url,
+                exc.details,
+            )
+            continue
+
+        ingested.append(
+            store.add_source(
+                session.session_id,
+                slack_file_id=external_source_id,
+                original_name=original_name,
+                source_type=source_type,
+                author=author,
+                coverage="full",
+                raw_path=str(raw_path),
+                notes=f"Original URL: {reference.url}",
+            )
+        )
+        existing.add(external_source_id)
+
+    return ingested, access_failures
 
 
 def load_source_bundle_text(
@@ -813,28 +982,6 @@ def build_missing_required_fields(draft_payload: dict[str, Any], sources: list[C
     if not sources:
         missing.append("provenance")
     return missing
-
-
-def build_targeted_questions(missing_fields: list[str]) -> list[str]:
-    question_map = {
-        "game_slug": "Which game is this document for? Please give the canonical game name and, if possible, the English slug you want.",
-        "market_slug": "Which market or package variant does this feature belong to?",
-        "feature_slug": "What should this feature be called in the canonical docs?",
-        "overview": "What is the feature goal and user-facing purpose in 1-3 sentences?",
-        "terminology": "Which product terms, feature names, rewards, or UI labels must be standardized in the converted package?",
-        "entities": "What are the key entities or configurable items for this feature?",
-        "rules": "What are the core business rules, reward rules, or progression rules?",
-        "config_overview": "Which server-side or client-side config knobs, limits, or switches control this feature?",
-        "provenance": "Please upload at least one supported source file for this conversion session.",
-    }
-    questions: list[str] = []
-    for field_name in missing_fields:
-        question = question_map.get(field_name)
-        if question:
-            questions.append(question)
-        if len(questions) >= 5:
-            break
-    return questions
 
 
 def list_populated_modules(draft_payload: dict[str, Any]) -> list[str]:

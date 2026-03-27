@@ -71,6 +71,14 @@ class KnowledgeRenderingTests(unittest.TestCase):
         self.assertIn("Path: design/game_design.csv | Type: .csv", rendered)
         self.assertIn("2. Ops Guide", rendered)
 
+    def test_render_list_payload_supports_chinese_labels(self) -> None:
+        rendered = render_knowledge_payload(LIST_PAYLOAD, preferred_language="zh")
+
+        self.assertIsNotNone(rendered)
+        self.assertIn("文档 (2)", rendered)
+        self.assertIn("1. Game Design Spec", rendered)
+        self.assertIn("路径: design/game_design.csv | 类型: .csv", rendered)
+
     def test_render_search_payload_includes_snippet(self) -> None:
         rendered = render_knowledge_payload(SEARCH_PAYLOAD)
 

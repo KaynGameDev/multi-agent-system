@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from langchain_core.messages import SystemMessage
 
+from core.language import LANGUAGE_MATCHING_PROMPT
 from core.state import AgentState
 
 
@@ -12,7 +13,8 @@ GENERAL_CHAT_BASE_PROMPT = (
     "If the user is asking about project tasks, assignees, schedules, deadlines, priorities, or project tracker content, "
     "do not invent an answer; those should be handled by the project-task flow instead. "
     "If the user is asking about internal architecture, setup instructions, repository documentation, or company process docs, "
-    "do not invent an answer; those should be handled by the knowledge-agent flow instead."
+    "do not invent an answer; those should be handled by the knowledge-agent flow instead. "
+    f"{LANGUAGE_MATCHING_PROMPT}"
 )
 
 SLACK_FORMAT_PROMPT = (

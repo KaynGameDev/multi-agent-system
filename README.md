@@ -31,7 +31,9 @@ agents/workers/
 interfaces/
   slack_listener.py
 tools/
-  google_sheets.py
+  project_tracker_google_sheets.py
+  conversion_google_sources.py
+  google_workspace_services.py
 main.py
 ```
 
@@ -50,6 +52,7 @@ Interface configuration:
 Optional:
 - `GEMINI_MODEL` (default: `gemini-3-flash-preview`)
 - `GEMINI_TEMPERATURE` (default: `0.2`)
+- `GEMINI_HTTP_TRUST_ENV` (default: `false`; set to `true` only if Gemini traffic must use `HTTPS_PROXY` / `ALL_PROXY`)
 - `PROJECT_SHEET_RANGE` (default: `Tasks!A1:Z`)
 - `PROJECT_SHEET_CACHE_TTL_SECONDS` (default: `30`)
 - `SLACK_THINKING_REACTION` (default: `eyes`)

@@ -146,7 +146,9 @@ The tool supports searching by:
 • free text query
 
 Files:
-tools/google_sheets.py
+tools/project_tracker_google_sheets.py
+tools/conversion_google_sources.py
+tools/google_workspace_services.py
 
 Important rule:
 Tools must NOT contain Slack formatting logic.

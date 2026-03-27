@@ -9,7 +9,7 @@ from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
 from core.config import load_settings
-from tools.google_sheets import client, normalize_header
+from tools.project_tracker_google_sheets import client, normalize_header
 
 SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
 

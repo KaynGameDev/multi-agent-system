@@ -12,7 +12,7 @@ from langchain_core.tools import tool
 from openpyxl import load_workbook
 
 from core.config import DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH, load_settings
-from tools.google_sheets import get_google_sheets_service
+from tools.google_workspace_services import get_google_sheets_service
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 

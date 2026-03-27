@@ -88,6 +88,20 @@ class KnowledgeAgentTests(unittest.TestCase):
         self.assertIn("Documents (2)", result["messages"][0].content)
         self.assertIn("2. Ops Guide", result["messages"][0].content)
 
+    def test_chinese_list_request_renders_chinese_labels(self) -> None:
+        node = KnowledgeAgentNode(DummyLLM(fail_on_invoke=True), tools=[])
+        state = {
+            "messages": [
+                HumanMessage(content="有哪些文档"),
+                ToolMessage(content=json.dumps(LIST_PAYLOAD), tool_call_id="tool-1"),
+            ]
+        }
+
+        result = node(state)
+
+        self.assertIn("文档 (2)", result["messages"][0].content)
+        self.assertIn("路径: design/game_design.csv | 类型: .csv", result["messages"][0].content)
+
     def test_synthesis_question_without_referential_follow_up_uses_llm(self) -> None:
         llm = DummyLLM(response_content="Synthesized answer from the model")
         node = KnowledgeAgentNode(llm, tools=[])

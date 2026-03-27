@@ -96,6 +96,21 @@ class ProjectTaskAgentTests(unittest.TestCase):
         self.assertEqual(len(result["messages"]), 1)
         self.assertIn("1. 大厅活动优化", result["messages"][0].content)
 
+    def test_build_task_list_response_uses_chinese_labels_for_chinese_follow_up(self) -> None:
+        state = {
+            "messages": [
+                ToolMessage(content=json.dumps(TASK_PAYLOAD, ensure_ascii=False), tool_call_id="tool-1"),
+                HumanMessage(content="把这些任务列出来"),
+            ]
+        }
+
+        response = build_task_list_response(state)
+
+        self.assertIsNotNone(response)
+        self.assertIn("刘煜 的本周到期任务", response)
+        self.assertIn("项目: Jade Poker | 迭代: S24 | 平台: iOS | 优先级: P1", response)
+        self.assertIn("负责人: 刘煜 | 截止: 2026-03-14 | 状态: 即将到期", response)
+
     def test_build_task_list_response_ignores_new_filtered_query(self) -> None:
         state = {
             "messages": [

@@ -71,12 +71,17 @@ class MainTests(unittest.TestCase):
         with patch("main.load_dotenv"):
             with patch("main.load_settings", return_value=settings):
                 with patch("main.validate_bootstrap_settings"):
-                    with patch("main.ChatGoogleGenerativeAI", return_value=object()):
+                    with patch("main.ChatGoogleGenerativeAI", return_value=object()) as llm_ctor:
                         with patch("main.build_agent_graph", return_value=object()):
                             with patch("main.SlackListener", return_value=slack_listener):
                                 listeners = main.bootstrap_system()
 
         self.assertEqual(listeners, [slack_listener])
+        llm_ctor.assert_called_once_with(
+            model=settings.gemini_model,
+            temperature=settings.gemini_temperature,
+            client_args={"trust_env": settings.gemini_http_trust_env},
+        )
 
 
 if __name__ == "__main__":

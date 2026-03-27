@@ -1,21 +1,16 @@
 from __future__ import annotations
 
-import os
 import re
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
-from pathlib import Path
 from typing import Iterable
 
-from google.oauth2 import service_account
-from googleapiclient.discovery import build
 from langchain_core.tools import tool
 
 from core.config import load_settings
 from core.identity_map import normalize_sheet_identity
-
-SCOPES = ["https://www.googleapis.com/auth/spreadsheets.readonly"]
+from tools.google_workspace_services import get_google_sheets_service
 
 ITERATION_ALIASES = ("迭代", "iteration")
 PERSON_ALIASES = ("人员", "assignee", "owner", "developer", "pic", "person_in_charge")
@@ -238,29 +233,6 @@ class GoogleSheetsClient:
 
 
 client = GoogleSheetsClient()
-_shared_service = None
-
-
-def get_google_sheets_service():
-    global _shared_service
-
-    if _shared_service is not None:
-        return _shared_service
-
-    settings = load_settings()
-    if not settings.google_application_credentials:
-        raise RuntimeError("GOOGLE_APPLICATION_CREDENTIALS is not set.")
-
-    credentials_path = Path(settings.google_application_credentials)
-    if not credentials_path.exists():
-        raise RuntimeError(f"Google credentials file not found: {credentials_path}")
-
-    credentials = service_account.Credentials.from_service_account_file(
-        os.fspath(credentials_path),
-        scopes=SCOPES,
-    )
-    _shared_service = build("sheets", "v4", credentials=credentials)
-    return _shared_service
 
 
 @tool

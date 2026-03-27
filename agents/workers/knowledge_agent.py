@@ -5,6 +5,7 @@ import re
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
+from core.language import LANGUAGE_MATCHING_PROMPT, detect_response_language
 from core.knowledge_rendering import is_knowledge_payload, render_knowledge_payload
 from core.state import AgentState
 
@@ -17,7 +18,8 @@ KNOWLEDGE_AGENT_PROMPT = (
     "After using a knowledge tool, answer the user's question directly instead of repeating raw tool output unless the user explicitly asks to see the document or excerpt. "
     "For spreadsheet or CSV-style documents, extract the relevant rules, limits, steps, or conclusions instead of reciting raw rows. "
     "Write concise, plain Markdown. "
-    "When helpful, mention which document you used."
+    "When helpful, mention which document you used. "
+    f"{LANGUAGE_MATCHING_PROMPT}"
 )
 
 REFERENTIAL_KNOWLEDGE_QUERY_PATTERNS = (
@@ -90,12 +92,13 @@ class KnowledgeAgentNode:
 
 def build_knowledge_response(state: AgentState) -> str | None:
     latest_user_text = get_latest_user_text(state)
+    preferred_language = detect_response_language(latest_user_text)
     latest_messages = state.get("messages", [])
     if latest_messages:
         latest_message = latest_messages[-1]
         payload = get_tool_payload(latest_message)
         if payload is not None and should_render_latest_tool_payload(latest_user_text, payload):
-            return render_knowledge_payload(payload)
+            return render_knowledge_payload(payload, preferred_language=preferred_language)
 
     if not should_render_knowledge_follow_up(latest_user_text):
         return None
@@ -103,7 +106,7 @@ def build_knowledge_response(state: AgentState) -> str | None:
     payload = get_latest_knowledge_payload(state)
     if payload is None:
         return None
-    return render_knowledge_payload(payload)
+    return render_knowledge_payload(payload, preferred_language=preferred_language)
 
 
 def should_render_knowledge_follow_up(user_text: str) -> bool:

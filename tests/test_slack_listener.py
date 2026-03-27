@@ -21,11 +21,13 @@ class DummyGraph:
 class DummyClient:
     def __init__(self) -> None:
         self.views_publish_calls = []
+        self.users_info_calls = []
 
     def views_publish(self, *, user_id, view):
         self.views_publish_calls.append({"user_id": user_id, "view": view})
 
     def users_info(self, *, user):
+        self.users_info_calls.append(user)
         return {
             "user": {
                 "name": "kayn",
@@ -134,6 +136,14 @@ class SlackListenerTests(unittest.TestCase):
         self.assertEqual(published["user_id"], "U123")
         self.assertEqual(published["view"]["type"], "home")
 
+    def test_load_user_context_caches_slack_user_lookup(self) -> None:
+        first = self.listener._load_user_context("U123")
+        second = self.listener._load_user_context("U123")
+
+        self.assertEqual(first["user_display_name"], "Kayn")
+        self.assertEqual(second["user_display_name"], "Kayn")
+        self.assertEqual(self.listener.app.client.users_info_calls, ["U123"])
+
     def test_process_and_respond_sets_slack_interface_name(self) -> None:
         say_calls = []
 
@@ -188,6 +198,30 @@ class SlackListenerTests(unittest.TestCase):
         self.assertEqual(invocation["initial_state"]["uploaded_files"][0]["id"], "F123")
         self.assertEqual(len(say_calls), 1)
 
+    def test_process_and_respond_routes_google_doc_url_to_document_conversion_agent(self) -> None:
+        say_calls = []
+
+        def say(**kwargs):
+            say_calls.append(kwargs)
+
+        event = {
+            "user": "U123",
+            "channel": "D123",
+            "channel_type": "im",
+            "ts": "1710.602",
+            "text": "Please convert https://docs.google.com/document/d/abc123/edit",
+        }
+
+        self.listener.process_and_respond(event=event, say=say, is_mention=False)
+
+        invocation = self.listener.agent_graph.invocations[0]
+        self.assertEqual(invocation["initial_state"]["route"], "document_conversion_agent")
+        self.assertEqual(
+            invocation["initial_state"]["messages"][0].content,
+            "Please convert https://docs.google.com/document/d/abc123/edit",
+        )
+        self.assertEqual(len(say_calls), 1)
+
     def test_handle_message_event_processes_channel_reply_for_active_conversion_session(self) -> None:
         say_calls = []
 
@@ -212,6 +246,32 @@ class SlackListenerTests(unittest.TestCase):
 
         invocation = self.listener.agent_graph.invocations[0]
         self.assertEqual(invocation["initial_state"]["route"], "document_conversion_agent")
+        self.assertTrue(invocation["initial_state"]["conversion_session_id"])
+        self.assertEqual(len(say_calls), 1)
+
+    def test_process_and_respond_does_not_route_dm_greeting_to_active_conversion_session(self) -> None:
+        say_calls = []
+
+        def say(**kwargs):
+            say_calls.append(kwargs)
+
+        self.listener.conversion_store.create_session(
+            thread_id="D123",
+            channel_id="D123",
+            user_id="U123",
+        )
+        event = {
+            "user": "U123",
+            "channel": "D123",
+            "channel_type": "im",
+            "ts": "1710.702",
+            "text": "hello",
+        }
+
+        self.listener.process_and_respond(event=event, say=say, is_mention=False)
+
+        invocation = self.listener.agent_graph.invocations[0]
+        self.assertNotIn("route", invocation["initial_state"])
         self.assertTrue(invocation["initial_state"]["conversion_session_id"])
         self.assertEqual(len(say_calls), 1)
 

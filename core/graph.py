@@ -13,8 +13,8 @@ from core.agent_registry import AgentRegistration
 from core.config import load_settings
 from core.gateway import GatewayNode
 from core.state import AgentState
-from tools.google_sheets import get_project_sheet_overview, read_project_tasks
 from tools.knowledge_base import list_knowledge_documents, read_knowledge_document, search_knowledge_documents
+from tools.project_tracker_google_sheets import get_project_sheet_overview, read_project_tasks
 
 
 def build_default_agent_registrations(settings=None) -> tuple[AgentRegistration, ...]:

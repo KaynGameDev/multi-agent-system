@@ -33,6 +33,7 @@ class GeneralChatAgentTests(unittest.TestCase):
         self.assertIn("The current interface is Slack.", prompt)
         self.assertIn("Slack boundary converts it to mrkdwn", prompt)
         self.assertIn("Avoid raw Slack entities", prompt)
+        self.assertIn("Reply in the same language as the user's latest message", prompt)
 
     def test_unknown_interface_uses_default_format_guidance(self) -> None:
         llm = DummyLLM()

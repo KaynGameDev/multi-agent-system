@@ -3,7 +3,7 @@ from __future__ import annotations
 import unittest
 from unittest.mock import patch
 
-from tools.google_sheets import TaskSearchResult, get_project_sheet_overview, parse_sheet_date, read_project_tasks
+from tools.project_tracker_google_sheets import TaskSearchResult, get_project_sheet_overview, parse_sheet_date, read_project_tasks
 
 
 SAMPLE_RECORD = {
@@ -28,7 +28,7 @@ SAMPLE_RECORD = {
 
 
 class GoogleSheetsToolTests(unittest.TestCase):
-    @patch("tools.google_sheets.client.search_tasks")
+    @patch("tools.project_tracker_google_sheets.client.search_tasks")
     def test_read_project_tasks_returns_structured_payload(self, mock_search_tasks) -> None:
         mock_search_tasks.return_value = TaskSearchResult(records=[SAMPLE_RECORD], total_count=1)
 
@@ -42,7 +42,7 @@ class GoogleSheetsToolTests(unittest.TestCase):
         self.assertEqual(result["tasks"][0]["project"], "Jade Poker")
         self.assertEqual(result["tasks"][0]["client_owner"], "刘煜")
 
-    @patch("tools.google_sheets.client.search_tasks")
+    @patch("tools.project_tracker_google_sheets.client.search_tasks")
     def test_read_project_tasks_returns_structured_error_payload(self, mock_search_tasks) -> None:
         mock_search_tasks.side_effect = RuntimeError("sheet unavailable")
 
@@ -53,7 +53,7 @@ class GoogleSheetsToolTests(unittest.TestCase):
         self.assertEqual(result["tasks"], [])
         self.assertIn("sheet unavailable", result["error"])
 
-    @patch("tools.google_sheets.client.get_records")
+    @patch("tools.project_tracker_google_sheets.client.get_records")
     def test_get_project_sheet_overview_returns_preview_records(self, mock_get_records) -> None:
         mock_get_records.return_value = [SAMPLE_RECORD, {**SAMPLE_RECORD, "内容": "支付重构"}]
 
@@ -65,7 +65,7 @@ class GoogleSheetsToolTests(unittest.TestCase):
         self.assertEqual(len(result["tasks"]), 1)
         self.assertEqual(result["tasks"][0]["content"], "大厅活动优化")
 
-    @patch("tools.google_sheets.client.get_records")
+    @patch("tools.project_tracker_google_sheets.client.get_records")
     def test_read_project_tasks_filters_overdue_items(self, mock_get_records) -> None:
         mock_get_records.return_value = [
             {**SAMPLE_RECORD, "内容": "过期任务", "end": "2026-03-12"},
@@ -81,7 +81,7 @@ class GoogleSheetsToolTests(unittest.TestCase):
         self.assertEqual(result["tasks"][0]["content"], "过期任务")
         self.assertEqual(result["tasks"][0]["due_status"], "overdue")
 
-    @patch("tools.google_sheets.client.get_records")
+    @patch("tools.project_tracker_google_sheets.client.get_records")
     def test_read_project_tasks_filters_this_week_and_sorts_by_end_date(self, mock_get_records) -> None:
         mock_get_records.return_value = [
             {**SAMPLE_RECORD, "内容": "下周任务", "end": "2026-03-16"},
@@ -101,7 +101,7 @@ class GoogleSheetsToolTests(unittest.TestCase):
             ["周一任务", "周六任务", "周日任务"],
         )
 
-    @patch("tools.google_sheets.client.get_records")
+    @patch("tools.project_tracker_google_sheets.client.get_records")
     def test_read_project_tasks_reports_total_match_count_beyond_limit(self, mock_get_records) -> None:
         mock_get_records.return_value = [
             {**SAMPLE_RECORD, "内容": "周一任务", "end": "2026-03-09"},

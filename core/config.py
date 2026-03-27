@@ -54,6 +54,7 @@ class Settings:
     knowledge_google_sheets_catalog_path: str = DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH
     knowledge_google_sheets_cache_ttl_seconds: int = DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CACHE_TTL_SECONDS
     conversion_work_dir: str = DEFAULT_CONVERSION_WORK_DIR
+    gemini_http_trust_env: bool = False
 
 
 _cached_settings: Settings | None = None
@@ -109,6 +110,7 @@ def load_settings(force_reload: bool = False) -> Settings:
             os.getenv("CONVERSION_WORK_DIR", DEFAULT_CONVERSION_WORK_DIR).strip()
             or DEFAULT_CONVERSION_WORK_DIR
         ),
+        gemini_http_trust_env=parse_bool_env("GEMINI_HTTP_TRUST_ENV", False),
     )
     return _cached_settings
 
@@ -138,3 +140,16 @@ def normalize_knowledge_file_type(value: str) -> str:
     if not cleaned.startswith("."):
         cleaned = f".{cleaned}"
     return cleaned
+
+
+def parse_bool_env(name: str, default: bool) -> bool:
+    raw_value = os.getenv(name)
+    if raw_value is None:
+        return default
+
+    normalized = raw_value.strip().lower()
+    if normalized in {"1", "true", "yes", "on"}:
+        return True
+    if normalized in {"0", "false", "no", "off"}:
+        return False
+    return default
