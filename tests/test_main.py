@@ -24,10 +24,13 @@ class DummyListener:
         self.stopped = True
 
 
-def build_settings(*, include_slack: bool = True) -> Settings:
+def build_settings(*, include_slack: bool = True, include_web: bool = False) -> Settings:
     return Settings(
         slack_bot_token="xoxb-test" if include_slack else "",
         slack_app_token="xapp-test" if include_slack else "",
+        web_enabled=include_web,
+        web_host="127.0.0.1",
+        web_port=8000,
         google_api_key="test-key",
         gemini_model="gemini-3-flash-preview",
         gemini_temperature=0.2,
@@ -82,6 +85,36 @@ class MainTests(unittest.TestCase):
             temperature=settings.gemini_temperature,
             client_args={"trust_env": settings.gemini_http_trust_env},
         )
+
+    def test_bootstrap_system_builds_web_listener_when_enabled(self) -> None:
+        settings = build_settings(include_slack=False, include_web=True)
+        web_listener = DummyListener()
+
+        with patch("main.load_dotenv"):
+            with patch("main.load_settings", return_value=settings):
+                with patch("main.validate_bootstrap_settings"):
+                    with patch("main.ChatGoogleGenerativeAI", return_value=object()):
+                        with patch("main.build_agent_graph", return_value=object()):
+                            with patch("main.WebServer", return_value=web_listener):
+                                listeners = main.bootstrap_system()
+
+        self.assertEqual(listeners, [web_listener])
+
+    def test_bootstrap_system_builds_both_slack_and_web_listeners(self) -> None:
+        settings = build_settings(include_slack=True, include_web=True)
+        slack_listener = DummyListener()
+        web_listener = DummyListener()
+
+        with patch("main.load_dotenv"):
+            with patch("main.load_settings", return_value=settings):
+                with patch("main.validate_bootstrap_settings"):
+                    with patch("main.ChatGoogleGenerativeAI", return_value=object()):
+                        with patch("main.build_agent_graph", return_value=object()):
+                            with patch("main.SlackListener", return_value=slack_listener):
+                                with patch("main.WebServer", return_value=web_listener):
+                                    listeners = main.bootstrap_system()
+
+        self.assertEqual(listeners, [slack_listener, web_listener])
 
 
 if __name__ == "__main__":

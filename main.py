@@ -10,9 +10,10 @@ from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.checkpoint.memory import InMemorySaver
 
-from core.config import load_settings, validate_bootstrap_settings
-from core.graph import build_agent_graph
+from core.config import is_slack_enabled, load_settings, validate_bootstrap_settings
+from core.graph import build_agent_graph, build_web_agent_registrations
 from interfaces.slack_listener import SlackListener
+from interfaces.web_server import WebServer
 
 logger = logging.getLogger(__name__)
 
@@ -63,12 +64,18 @@ def bootstrap_system() -> list[object]:
 
     checkpointer = InMemorySaver()
     agent_graph = build_agent_graph(llm, checkpointer=checkpointer, settings=settings)
+    web_graph = build_agent_graph(
+        llm,
+        checkpointer=checkpointer,
+        settings=settings,
+        agent_registrations=build_web_agent_registrations(settings=settings),
+    )
 
     listeners: list[object] = []
-    if settings.slack_bot_token and settings.slack_app_token:
+    if is_slack_enabled(settings):
         listeners.append(SlackListener(agent_graph=agent_graph, settings=settings))
-    if not listeners:
-        raise RuntimeError("No communication interface is configured.")
+    if settings.web_enabled:
+        listeners.append(WebServer(agent_graph=web_graph, settings=settings))
 
     print("⚙ Compiled Jade Agent graph.")
     return listeners

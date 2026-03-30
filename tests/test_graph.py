@@ -7,6 +7,7 @@ from langchain_core.tools import tool
 from core.agent_registry import AgentRegistration
 from core.graph import (
     build_default_agent_registrations,
+    build_web_agent_registrations,
     build_graph,
     normalize_agent_registrations,
     resolve_default_route,
@@ -42,6 +43,15 @@ class GraphTests(unittest.TestCase):
             registration for registration in registrations if registration.name == "knowledge_agent"
         )
         self.assertEqual(len(knowledge_registration.tools), 3)
+
+    def test_web_agent_registrations_exclude_document_conversion_agent(self) -> None:
+        registrations = build_web_agent_registrations()
+        registration_names = [registration.name for registration in registrations]
+
+        self.assertEqual(
+            registration_names,
+            ["general_chat_agent", "knowledge_agent", "project_task_agent"],
+        )
 
     def test_build_graph_supports_custom_agent_registrations(self) -> None:
         registrations = (

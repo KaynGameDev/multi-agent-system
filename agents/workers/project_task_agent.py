@@ -17,12 +17,31 @@ PROJECT_TASK_PROMPT = (
     "Project tools return structured JSON data, not preformatted prose. Read the tool output carefully, reason over it, and summarize the relevant facts for the user. "
     "Do not dump raw JSON unless the user explicitly asks for it. "
     "Do not invent sheet data. If the sheet does not contain the requested information, say so clearly. "
-    "Write concise, plain Markdown that stays easy to scan in Slack after boundary formatting. "
+    f"{LANGUAGE_MATCHING_PROMPT}"
+)
+
+SLACK_FORMAT_PROMPT = (
+    "The current interface is Slack. "
+    "Write concise, plain Markdown that stays easy to scan after Slack boundary formatting. "
     "When listing tasks, use a numbered list with one task per block. "
     "Do not make every metadata line a bullet. "
     "Bold at most the task title if needed, not the whole block. "
-    "Avoid headings that are too large or noisy. "
-    f"{LANGUAGE_MATCHING_PROMPT}"
+    "Avoid headings that are too large or noisy."
+)
+
+WEB_FORMAT_PROMPT = (
+    "The current interface is a web chat page. "
+    "Write concise, plain Markdown that stays easy to scan in a browser transcript. "
+    "When listing tasks, use a numbered list with one task per block. "
+    "Do not make every metadata line a bullet. "
+    "Bold at most the task title if needed, not the whole block. "
+    "Avoid headings that are too large or noisy."
+)
+
+DEFAULT_FORMAT_PROMPT = (
+    "Write concise, plain Markdown that stays easy to scan across chat interfaces. "
+    "When listing tasks, use a numbered list with one task per block. "
+    "Do not make every metadata line a bullet."
 )
 
 
@@ -42,6 +61,13 @@ class ProjectTaskAgentNode:
 
 def build_project_task_prompt(state: AgentState) -> str:
     lines = [PROJECT_TASK_PROMPT]
+    interface_name = str(state.get("interface_name", "")).strip().lower()
+    if interface_name == "slack":
+        lines.append(SLACK_FORMAT_PROMPT)
+    elif interface_name == "web":
+        lines.append(WEB_FORMAT_PROMPT)
+    else:
+        lines.append(DEFAULT_FORMAT_PROMPT)
     today = date.today().isoformat()
 
     lines.append(

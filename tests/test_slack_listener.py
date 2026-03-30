@@ -56,6 +56,9 @@ def build_settings() -> Settings:
     return Settings(
         slack_bot_token="xoxb-test",
         slack_app_token="xapp-test",
+        web_enabled=False,
+        web_host="127.0.0.1",
+        web_port=8000,
         google_api_key="test-key",
         gemini_model="gemini-3-flash-preview",
         gemini_temperature=0.2,

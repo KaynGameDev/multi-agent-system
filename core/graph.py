@@ -61,6 +61,19 @@ def build_default_agent_registrations(settings=None) -> tuple[AgentRegistration,
     )
 
 
+def build_web_agent_registrations(settings=None) -> tuple[AgentRegistration, ...]:
+    allowed_agent_names = {
+        "general_chat_agent",
+        "knowledge_agent",
+        "project_task_agent",
+    }
+    return tuple(
+        registration
+        for registration in build_default_agent_registrations(settings=settings)
+        if registration.name in allowed_agent_names
+    )
+
+
 def normalize_agent_registrations(agent_registrations: Sequence[AgentRegistration] | None, *, settings=None) -> tuple[AgentRegistration, ...]:
     registrations = tuple(agent_registrations or build_default_agent_registrations(settings=settings))
     if not registrations:

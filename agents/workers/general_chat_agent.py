@@ -25,6 +25,13 @@ SLACK_FORMAT_PROMPT = (
     "Avoid oversized headings and noisy formatting."
 )
 
+WEB_FORMAT_PROMPT = (
+    "The current interface is a web chat page. "
+    "Write concise, clean Markdown for a browser-based chat transcript. "
+    "Use short paragraphs or flat lists when needed. "
+    "Keep headings modest and formatting tidy."
+)
+
 DEFAULT_FORMAT_PROMPT = (
     "Write concise, plain Markdown that stays readable across chat interfaces."
 )
@@ -45,4 +52,6 @@ def build_general_chat_prompt(state: AgentState) -> str:
     format_prompt = DEFAULT_FORMAT_PROMPT
     if interface_name == "slack":
         format_prompt = SLACK_FORMAT_PROMPT
+    elif interface_name == "web":
+        format_prompt = WEB_FORMAT_PROMPT
     return "\n\n".join((GENERAL_CHAT_BASE_PROMPT, format_prompt))

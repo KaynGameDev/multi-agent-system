@@ -40,6 +40,9 @@ DEFAULT_CONVERSION_WORK_DIR = "data/conversion"
 class Settings:
     slack_bot_token: str
     slack_app_token: str
+    web_enabled: bool
+    web_host: str
+    web_port: int
     google_api_key: str
     gemini_model: str
     gemini_temperature: float
@@ -82,6 +85,9 @@ def load_settings(force_reload: bool = False) -> Settings:
     _cached_settings = Settings(
         slack_bot_token=os.getenv("SLACK_BOT_TOKEN", ""),
         slack_app_token=os.getenv("SLACK_APP_TOKEN", ""),
+        web_enabled=parse_bool_env("WEB_ENABLED", False),
+        web_host=os.getenv("WEB_HOST", "127.0.0.1").strip() or "127.0.0.1",
+        web_port=int(os.getenv("WEB_PORT", "8000")),
         google_api_key=os.getenv("GOOGLE_API_KEY", ""),
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-3-flash-preview"),
         gemini_temperature=float(os.getenv("GEMINI_TEMPERATURE", "0.2")),
@@ -116,11 +122,12 @@ def load_settings(force_reload: bool = False) -> Settings:
 
 
 def validate_bootstrap_settings(settings: Settings) -> None:
+    validate_core_settings(settings)
+    validate_interface_settings(settings)
+
+
+def validate_core_settings(settings: Settings) -> None:
     missing: list[str] = []
-    if not settings.slack_bot_token:
-        missing.append("SLACK_BOT_TOKEN")
-    if not settings.slack_app_token:
-        missing.append("SLACK_APP_TOKEN")
     if not settings.google_api_key:
         missing.append("GOOGLE_API_KEY")
     if not settings.google_application_credentials:
@@ -131,6 +138,23 @@ def validate_bootstrap_settings(settings: Settings) -> None:
     if missing:
         joined = ", ".join(missing)
         raise RuntimeError(f"Missing required environment variables: {joined}")
+
+
+def validate_interface_settings(settings: Settings) -> None:
+    if not (is_slack_enabled(settings) or settings.web_enabled):
+        raise RuntimeError("No communication interface is configured.")
+
+    if settings.slack_bot_token and not settings.slack_app_token:
+        raise RuntimeError("Missing required environment variables: SLACK_APP_TOKEN")
+    if settings.slack_app_token and not settings.slack_bot_token:
+        raise RuntimeError("Missing required environment variables: SLACK_BOT_TOKEN")
+
+    if settings.web_enabled and settings.web_port <= 0:
+        raise RuntimeError("WEB_PORT must be a positive integer.")
+
+
+def is_slack_enabled(settings: Settings) -> bool:
+    return bool(settings.slack_bot_token and settings.slack_app_token)
 
 
 def normalize_knowledge_file_type(value: str) -> str:

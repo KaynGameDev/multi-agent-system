@@ -50,6 +50,21 @@ class GeneralChatAgentTests(unittest.TestCase):
         self.assertIn("Write concise, plain Markdown", prompt)
         self.assertNotIn("The current interface is Slack.", prompt)
 
+    def test_web_interface_uses_web_specific_format_guidance(self) -> None:
+        llm = DummyLLM()
+        node = GeneralChatAgentNode(llm)
+
+        node(
+            {
+                "interface_name": "web",
+                "messages": [HumanMessage(content="hello there")],
+            }
+        )
+
+        prompt = llm.last_messages[0].content
+        self.assertIn("The current interface is a web chat page.", prompt)
+        self.assertNotIn("Slack boundary converts it to mrkdwn", prompt)
+
 
 if __name__ == "__main__":
     unittest.main()

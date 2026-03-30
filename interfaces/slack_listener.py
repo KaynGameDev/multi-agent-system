@@ -10,6 +10,7 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 
 from core.config import Settings
 from core.identity_map import build_user_identity_context, resolve_identity
+from core.interface_messages import extract_final_text
 from core.slack_formatting import to_slack_mrkdwn
 from interfaces.slack_home import build_home_view
 from tools.conversion_google_sources import extract_google_document_references
@@ -157,7 +158,7 @@ class SlackListener:
                 initial_state,
                 config={"configurable": {"thread_id": thread_id}},
             )
-            final_text = to_slack_mrkdwn(self._extract_final_text(final_state))
+            final_text = to_slack_mrkdwn(extract_final_text(final_state))
             logger.debug(
                 "Completed Slack event channel=%s user=%s thread=%s response_chars=%s",
                 channel_id,
@@ -220,32 +221,6 @@ class SlackListener:
         if event.get("channel_type") == "im":
             return None
         return event.get("thread_ts") or event.get("ts")
-
-    def _extract_final_text(self, final_state: dict) -> str:
-        messages = final_state.get("messages") or []
-        if not messages:
-            return "I couldn't generate a response."
-
-        last_message = messages[-1]
-        content = getattr(last_message, "content", "")
-        return self._stringify_content(content) or "I couldn't generate a response."
-
-    def _stringify_content(self, content) -> str:
-        if isinstance(content, str):
-            return content
-
-        if isinstance(content, list):
-            parts: list[str] = []
-            for item in content:
-                if isinstance(item, str):
-                    parts.append(item)
-                elif isinstance(item, dict):
-                    text = item.get("text") or item.get("content")
-                    if isinstance(text, str):
-                        parts.append(text)
-            return "\n".join(part for part in parts if part).strip()
-
-        return str(content)
 
     def _load_user_context(self, user_id: str) -> dict:
         cached = self._user_context_cache.get(user_id)

@@ -6,6 +6,12 @@ pydantic>=2.6.0
 # Gemini
 langchain-google-genai>=2.0.0
 
+# Web chat
+fastapi>=0.115.0
+uvicorn>=0.30.0
+Markdown>=3.6
+bleach>=6.1.0
+
 # Slack
 slack-bolt>=1.18.1
 slack-sdk>=3.27.0

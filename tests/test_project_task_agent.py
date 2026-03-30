@@ -5,7 +5,7 @@ import unittest
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
-from agents.workers.project_task_agent import ProjectTaskAgentNode, build_task_list_response
+from agents.workers.project_task_agent import ProjectTaskAgentNode, build_project_task_prompt, build_task_list_response
 
 
 TASK_PAYLOAD = {
@@ -137,6 +137,17 @@ class ProjectTaskAgentTests(unittest.TestCase):
 
         self.assertEqual(llm.invocations, 1)
         self.assertEqual(result["messages"][0].content, "Fresh tool-backed answer")
+
+    def test_build_project_task_prompt_uses_web_format_guidance(self) -> None:
+        prompt = build_project_task_prompt(
+            {
+                "interface_name": "web",
+                "messages": [HumanMessage(content="What are my tasks?")],
+            }
+        )
+
+        self.assertIn("The current interface is a web chat page.", prompt)
+        self.assertNotIn("Slack boundary formatting", prompt)
 
 
 if __name__ == "__main__":
