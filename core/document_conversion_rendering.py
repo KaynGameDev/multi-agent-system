@@ -460,6 +460,37 @@ def build_conversion_failure_response(exc: Exception, preferred_language: str = 
             ]
         ).strip()
 
+    if failure_kind == "transport_disconnect":
+        if preferred_language == "zh":
+            return "\n".join(
+                [
+                    "我已经读取到源文档，但在把内容发送给 Gemini 做结构化提取时，连接在返回结果前中断了。",
+                    "",
+                    "这通常是临时性的模型网络问题，或者源内容过大导致上游提前断开，而不是文档权限问题。",
+                    "",
+                    "你可以这样处理：",
+                    "1. 直接再重试一次转换。",
+                    "2. 如果反复发生，请先缩小文档范围，或把最关键的 sheet / 段落单独发来。",
+                    "3. 如果环境必须经过代理，请继续检查 Gemini 的外网链路是否稳定。",
+                    "",
+                    f"错误详情：`{exc}`",
+                ]
+            ).strip()
+        return "\n".join(
+            [
+                "I could read the source document, but the connection dropped while Gemini was generating the structured extraction result.",
+                "",
+                "This usually means a transient model/network issue, or that the source bundle was large enough for the upstream request to get cut off. It is not the same as a document-permission failure.",
+                "",
+                "Please try one of these:",
+                "1. Retry the conversion once.",
+                "2. If it keeps happening, narrow the document or send the most important sheet/tab first.",
+                "3. If this environment must use a proxy, keep checking that outbound Gemini traffic is stable.",
+                "",
+                f"Error detail: `{exc}`",
+            ]
+        ).strip()
+
     if preferred_language == "zh":
         return f"处理这个转换会话时出错：{exc}"
     return f"I hit an error while processing this conversion session: {exc}"
@@ -468,7 +499,13 @@ def build_conversion_failure_response(exc: Exception, preferred_language: str = 
 def classify_conversion_failure(exc: Exception) -> str:
     if is_proxy_transport_error(exc):
         return "proxy_transport"
+    if is_transport_disconnect_error(exc):
+        return "transport_disconnect"
     return "unexpected"
+
+
+def is_retryable_conversion_failure(exc: Exception) -> bool:
+    return is_transport_disconnect_error(exc)
 
 
 def is_proxy_transport_error(exc: Exception) -> bool:
@@ -482,6 +519,45 @@ def is_proxy_transport_error(exc: Exception) -> bool:
         if "proxyerror" in error_type:
             return True
         if "tunnel connection failed" in error_text:
+            return True
+        current = current.__cause__ or current.__context__
+
+    return False
+
+
+def is_transport_disconnect_error(exc: Exception) -> bool:
+    disconnect_markers = (
+        "server disconnected without sending a response",
+        "connection reset by peer",
+        "connection aborted",
+        "remote end closed connection without response",
+        "connection closed before full response",
+        "connection terminated unexpectedly",
+        "read timed out",
+        "timed out",
+        "eof occurred in violation of protocol",
+    )
+    disconnect_types = (
+        "remoteprotocolerror",
+        "readtimeout",
+        "connecttimeout",
+        "readerror",
+        "connecterror",
+        "apiconnectionerror",
+        "serversdisconnectederror",
+        "serversdisconnected",
+    )
+
+    seen: set[int] = set()
+    current: BaseException | None = exc
+
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        error_type = type(current).__name__.lower()
+        error_text = str(current).lower()
+        if any(marker in error_type for marker in disconnect_types):
+            return True
+        if any(marker in error_text for marker in disconnect_markers):
             return True
         current = current.__cause__ or current.__context__
 

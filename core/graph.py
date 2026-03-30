@@ -66,6 +66,7 @@ def build_web_agent_registrations(settings=None) -> tuple[AgentRegistration, ...
         "general_chat_agent",
         "knowledge_agent",
         "project_task_agent",
+        "document_conversion_agent",
     }
     return tuple(
         registration

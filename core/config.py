@@ -38,6 +38,7 @@ DEFAULT_CONVERSION_WORK_DIR = "data/conversion"
 
 @dataclass(frozen=True)
 class Settings:
+    slack_enabled: bool
     slack_bot_token: str
     slack_app_token: str
     web_enabled: bool
@@ -83,6 +84,7 @@ def load_settings(force_reload: bool = False) -> Settings:
     ) or DEFAULT_KNOWLEDGE_FILE_TYPES
 
     _cached_settings = Settings(
+        slack_enabled=parse_bool_env("SLACK_ENABLED", True),
         slack_bot_token=os.getenv("SLACK_BOT_TOKEN", ""),
         slack_app_token=os.getenv("SLACK_APP_TOKEN", ""),
         web_enabled=parse_bool_env("WEB_ENABLED", False),
@@ -144,17 +146,18 @@ def validate_interface_settings(settings: Settings) -> None:
     if not (is_slack_enabled(settings) or settings.web_enabled):
         raise RuntimeError("No communication interface is configured.")
 
-    if settings.slack_bot_token and not settings.slack_app_token:
-        raise RuntimeError("Missing required environment variables: SLACK_APP_TOKEN")
-    if settings.slack_app_token and not settings.slack_bot_token:
-        raise RuntimeError("Missing required environment variables: SLACK_BOT_TOKEN")
+    if settings.slack_enabled:
+        if settings.slack_bot_token and not settings.slack_app_token:
+            raise RuntimeError("Missing required environment variables: SLACK_APP_TOKEN")
+        if settings.slack_app_token and not settings.slack_bot_token:
+            raise RuntimeError("Missing required environment variables: SLACK_BOT_TOKEN")
 
     if settings.web_enabled and settings.web_port <= 0:
         raise RuntimeError("WEB_PORT must be a positive integer.")
 
 
 def is_slack_enabled(settings: Settings) -> bool:
-    return bool(settings.slack_bot_token and settings.slack_app_token)
+    return bool(settings.slack_enabled and settings.slack_bot_token and settings.slack_app_token)
 
 
 def normalize_knowledge_file_type(value: str) -> str:

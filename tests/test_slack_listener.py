@@ -54,6 +54,7 @@ class DummyApp:
 
 def build_settings() -> Settings:
     return Settings(
+        slack_enabled=True,
         slack_bot_token="xoxb-test",
         slack_app_token="xapp-test",
         web_enabled=False,

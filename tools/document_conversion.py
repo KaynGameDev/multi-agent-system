@@ -35,6 +35,9 @@ CONVERSION_TERMINAL_STATUSES = {"published", "cancelled", "failed"}
 OPTIONAL_MODULE_NAMES = ("config", "economy", "localization", "ui", "analytics", "qa")
 DEFAULT_CONVERSION_WORK_DIR = "data/conversion"
 UPLOAD_ONLY_FALLBACK_TEXT = "Please convert the uploaded document into the canonical knowledge format."
+MAX_CONVERSION_SOURCE_BUNDLE_CHARS = 120_000
+MAX_CONVERSION_TABLE_HEAD_ROWS = 20
+MAX_CONVERSION_TABLE_TAIL_ROWS = 5
 
 MANIFEST_FIELDNAMES = (
     "package_id",
@@ -908,8 +911,90 @@ def load_source_bundle_text(
                 ]
             ).strip()
         )
+    bundle = "\n\n".join(part for part in parts if part.strip()).strip()
+    compacted = compact_source_bundle_for_extraction(bundle)
+    if compacted != bundle:
+        logger.debug(
+            "Compacted conversion source bundle original_chars=%s compacted_chars=%s source_count=%s",
+            len(bundle),
+            len(compacted),
+            len(sources),
+        )
+    return compacted
 
-    return "\n\n".join(part for part in parts if part.strip()).strip()
+
+def compact_source_bundle_for_extraction(
+    source_bundle: str,
+    *,
+    max_chars: int = MAX_CONVERSION_SOURCE_BUNDLE_CHARS,
+    table_head_rows: int = MAX_CONVERSION_TABLE_HEAD_ROWS,
+    table_tail_rows: int = MAX_CONVERSION_TABLE_TAIL_ROWS,
+) -> str:
+    text = source_bundle.strip()
+    if len(text) <= max_chars:
+        return text
+
+    compacted_lines: list[str] = []
+    lines = text.splitlines()
+    index = 0
+
+    while index < len(lines):
+        line = lines[index]
+        if line.startswith("|"):
+            block: list[str] = []
+            while index < len(lines) and lines[index].startswith("|"):
+                block.append(lines[index])
+                index += 1
+            compacted_lines.extend(
+                compact_markdown_table_block(
+                    block,
+                    head_rows=table_head_rows,
+                    tail_rows=table_tail_rows,
+                )
+            )
+            continue
+
+        compacted_lines.append(line)
+        index += 1
+
+    compacted = "\n".join(compacted_lines).strip()
+    if len(compacted) <= max_chars:
+        return compacted
+
+    note_template = "_Source bundle truncated for extraction. Omitted approximately {omitted_chars} trailing characters._"
+    reserved_chars = len(note_template.format(omitted_chars=0)) + 2
+    clipped_limit = max(max_chars - reserved_chars, 0)
+    clipped = compacted[:clipped_limit].rstrip() if clipped_limit else ""
+    last_newline = clipped.rfind("\n")
+    if last_newline > 0:
+        clipped = clipped[:last_newline].rstrip()
+    omitted_chars = max(len(compacted) - len(clipped), 0)
+    note = note_template.format(omitted_chars=omitted_chars)
+    if not clipped:
+        return note[:max_chars].strip()
+    return "\n".join([clipped, "", note]).strip()[:max_chars].strip()
+
+
+def compact_markdown_table_block(
+    lines: list[str],
+    *,
+    head_rows: int,
+    tail_rows: int,
+) -> list[str]:
+    if len(lines) <= head_rows + tail_rows + 2:
+        return lines
+
+    head_count = min(len(lines), head_rows + 2)
+    tail_count = max(tail_rows, 0)
+    kept_lines = list(lines[:head_count])
+
+    omitted_rows = len(lines) - head_count - tail_count
+    if omitted_rows > 0:
+        kept_lines.append(f"_Table truncated for extraction. Omitted {omitted_rows} middle rows._")
+
+    if tail_count:
+        kept_lines.extend(lines[-tail_count:])
+    return kept_lines
 
 
 def load_shared_context(knowledge_root: Path, game_slug: str = "") -> str:

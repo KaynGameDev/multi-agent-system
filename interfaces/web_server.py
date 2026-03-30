@@ -15,17 +15,40 @@ from core.config import Settings
 from core.identity_map import build_user_identity_context
 from core.interface_messages import extract_final_text
 from core.web_conversations import ConversationNotFoundError, WebConversationStore
+from tools.conversion_google_sources import extract_google_document_references
+from tools.document_conversion import ConversionSessionStore
 
 logger = logging.getLogger(__name__)
 
-GOOGLE_DOC_PATTERN = re.compile(r"https://docs\.google\.com/(?:document|spreadsheets|presentation)/", re.IGNORECASE)
 UPLOAD_PATTERN = re.compile(r"\b(upload|attach|attachment|file)\b", re.IGNORECASE)
 CONVERSION_PATTERN = re.compile(r"\b(convert|conversion|knowledge package)\b", re.IGNORECASE)
-CONVERSION_COMMAND_PATTERN = re.compile(r"^\s*(approve|approved|publish)\s*$", re.IGNORECASE)
 UNSUPPORTED_WEB_MESSAGE = (
-    "Document conversion and uploads still live in Slack for now. "
-    "This web chat supports general chat, knowledge lookups, and project task questions."
+    "Google Docs and Sheets links can be converted here. "
+    "Raw file uploads still live in Slack for now."
 )
+CASUAL_GREETING_NORMALIZED_TEXTS = {
+    "hi",
+    "hello",
+    "hey",
+    "yo",
+    "good morning",
+    "good afternoon",
+    "good evening",
+    "你好",
+    "您好",
+    "嗨",
+    "哈喽",
+    "早上好",
+    "下午好",
+    "晚上好",
+}
+
+
+def format_web_chat_url(host: str, port: int) -> str:
+    normalized_host = (host or "").strip() or "127.0.0.1"
+    if normalized_host in {"0.0.0.0", "::", "[::]"}:
+        normalized_host = "127.0.0.1"
+    return f"http://{normalized_host}:{port}"
 
 
 class ConversationCreateRequest(BaseModel):
@@ -39,10 +62,19 @@ class WebMessageRequest(BaseModel):
 
 
 class WebServer:
-    def __init__(self, agent_graph, settings: Settings, conversation_store: WebConversationStore | None = None) -> None:
+    def __init__(
+        self,
+        agent_graph,
+        settings: Settings,
+        conversation_store: WebConversationStore | None = None,
+        conversion_store: ConversionSessionStore | None = None,
+    ) -> None:
         self.agent_graph = agent_graph
         self.settings = settings
-        self.conversation_store = conversation_store or WebConversationStore()
+        self.conversation_store = conversation_store or WebConversationStore(
+            self._resolve_path(settings.conversion_work_dir) / "web_conversations.json"
+        )
+        self.conversion_store = conversion_store or ConversionSessionStore(self._resolve_path(settings.conversion_work_dir))
         self.static_dir = Path(__file__).resolve().parent / "web_static"
         self.app = self._build_app()
         self._server: uvicorn.Server | None = None
@@ -55,7 +87,7 @@ class WebServer:
             log_level="info",
         )
         self._server = uvicorn.Server(config)
-        print(f"🌐 Jade Agent web chat is listening on http://{self.settings.web_host}:{self.settings.web_port}")
+        print(f"🌐 Jade Agent web chat is listening on {format_web_chat_url(self.settings.web_host, self.settings.web_port)}")
         self._server.run()
 
     def stop(self) -> None:
@@ -99,6 +131,8 @@ class WebServer:
 
             user_message = payload.message.strip()
             self.conversation_store.append_message(conversation_id, role="user", markdown=user_message)
+            thread_id = f"web:{conversation_id}"
+            active_session = self.conversion_store.get_active_session_by_thread(thread_id)
 
             if self._is_unsupported_web_request(user_message):
                 assistant_text = UNSUPPORTED_WEB_MESSAGE
@@ -111,7 +145,7 @@ class WebServer:
                     **conversation,
                     "assistant_message": conversation["messages"][-1],
                     "route": "",
-                    "route_reason": "Document conversion remains Slack-only for web v1.",
+                    "route_reason": "Raw file uploads remain Slack-only for web v1.",
                 }
 
             user_context = build_user_identity_context(
@@ -119,7 +153,6 @@ class WebServer:
                 slack_real_name=payload.display_name,
                 email=payload.email,
             )
-            thread_id = f"web:{conversation_id}"
             initial_state = {
                 "messages": [HumanMessage(content=user_message)],
                 "interface_name": "web",
@@ -128,6 +161,11 @@ class WebServer:
                 "channel_id": conversation_id,
                 **user_context,
             }
+            if self._should_route_to_conversion(active_session=active_session, text=user_message):
+                initial_state["route"] = "document_conversion_agent"
+                initial_state["route_reason"] = "Web document conversion session."
+            if active_session is not None:
+                initial_state["conversion_session_id"] = active_session.session_id
 
             logger.debug(
                 "Invoking web graph conversation=%s thread=%s email=%s display_name=%s",
@@ -166,8 +204,25 @@ class WebServer:
         return app
 
     def _is_unsupported_web_request(self, text: str) -> bool:
-        if GOOGLE_DOC_PATTERN.search(text):
-            return True
-        if CONVERSION_COMMAND_PATTERN.match(text):
-            return True
+        if extract_google_document_references(text):
+            return False
         return bool(UPLOAD_PATTERN.search(text) and CONVERSION_PATTERN.search(text))
+
+    def _should_route_to_conversion(self, *, active_session, text: str) -> bool:
+        if extract_google_document_references(text):
+            return True
+        if active_session is None:
+            return False
+        return not self._is_casual_greeting(text)
+
+    def _is_casual_greeting(self, text: str) -> bool:
+        normalized = re.sub(r"[!?,.，。！？\s]+", " ", text.strip().lower()).strip()
+        if not normalized:
+            return False
+        return normalized in CASUAL_GREETING_NORMALIZED_TEXTS
+
+    def _resolve_path(self, configured_value: str) -> Path:
+        configured_path = Path(configured_value or self.settings.conversion_work_dir).expanduser()
+        if configured_path.is_absolute():
+            return configured_path.resolve()
+        return (Path(__file__).resolve().parent.parent / configured_path).resolve()

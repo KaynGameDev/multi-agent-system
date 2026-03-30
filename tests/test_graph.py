@@ -44,13 +44,13 @@ class GraphTests(unittest.TestCase):
         )
         self.assertEqual(len(knowledge_registration.tools), 3)
 
-    def test_web_agent_registrations_exclude_document_conversion_agent(self) -> None:
+    def test_web_agent_registrations_include_document_conversion_agent(self) -> None:
         registrations = build_web_agent_registrations()
         registration_names = [registration.name for registration in registrations]
 
         self.assertEqual(
             registration_names,
-            ["general_chat_agent", "knowledge_agent", "project_task_agent"],
+            ["general_chat_agent", "knowledge_agent", "project_task_agent", "document_conversion_agent"],
         )
 
     def test_build_graph_supports_custom_agent_registrations(self) -> None:

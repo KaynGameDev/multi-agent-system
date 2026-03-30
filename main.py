@@ -13,7 +13,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from core.config import is_slack_enabled, load_settings, validate_bootstrap_settings
 from core.graph import build_agent_graph, build_web_agent_registrations
 from interfaces.slack_listener import SlackListener
-from interfaces.web_server import WebServer
+from interfaces.web_server import WebServer, format_web_chat_url
 
 logger = logging.getLogger(__name__)
 
@@ -74,8 +74,11 @@ def bootstrap_system() -> list[object]:
     listeners: list[object] = []
     if is_slack_enabled(settings):
         listeners.append(SlackListener(agent_graph=agent_graph, settings=settings))
+    elif not settings.slack_enabled and (settings.slack_bot_token or settings.slack_app_token):
+        print("💤 Slack listener disabled via SLACK_ENABLED=false")
     if settings.web_enabled:
         listeners.append(WebServer(agent_graph=web_graph, settings=settings))
+        print(f"🌐 Web chat: {format_web_chat_url(settings.web_host, settings.web_port)}")
 
     print("⚙ Compiled Jade Agent graph.")
     return listeners

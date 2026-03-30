@@ -1,11 +1,17 @@
 from __future__ import annotations
 
+import json
+import logging
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
+from pathlib import Path
 from threading import RLock
+from tempfile import NamedTemporaryFile
 from uuid import uuid4
 
 from core.web_markdown import render_markdown_html
+
+logger = logging.getLogger(__name__)
 
 
 def utc_now_iso() -> str:
@@ -44,9 +50,11 @@ class ConversationNotFoundError(KeyError):
 
 
 class WebConversationStore:
-    def __init__(self) -> None:
+    def __init__(self, storage_path: str | Path | None = None) -> None:
+        self._storage_path = Path(storage_path).expanduser().resolve() if storage_path else None
         self._conversations: dict[str, Conversation] = {}
         self._lock = RLock()
+        self._load()
 
     def create_conversation(self, *, title: str = "New chat") -> dict:
         with self._lock:
@@ -58,6 +66,7 @@ class WebConversationStore:
                 updated_at=timestamp,
             )
             self._conversations[conversation.conversation_id] = conversation
+            self._persist_locked()
             return self._serialize_conversation(conversation)
 
     def list_conversations(self) -> list[dict]:
@@ -95,7 +104,114 @@ class WebConversationStore:
             if role == "user" and len(conversation.messages) == 1:
                 conversation.title = derive_conversation_title(markdown)
             conversation.updated_at = timestamp
+            self._persist_locked()
             return self._serialize_conversation(conversation)
+
+    def _load(self) -> None:
+        if self._storage_path is None or not self._storage_path.exists():
+            return
+
+        try:
+            payload = json.loads(self._storage_path.read_text(encoding="utf-8"))
+        except Exception:
+            logger.warning("Failed to load web conversation store path=%s", self._storage_path, exc_info=True)
+            return
+
+        raw_conversations = payload.get("conversations", []) if isinstance(payload, dict) else []
+        if not isinstance(raw_conversations, list):
+            logger.warning("Ignoring invalid web conversation store payload path=%s", self._storage_path)
+            return
+
+        conversations: dict[str, Conversation] = {}
+        for item in raw_conversations:
+            conversation = self._deserialize_conversation(item)
+            if conversation is None:
+                continue
+            conversations[conversation.conversation_id] = conversation
+        self._conversations = conversations
+
+    def _persist_locked(self) -> None:
+        if self._storage_path is None:
+            return
+
+        self._storage_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {
+            "conversations": [
+                self._serialize_conversation_for_disk(conversation)
+                for conversation in sorted(
+                    self._conversations.values(),
+                    key=lambda conversation: conversation.updated_at,
+                )
+            ]
+        }
+        with NamedTemporaryFile(
+            "w",
+            encoding="utf-8",
+            dir=str(self._storage_path.parent),
+            delete=False,
+        ) as handle:
+            json.dump(payload, handle, ensure_ascii=False, indent=2)
+            handle.flush()
+            temp_path = Path(handle.name)
+        temp_path.replace(self._storage_path)
+
+    def _serialize_conversation_for_disk(self, conversation: Conversation) -> dict:
+        return {
+            "conversation_id": conversation.conversation_id,
+            "title": conversation.title,
+            "created_at": conversation.created_at,
+            "updated_at": conversation.updated_at,
+            "messages": [
+                {
+                    "id": message.id,
+                    "role": message.role,
+                    "markdown": message.markdown,
+                    "created_at": message.created_at,
+                }
+                for message in conversation.messages
+            ],
+        }
+
+    def _deserialize_conversation(self, payload: object) -> Conversation | None:
+        if not isinstance(payload, dict):
+            return None
+        conversation_id = str(payload.get("conversation_id", "")).strip()
+        if not conversation_id:
+            return None
+        title = str(payload.get("title", "")).strip() or "New chat"
+        created_at = str(payload.get("created_at", "")).strip() or utc_now_iso()
+        updated_at = str(payload.get("updated_at", "")).strip() or created_at
+        raw_messages = payload.get("messages", [])
+        messages: list[TranscriptMessage] = []
+        if isinstance(raw_messages, list):
+            for raw_message in raw_messages:
+                message = self._deserialize_message(raw_message)
+                if message is not None:
+                    messages.append(message)
+        return Conversation(
+            conversation_id=conversation_id,
+            title=title,
+            created_at=created_at,
+            updated_at=updated_at,
+            messages=messages,
+        )
+
+    def _deserialize_message(self, payload: object) -> TranscriptMessage | None:
+        if not isinstance(payload, dict):
+            return None
+        message_id = str(payload.get("id", "")).strip() or uuid4().hex
+        role = str(payload.get("role", "")).strip()
+        markdown = str(payload.get("markdown", ""))
+        created_at = str(payload.get("created_at", "")).strip() or utc_now_iso()
+        if role not in {"user", "assistant"}:
+            return None
+        return TranscriptMessage(
+            id=message_id,
+            role=role,
+            markdown=markdown,
+            html=render_markdown_html(markdown),
+            created_at=created_at,
+        )
 
     def _serialize_metadata(self, conversation: Conversation) -> dict:
         return {

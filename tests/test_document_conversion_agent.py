@@ -5,11 +5,12 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import httpcore
 from langchain_core.messages import AIMessage, HumanMessage
 
 from agents.workers.document_conversion_agent import DocumentConversionAgentNode
 from core.config import Settings
-from tools.document_conversion import read_tsv
+from tools.document_conversion import compact_source_bundle_for_extraction, read_tsv
 
 
 class DummyStructuredExtractor:
@@ -57,6 +58,29 @@ class RaisingLLM:
         return RaisingStructuredExtractor()
 
 
+class FlakyStructuredExtractor:
+    def __init__(self, schema, response: dict) -> None:
+        self.schema = schema
+        self.response = response
+        self.invocations = 0
+
+    def invoke(self, _messages):
+        self.invocations += 1
+        if self.invocations == 1:
+            raise httpcore.RemoteProtocolError("Server disconnected without sending a response.")
+        return self.schema(**self.response)
+
+
+class FlakyLLM:
+    def __init__(self, response: dict) -> None:
+        self.response = response
+        self.extractor: FlakyStructuredExtractor | None = None
+
+    def with_structured_output(self, schema):
+        self.extractor = FlakyStructuredExtractor(schema, self.response)
+        return self.extractor
+
+
 class ProxyError(RuntimeError):
     pass
 
@@ -73,6 +97,7 @@ class ProxyRaisingLLM:
 
 def build_settings(*, knowledge_dir: str, conversion_dir: str) -> Settings:
     return Settings(
+        slack_enabled=True,
         slack_bot_token="xoxb-test",
         slack_app_token="xapp-test",
         web_enabled=False,
@@ -709,6 +734,64 @@ class DocumentConversionAgentTests(unittest.TestCase):
         self.assertEqual(result["conversion_status"], "failed")
         self.assertIn("Server disconnected without sending a response.", result["messages"][0].content)
         self.assertIsNone(node.store.get_active_session_by_thread("D999"))
+
+    def test_compact_source_bundle_for_large_sheet_exports(self) -> None:
+        header = "# Oversized Sheet\n## Sheet: Main"
+        table_lines = [
+            "| col_a | col_b |",
+            "| --- | --- |",
+        ]
+        table_lines.extend(f"| row_{index} | value_{index} |" for index in range(80))
+        bundle = "\n".join([header, *table_lines])
+
+        compacted = compact_source_bundle_for_extraction(bundle, max_chars=1_500, table_head_rows=5, table_tail_rows=2)
+
+        self.assertLess(len(compacted), len(bundle))
+        self.assertIn("| row_0 | value_0 |", compacted)
+        self.assertIn("| row_79 | value_79 |", compacted)
+        self.assertIn("_Table truncated for extraction.", compacted)
+
+    def test_transient_disconnect_retries_and_recovers(self) -> None:
+        source_path = self._write_source_file(
+            "recoverable.md",
+            "# Recoverable\n\nThis source should succeed after one transient disconnect.\n",
+        )
+        payload = {
+            "game_name": "BuYuDaLuanDou",
+            "game_slug": "buyudalouandou",
+            "market_name": "Indonesia",
+            "market_slug": "indonesia",
+            "feature_name": "Weekly Activity",
+            "feature_slug": "weekly-activity",
+            "overview": "A weekly activity with staged tasks and rewards.",
+            "terminology": [{"term_id": "weekly_activity", "canonical_en": "Weekly Activity", "definition": "A weekly feature."}],
+            "entities": [{"entity_id": "weekly_task", "name_en": "Weekly Task", "description": "A task in the weekly activity."}],
+            "rules": [{"rule_id": "weekly_reset", "title_en": "Weekly Reset", "description": "Tasks reset every cycle."}],
+            "config_overview": ["Weekly tasks unlock rewards across the cycle."],
+        }
+        llm = FlakyLLM(payload)
+        node = DocumentConversionAgentNode(llm, settings=self.settings)
+
+        result = node(
+            {
+                "messages": [HumanMessage(content="Please convert this document.")],
+                "thread_id": "D1002",
+                "channel_id": "D1002",
+                "user_id": "U1002",
+                "uploaded_files": [
+                    {
+                        "id": "F1002",
+                        "name": "recoverable.md",
+                        "local_path": source_path,
+                    }
+                ],
+            }
+        )
+
+        self.assertEqual(result["conversion_status"], "ready_for_approval")
+        self.assertIn("ready for approval", result["messages"][0].content.lower())
+        self.assertIsNotNone(llm.extractor)
+        self.assertGreaterEqual(llm.extractor.invocations, 2)
 
     def test_download_failure_returns_retry_message_instead_of_failing_session(self) -> None:
         node = DocumentConversionAgentNode(DummyLLM([]), settings=self.settings)

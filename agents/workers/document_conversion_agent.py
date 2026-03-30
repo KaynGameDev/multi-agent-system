@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import re
+import time
 from pathlib import Path
 from typing import Any
 
@@ -10,8 +11,9 @@ from pydantic import BaseModel, Field
 
 from core.config import DEFAULT_KNOWLEDGE_BASE_DIR, load_settings
 from core.document_conversion_rendering import (
-    classify_conversion_failure,
     build_targeted_questions,
+    classify_conversion_failure,
+    is_retryable_conversion_failure,
     render_conversion_response,
 )
 from core.language import detect_response_language
@@ -30,7 +32,6 @@ from tools.document_conversion import (
     ingest_uploaded_files,
     load_existing_package_context,
     load_shared_context,
-    load_source_bundle_text,
     normalize_module_name,
     normalize_slug,
     publish_conversion_package,
@@ -39,9 +40,12 @@ from tools.document_conversion import (
     ConversionSessionStore,
 )
 from tools.conversion_google_sources import GoogleDocumentReference, extract_google_document_references
+from tools.conversion_retrieval import build_retrieved_source_bundle
 
 PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 logger = logging.getLogger(__name__)
+EXTRACT_DRAFT_MAX_ATTEMPTS = 3
+EXTRACT_DRAFT_RETRY_BASE_DELAY_SECONDS = 0.75
 
 APPROVAL_PATTERNS = (
     r"^\s*approve\s*$",
@@ -366,11 +370,12 @@ class DocumentConversionAgentNode:
             }
 
         initial_context = load_shared_context(self.knowledge_root)
-        source_bundle = load_source_bundle_text(
+        source_bundle = build_retrieved_source_bundle(
             sources,
             shared_context=initial_context,
             existing_package_context="",
             answer_history=session.answer_history,
+            latest_user_text=latest_text,
         )
         first_pass = self._extract_draft(source_bundle)
         first_pass = normalize_draft_payload(first_pass)
@@ -390,11 +395,15 @@ class DocumentConversionAgentNode:
             feature_slug,
         )
         if second_pass_context or existing_package_context:
-            source_bundle = load_source_bundle_text(
+            source_bundle = build_retrieved_source_bundle(
                 sources,
                 shared_context=second_pass_context,
                 existing_package_context=existing_package_context,
                 answer_history=session.answer_history,
+                latest_user_text=latest_text,
+                game_slug=game_slug,
+                market_slug=market_slug,
+                feature_slug=feature_slug,
             )
             draft_payload = normalize_draft_payload(self._extract_draft(source_bundle))
         else:
@@ -562,19 +571,39 @@ class DocumentConversionAgentNode:
         return None
 
     def _extract_draft(self, source_bundle: str) -> dict[str, Any]:
-        result = self.extractor.invoke(
-            [
-                SystemMessage(content=CONVERSION_EXTRACTOR_PROMPT),
-                HumanMessage(content=source_bundle),
-            ]
-        )
-        if isinstance(result, BaseModel):
-            return result.model_dump()
-        if hasattr(result, "model_dump"):
-            return result.model_dump()
-        if isinstance(result, dict):
-            return result
-        raise RuntimeError("Conversion extractor returned an unexpected payload type.")
+        messages = [
+            SystemMessage(content=CONVERSION_EXTRACTOR_PROMPT),
+            HumanMessage(content=source_bundle),
+        ]
+        last_error: Exception | None = None
+
+        for attempt in range(1, EXTRACT_DRAFT_MAX_ATTEMPTS + 1):
+            try:
+                result = self.extractor.invoke(messages)
+                if isinstance(result, BaseModel):
+                    return result.model_dump()
+                if hasattr(result, "model_dump"):
+                    return result.model_dump()
+                if isinstance(result, dict):
+                    return result
+                raise RuntimeError("Conversion extractor returned an unexpected payload type.")
+            except Exception as exc:
+                last_error = exc
+                if attempt >= EXTRACT_DRAFT_MAX_ATTEMPTS or not is_retryable_conversion_failure(exc):
+                    raise
+                delay_seconds = EXTRACT_DRAFT_RETRY_BASE_DELAY_SECONDS * attempt
+                logger.warning(
+                    "Conversion extractor disconnected; retrying attempt=%s/%s source_bundle_chars=%s error=%s",
+                    attempt + 1,
+                    EXTRACT_DRAFT_MAX_ATTEMPTS,
+                    len(source_bundle),
+                    exc,
+                )
+                time.sleep(delay_seconds)
+
+        if last_error is not None:
+            raise last_error
+        raise RuntimeError("Conversion extractor failed without returning a payload.")
 
 
 def normalize_draft_payload(payload: dict[str, Any]) -> dict[str, Any]:

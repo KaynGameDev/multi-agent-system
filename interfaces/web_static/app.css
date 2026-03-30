@@ -107,8 +107,29 @@ button {
   min-height: 0;
   flex: 1;
   flex-direction: column;
-  gap: 0.35rem;
+  gap: 0.85rem;
   overflow-y: auto;
+}
+
+.conversation-group {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+}
+
+.conversation-group__label {
+  padding: 0 0.35rem;
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-soft);
+}
+
+.conversation-list__empty {
+  padding: 0.5rem 0.35rem;
+  font-size: 0.9rem;
+  color: var(--text-soft);
 }
 
 .conversation-list__item {
@@ -349,6 +370,8 @@ button {
   background: rgba(255, 255, 255, 0.76);
   box-shadow: 0 12px 40px rgba(15, 23, 42, 0.05);
   line-height: 1.65;
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .message--user .message__card {
@@ -413,6 +436,8 @@ button {
 
 .message__card a {
   color: var(--accent-strong);
+  overflow-wrap: anywhere;
+  word-break: break-word;
 }
 
 .message__route {

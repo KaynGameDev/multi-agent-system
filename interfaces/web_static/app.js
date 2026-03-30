@@ -83,6 +83,35 @@ function formatRelativeTime(isoString) {
   return timestamp.toLocaleDateString(undefined, { month: "short", day: "numeric" });
 }
 
+function startOfLocalDay(date) {
+  return new Date(date.getFullYear(), date.getMonth(), date.getDate());
+}
+
+function getConversationGroupLabel(isoString) {
+  const timestamp = new Date(isoString);
+  if (Number.isNaN(timestamp.getTime())) {
+    return "Older";
+  }
+
+  const today = startOfLocalDay(new Date());
+  const targetDay = startOfLocalDay(timestamp);
+  const dayDiff = Math.round((today.getTime() - targetDay.getTime()) / (24 * 60 * 60 * 1000));
+
+  if (dayDiff <= 0) {
+    return "Today";
+  }
+  if (dayDiff === 1) {
+    return "Yesterday";
+  }
+  if (dayDiff < 7) {
+    return "Previous 7 Days";
+  }
+  if (dayDiff < 30) {
+    return "Previous 30 Days";
+  }
+  return "Older";
+}
+
 function escapeHtml(text) {
   const div = document.createElement("div");
   div.textContent = text;
@@ -102,22 +131,56 @@ function openSidebar() {
 function renderConversationList() {
   elements.conversationList.innerHTML = "";
 
+  const orderedGroups = ["Today", "Yesterday", "Previous 7 Days", "Previous 30 Days", "Older"];
+  const groups = new Map(orderedGroups.map((label) => [label, []]));
+
   for (const conversation of state.conversations) {
-    const button = document.createElement("button");
-    button.type = "button";
-    button.className = "conversation-list__item";
-    if (conversation.conversation_id === state.activeConversationId) {
-      button.classList.add("is-active");
+    const label = getConversationGroupLabel(conversation.updated_at);
+    groups.get(label).push(conversation);
+  }
+
+  let renderedCount = 0;
+  for (const label of orderedGroups) {
+    const conversations = groups.get(label) || [];
+    if (!conversations.length) {
+      continue;
     }
-    button.innerHTML = `
-      <span class="conversation-list__title">${escapeHtml(conversation.title || "New chat")}</span>
-      <span class="conversation-list__time">${escapeHtml(formatRelativeTime(conversation.updated_at))}</span>
-    `;
-    button.addEventListener("click", async () => {
-      await loadConversation(conversation.conversation_id);
-      closeSidebar();
-    });
-    elements.conversationList.appendChild(button);
+
+    const group = document.createElement("section");
+    group.className = "conversation-group";
+
+    const heading = document.createElement("div");
+    heading.className = "conversation-group__label";
+    heading.textContent = label;
+    group.appendChild(heading);
+
+    for (const conversation of conversations) {
+      const button = document.createElement("button");
+      button.type = "button";
+      button.className = "conversation-list__item";
+      if (conversation.conversation_id === state.activeConversationId) {
+        button.classList.add("is-active");
+      }
+      button.innerHTML = `
+        <span class="conversation-list__title">${escapeHtml(conversation.title || "New chat")}</span>
+        <span class="conversation-list__time">${escapeHtml(formatRelativeTime(conversation.updated_at))}</span>
+      `;
+      button.addEventListener("click", async () => {
+        await loadConversation(conversation.conversation_id);
+        closeSidebar();
+      });
+      group.appendChild(button);
+      renderedCount += 1;
+    }
+
+    elements.conversationList.appendChild(group);
+  }
+
+  if (!renderedCount) {
+    const empty = document.createElement("div");
+    empty.className = "conversation-list__empty";
+    empty.textContent = "No saved chats yet.";
+    elements.conversationList.appendChild(empty);
   }
 }
 

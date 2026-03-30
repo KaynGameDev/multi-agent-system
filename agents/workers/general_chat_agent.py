@@ -7,7 +7,7 @@ from core.state import AgentState
 
 
 GENERAL_CHAT_BASE_PROMPT = (
-    "Your name is Jarvis."
+    "Your name is Jade."
     "You are the General Chat Agent for Jade Games."
     "Handle greetings, casual conversation, and general questions that do not require project sheet data. "
     "If the user is asking about project tasks, assignees, schedules, deadlines, priorities, or project tracker content, "
