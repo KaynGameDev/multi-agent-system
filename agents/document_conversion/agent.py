@@ -10,6 +10,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from app.config import DEFAULT_KNOWLEDGE_BASE_DIR, load_settings
+from app.paths import resolve_project_path
 from agents.document_conversion.rendering import (
     build_targeted_questions,
     classify_conversion_failure,
@@ -42,7 +43,6 @@ from tools.document_conversion import (
 from tools.conversion_google_sources import GoogleDocumentReference, extract_google_document_references
 from tools.conversion_retrieval import build_retrieved_source_bundle
 
-PROJECT_ROOT = Path(__file__).resolve().parent.parent.parent
 logger = logging.getLogger(__name__)
 EXTRACT_DRAFT_MAX_ATTEMPTS = 3
 EXTRACT_DRAFT_RETRY_BASE_DELAY_SECONDS = 0.75
@@ -510,10 +510,7 @@ class DocumentConversionAgentNode:
         }
 
     def _resolve_path(self, configured_value: str, default_value: str) -> Path:
-        configured_path = Path(configured_value or default_value).expanduser()
-        if configured_path.is_absolute():
-            return configured_path.resolve()
-        return (PROJECT_ROOT / configured_path).resolve()
+        return resolve_project_path(configured_value, default_value)
 
     def _resolve_session(
         self,

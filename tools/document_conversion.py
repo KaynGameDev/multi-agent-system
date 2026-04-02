@@ -17,6 +17,7 @@ from typing import Any
 from uuid import uuid4
 
 from app.config import DEFAULT_KNOWLEDGE_BASE_DIR, load_settings
+from app.paths import resolve_project_path
 from tools.conversion_google_sources import GoogleDocumentReference, fetch_google_document_source
 from tools.knowledge_base import load_knowledge_document
 
@@ -156,18 +157,18 @@ def deserialize_json(value: str | None, default: Any) -> Any:
 
 def get_conversion_work_root() -> Path:
     settings = load_settings()
-    configured_root = Path(getattr(settings, "conversion_work_dir", DEFAULT_CONVERSION_WORK_DIR)).expanduser()
-    if configured_root.is_absolute():
-        return configured_root.resolve()
-    return (Path(__file__).resolve().parent.parent / configured_root).resolve()
+    return resolve_project_path(
+        getattr(settings, "conversion_work_dir", DEFAULT_CONVERSION_WORK_DIR),
+        DEFAULT_CONVERSION_WORK_DIR,
+    )
 
 
 def get_knowledge_root() -> Path:
     settings = load_settings()
-    configured_root = Path(settings.knowledge_base_dir or DEFAULT_KNOWLEDGE_BASE_DIR).expanduser()
-    if configured_root.is_absolute():
-        return configured_root.resolve()
-    return (Path(__file__).resolve().parent.parent / configured_root).resolve()
+    return resolve_project_path(
+        settings.knowledge_base_dir,
+        DEFAULT_KNOWLEDGE_BASE_DIR,
+    )
 
 
 def normalize_slug(value: str) -> str:

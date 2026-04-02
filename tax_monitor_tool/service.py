@@ -8,6 +8,7 @@ from threading import Event
 from slack_sdk import WebClient
 
 from app.config import Settings
+from app.paths import resolve_project_path
 from interfaces.slack.formatting import to_slack_mrkdwn
 from tax_monitor_tool.monitoring import (
     PlaywrightTaxPageClient,
@@ -201,7 +202,4 @@ class TaxMonitorService:
         logger.info("Published tax monitor alerts count=%s", len(alerts))
 
     def _resolve_path(self, configured_value: str) -> Path:
-        configured_path = Path(configured_value or self.settings.tax_monitor_state_path).expanduser()
-        if configured_path.is_absolute():
-            return configured_path.resolve()
-        return (Path(__file__).resolve().parent.parent / configured_path).resolve()
+        return resolve_project_path(configured_value, self.settings.tax_monitor_state_path)

@@ -14,12 +14,12 @@ from pydantic import BaseModel, Field
 from app.config import Settings
 from app.identity import build_user_identity_context
 from app.messages import extract_final_text
+from app.paths import resolve_project_path
 from interfaces.web.conversations import ConversationNotFoundError, WebConversationStore
 from tools.conversion_google_sources import extract_google_document_references
 from tools.document_conversion import ConversionSessionStore
 
 logger = logging.getLogger(__name__)
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 UPLOAD_PATTERN = re.compile(r"\b(upload|attach|attachment|file)\b", re.IGNORECASE)
 CONVERSION_PATTERN = re.compile(r"\b(convert|conversion|knowledge package)\b", re.IGNORECASE)
@@ -223,7 +223,4 @@ class WebServer:
         return normalized in CASUAL_GREETING_NORMALIZED_TEXTS
 
     def _resolve_path(self, configured_value: str) -> Path:
-        configured_path = Path(configured_value or self.settings.conversion_work_dir).expanduser()
-        if configured_path.is_absolute():
-            return configured_path.resolve()
-        return (PROJECT_ROOT / configured_path).resolve()
+        return resolve_project_path(configured_value, self.settings.conversion_work_dir)

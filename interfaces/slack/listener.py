@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import logging
 import re
-from pathlib import Path
 
 from langchain_core.messages import HumanMessage
 from slack_bolt import App
@@ -11,9 +10,10 @@ from slack_bolt.adapter.socket_mode import SocketModeHandler
 from app.config import Settings
 from app.identity import build_user_identity_context, resolve_identity
 from app.messages import extract_final_text
+from app.paths import resolve_project_path
 from interfaces.slack.formatting import to_slack_mrkdwn
-from tax_monitor_tool.verification import TaxMonitorVerificationBroker
 from interfaces.slack.home import build_home_view
+from tax_monitor_tool.verification import TaxMonitorVerificationBroker
 from tools.conversion_google_sources import extract_google_document_references
 from tools.document_conversion import ConversionSessionStore, UPLOAD_ONLY_FALLBACK_TEXT
 
@@ -35,7 +35,6 @@ CASUAL_GREETING_NORMALIZED_TEXTS = {
     "晚上好",
 }
 logger = logging.getLogger(__name__)
-PROJECT_ROOT = Path(__file__).resolve().parents[2]
 
 
 def truncate_for_log(text: str, limit: int = 160) -> str:
@@ -437,11 +436,8 @@ class SlackListener:
             return ""
         return ""
 
-    def _resolve_path(self, configured_value: str) -> Path:
-        configured_path = Path(configured_value or self.settings.conversion_work_dir).expanduser()
-        if configured_path.is_absolute():
-            return configured_path.resolve()
-        return (PROJECT_ROOT / configured_path).resolve()
+    def _resolve_path(self, configured_value: str):
+        return resolve_project_path(configured_value, self.settings.conversion_work_dir)
 
     def publish_home_view(self, user_id: str) -> None:
         try:

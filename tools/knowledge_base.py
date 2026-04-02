@@ -12,9 +12,8 @@ from langchain_core.tools import tool
 from openpyxl import load_workbook
 
 from app.config import DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH, load_settings
+from app.paths import resolve_project_path
 from tools.google_workspace_services import get_google_sheets_service
-
-PROJECT_ROOT = Path(__file__).resolve().parent.parent
 
 
 @dataclass(frozen=True)
@@ -67,10 +66,7 @@ _google_sheet_index_cache: dict[str, KnowledgeIndexCacheEntry] = {}
 
 def get_knowledge_base_root() -> Path:
     settings = load_settings()
-    configured_root = Path(settings.knowledge_base_dir).expanduser()
-    if not configured_root.is_absolute():
-        configured_root = PROJECT_ROOT / configured_root
-    return configured_root.resolve()
+    return resolve_project_path(settings.knowledge_base_dir)
 
 
 def get_supported_knowledge_file_types() -> tuple[str, ...]:
@@ -85,10 +81,10 @@ def get_google_sheets_catalog_path() -> Path:
         "knowledge_google_sheets_catalog_path",
         DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH,
     )
-    resolved_path = Path(configured_path).expanduser()
-    if not resolved_path.is_absolute():
-        resolved_path = PROJECT_ROOT / resolved_path
-    return resolved_path.resolve()
+    return resolve_project_path(
+        configured_path,
+        DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH,
+    )
 
 
 def get_google_sheets_cache_ttl_seconds() -> int:

@@ -52,6 +52,9 @@ Routing currently supports:
 
 The gateway uses an LLM classification step to determine intent.
 
+Defined in:
+gateway/agent.py
+
 4. Graph Layer
 LangGraph orchestrates the workflow.
 
@@ -191,6 +194,9 @@ tool execution
 Interface Entry Points
 Slack integration is implemented in:
 interfaces/slack/listener.py
+
+Web chat integration is implemented in:
+interfaces/web/server.py
 
 Responsibilities:
 • handle incoming platform events

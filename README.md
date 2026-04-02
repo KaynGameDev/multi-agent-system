@@ -25,16 +25,22 @@ That keeps routing explicit, tool execution bounded, and the runtime easier to d
 app/
   config.py
   graph.py
+  paths.py
 gateway/
   agent.py
 agents/
   general_chat/
     agent.py
+  knowledge/
+    agent.py
   project_task/
+    agent.py
+  document_conversion/
     agent.py
 interfaces/
   slack/
     listener.py
+    formatting.py
   web/
     server.py
 tools/
@@ -42,9 +48,19 @@ tools/
   conversion_google_sources.py
   google_workspace_services.py
 knowledge/
+  ... curated source content
 runtime/
+  conversion/
+  monitoring/
 main.py
 ```
+
+- `app/` holds shared runtime code and bootstrap helpers.
+- `gateway/` holds the entrance routing agent.
+- `agents/` holds specialist agents and their agent-specific helpers.
+- `interfaces/` holds delivery-channel code such as Slack and web.
+- `knowledge/` holds curated knowledge content and can later point at an external vault.
+- `runtime/` holds generated state such as uploads, sqlite data, and monitor state.
 
 ## Environment variables
 
