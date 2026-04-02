@@ -76,6 +76,7 @@ def _escape_slack_control_chars(text: str) -> str:
     text = re.sub(r"&lt;(https?://[^>]+)&gt;", r"<\1>", text)
     text = re.sub(r"&lt;(@[A-Z0-9]+)&gt;", r"<\1>", text)
     text = re.sub(r"&lt;(#?[A-Z0-9]+)&gt;", r"<\1>", text)
+    text = re.sub(r"&lt;(!(?:channel|here|everyone))&gt;", r"<\1>", text)
     return text
 
 

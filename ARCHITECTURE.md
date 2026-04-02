@@ -5,6 +5,7 @@ We are building a company-level AI Multi-Agent System in Python to power an inte
 
 The assistant currently runs as:
 • a Slack bot using Slack Bolt Socket Mode
+• an optional background tax monitor that pushes outbound Slack alerts
 
 Primary goals:
 • Provide a scalable multi-agent architecture
@@ -25,6 +26,10 @@ Tools should remain:
 • reusable
 • presentation-agnostic
 They must not contain Slack formatting or UI logic.
+
+The tax monitor follows the same rule:
+• page navigation and tax parsing stay in tools
+• Slack delivery and scheduling stay outside the tools layer
 
 2. Agent Layer
 Agents reason about tasks and decide when to call tools.
@@ -73,6 +78,8 @@ Interface listeners are responsible for:
 • resolving user identity where possible
 • invoking the graph
 • formatting output for the target platform
+
+Background services can also live at this layer when they own delivery concerns such as outbound Slack alerts.
 
 Slack formatting is applied only at the Slack boundary.
 
@@ -218,6 +225,9 @@ Handles queries that require project data and can call tools.
 DocumentConversionAgent
 Handles Slack-uploaded design docs, asks follow-up questions when required conversion fields are missing, stages canonical knowledge packages, and publishes only after approval.
 
+TaxMonitorService
+Runs on a polling loop, uses a webpage-monitoring tool to open `税收详情(新)`, select the `捕获组` dropdown, parse the visible target project rows, and post outbound Slack alerts with cooldown suppression. If the login page requests a dynamic verification code, the service asks for that code through Slack and resumes the login after a user replies.
+
 Future agents that may be added:
 • jira_agent
 • document_agent
@@ -234,6 +244,7 @@ Next improvements should focus on:
 4. improving Slack UX
 5. adding memory and conversation context
 6. preparing the system for additional agents
+7. hardening the tax monitor selectors once the production page structure is fully verified
 
 Development Constraints
 • Python 3.12

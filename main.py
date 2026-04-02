@@ -10,10 +10,11 @@ from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
 from langgraph.checkpoint.memory import InMemorySaver
 
-from core.config import is_slack_enabled, load_settings, validate_bootstrap_settings
+from core.config import is_agent_runtime_enabled, is_slack_enabled, load_settings, validate_bootstrap_settings
 from core.graph import build_agent_graph, build_web_agent_registrations
 from interfaces.slack_listener import SlackListener
 from interfaces.web_server import WebServer, format_web_chat_url
+from tax_monitor_tool import TaxMonitorService, TaxMonitorVerificationBroker
 
 logger = logging.getLogger(__name__)
 
@@ -56,29 +57,50 @@ def bootstrap_system() -> list[object]:
         settings.gemini_http_trust_env,
     )
 
-    llm = ChatGoogleGenerativeAI(
-        model=settings.gemini_model,
-        temperature=settings.gemini_temperature,
-        client_args={"trust_env": settings.gemini_http_trust_env},
-    )
-
-    checkpointer = InMemorySaver()
-    agent_graph = build_agent_graph(llm, checkpointer=checkpointer, settings=settings)
-    web_graph = build_agent_graph(
-        llm,
-        checkpointer=checkpointer,
-        settings=settings,
-        agent_registrations=build_web_agent_registrations(settings=settings),
-    )
-
     listeners: list[object] = []
-    if is_slack_enabled(settings):
-        listeners.append(SlackListener(agent_graph=agent_graph, settings=settings))
-    elif not settings.slack_enabled and (settings.slack_bot_token or settings.slack_app_token):
-        print("💤 Slack listener disabled via SLACK_ENABLED=false")
-    if settings.web_enabled:
-        listeners.append(WebServer(agent_graph=web_graph, settings=settings))
-        print(f"🌐 Web chat: {format_web_chat_url(settings.web_host, settings.web_port)}")
+    tax_monitor_verification_broker = None
+    if settings.tax_monitor_enabled:
+        tax_monitor_verification_broker = TaxMonitorVerificationBroker(
+            channel_id=settings.tax_monitor_slack_channel,
+        )
+    if is_agent_runtime_enabled(settings):
+        llm = ChatGoogleGenerativeAI(
+            model=settings.gemini_model,
+            temperature=settings.gemini_temperature,
+            client_args={"trust_env": settings.gemini_http_trust_env},
+        )
+
+        checkpointer = InMemorySaver()
+        agent_graph = build_agent_graph(llm, checkpointer=checkpointer, settings=settings)
+        web_graph = build_agent_graph(
+            llm,
+            checkpointer=checkpointer,
+            settings=settings,
+            agent_registrations=build_web_agent_registrations(settings=settings),
+        )
+
+        if is_slack_enabled(settings):
+            listeners.append(
+                SlackListener(
+                    agent_graph=agent_graph,
+                    settings=settings,
+                    tax_monitor_verification_broker=tax_monitor_verification_broker,
+                )
+            )
+        elif not settings.slack_enabled and (settings.slack_bot_token or settings.slack_app_token):
+            print("💤 Slack listener disabled via SLACK_ENABLED=false")
+        if settings.web_enabled:
+            listeners.append(WebServer(agent_graph=web_graph, settings=settings))
+            print(f"🌐 Web chat: {format_web_chat_url(settings.web_host, settings.web_port)}")
+
+    if settings.tax_monitor_enabled:
+        listeners.append(
+            TaxMonitorService(
+                settings=settings,
+                verification_broker=tax_monitor_verification_broker,
+            )
+        )
+        print("📈 Tax monitor enabled.")
 
     print("⚙ Compiled Jade Agent graph.")
     return listeners
