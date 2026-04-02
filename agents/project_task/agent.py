@@ -6,43 +6,11 @@ from datetime import date
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from app.language import LANGUAGE_MATCHING_PROMPT, detect_response_language
+from app.language import detect_response_language
+from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
 from app.state import AgentState
 
-
-PROJECT_TASK_PROMPT = (
-    "You are the Project Task Agent for Jade Games Ltd. "
-    "Answer questions about the Google Sheets project tracker. "
-    "Use the project tools whenever the answer depends on task data, assignees, owners, deadlines, statuses, priorities, or project schedule information. "
-    "Project tools return structured JSON data, not preformatted prose. Read the tool output carefully, reason over it, and summarize the relevant facts for the user. "
-    "Do not dump raw JSON unless the user explicitly asks for it. "
-    "Do not invent sheet data. If the sheet does not contain the requested information, say so clearly. "
-    f"{LANGUAGE_MATCHING_PROMPT}"
-)
-
-SLACK_FORMAT_PROMPT = (
-    "The current interface is Slack. "
-    "Write concise, plain Markdown that stays easy to scan after Slack boundary formatting. "
-    "When listing tasks, use a numbered list with one task per block. "
-    "Do not make every metadata line a bullet. "
-    "Bold at most the task title if needed, not the whole block. "
-    "Avoid headings that are too large or noisy."
-)
-
-WEB_FORMAT_PROMPT = (
-    "The current interface is a web chat page. "
-    "Write concise, plain Markdown that stays easy to scan in a browser transcript. "
-    "When listing tasks, use a numbered list with one task per block. "
-    "Do not make every metadata line a bullet. "
-    "Bold at most the task title if needed, not the whole block. "
-    "Avoid headings that are too large or noisy."
-)
-
-DEFAULT_FORMAT_PROMPT = (
-    "Write concise, plain Markdown that stays easy to scan across chat interfaces. "
-    "When listing tasks, use a numbered list with one task per block. "
-    "Do not make every metadata line a bullet."
-)
+PROMPT_PATH = "agents/project_task/AGENT.md"
 
 
 class ProjectTaskAgentNode:
@@ -60,44 +28,52 @@ class ProjectTaskAgentNode:
 
 
 def build_project_task_prompt(state: AgentState) -> str:
-    lines = [PROJECT_TASK_PROMPT]
+    user_sheet_name = str(state.get("user_sheet_name", "")).strip()
+    user_mapped_slack_name = str(
+        state.get("user_mapped_slack_name", state.get("user_display_name", ""))
+    ).strip()
     interface_name = str(state.get("interface_name", "")).strip().lower()
-    if interface_name == "slack":
-        lines.append(SLACK_FORMAT_PROMPT)
-    elif interface_name == "web":
-        lines.append(WEB_FORMAT_PROMPT)
-    else:
-        lines.append(DEFAULT_FORMAT_PROMPT)
     today = date.today().isoformat()
-
-    lines.append(
-        f"Today's local date is {today}. For deadline questions, prefer tool filters instead of doing date math in your head."
+    sections = load_prompt_sections(
+        PROMPT_PATH,
+        required_sections=(
+            "role",
+            "responsibilities",
+            "tool_usage",
+            "boundaries",
+            "slack_output",
+            "web_output",
+            "default_output",
+            "date_context",
+            "tool_guidance",
+            "identity_context",
+            "name_resolution",
+        ),
+        today=today,
+        user_sheet_name=user_sheet_name,
+        user_google_name=str(state.get("user_google_name", "")).strip(),
+        user_job_title=str(state.get("user_job_title", "")).strip(),
+        user_mapped_slack_name=user_mapped_slack_name,
     )
-    lines.append(
-        "For time-based task lookups, use read_project_tasks with due_scope values like 'overdue', 'today', 'this_week', or 'next_7_days'. "
-        "For explicit date ranges, use end_date_from and end_date_to. "
-        "Interpret 'this week' as Monday through Sunday."
-    )
-
-    user_sheet_name = state.get("user_sheet_name", "")
+    lines = [
+        sections["role"],
+        sections["responsibilities"],
+        sections["tool_usage"],
+        sections["boundaries"],
+    ]
+    if interface_name == "slack":
+        lines.append(sections["slack_output"])
+    elif interface_name == "web":
+        lines.append(sections["web_output"])
+    else:
+        lines.append(sections["default_output"])
+    lines.append(sections["date_context"])
+    lines.append(sections["tool_guidance"])
     if user_sheet_name:
-        lines.append(
-            "Current user identity context: "
-            f"sheet_name={user_sheet_name}; "
-            f"google_name={state.get('user_google_name', '')}; "
-            f"job_title={state.get('user_job_title', '')}; "
-            f"slack_name={state.get('user_mapped_slack_name', state.get('user_display_name', ''))}."
-        )
-        lines.append(
-            "If the user asks about 'my tasks', 'my work', 'my deadlines', or 'what am I doing', "
-            f"treat the assignee as '{user_sheet_name}' unless the user clearly specifies someone else."
-        )
+        lines.append(sections["identity_context"])
+    lines.append(sections["name_resolution"])
 
-    lines.append(
-        "When a person is mentioned using a Slack-style name, alias, email, or English name, prefer the canonical Chinese sheet name when calling tools."
-    )
-
-    return "\n\n".join(lines)
+    return join_prompt_layers(load_shared_instruction_text(), *lines)
 
 
 REFERENTIAL_TASK_QUERY_PATTERNS = (

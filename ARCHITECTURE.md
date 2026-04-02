@@ -214,6 +214,7 @@ Handles internal documentation, architecture, setup, and repository guidance que
 Current v1 knowledge source:
 • local files under `KNOWLEDGE_BASE_DIR`
 • recommended default folder: `knowledge/`
+• default layout groups AI workspace files under `knowledge/AI/` and curated documentation under `knowledge/Docs/`
 • supported formats include Markdown/text and Excel exports (`.xlsx`, `.xlsm`)
 • curated online Google Sheets listed in `KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH`
 

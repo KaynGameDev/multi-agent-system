@@ -31,7 +31,7 @@ DEFAULT_KNOWLEDGE_FILE_TYPES = (
     ".xlsx",
     ".xlsm",
 )
-DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH = "knowledge/google_sheets_catalog.json"
+DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH = "knowledge/AI/Rules/google_sheets_catalog.json"
 DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CACHE_TTL_SECONDS = 120
 DEFAULT_CONVERSION_WORK_DIR = "runtime/conversion"
 DEFAULT_TAX_MONITOR_URL = "https://ghv2.rydgames.com:62933/Page/index.html"

@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 
 from app.config import DEFAULT_KNOWLEDGE_BASE_DIR, load_settings
 from app.paths import resolve_project_path
+from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
 from agents.document_conversion.rendering import (
     build_targeted_questions,
     classify_conversion_failure,
@@ -126,17 +127,7 @@ class ConversionDraftPayload(BaseModel):
     facts: list[ConversionFactItem] = Field(default_factory=list)
     modules: list[ConversionModuleItem] = Field(default_factory=list)
     conflicts: list[str] = Field(default_factory=list)
-
-
-CONVERSION_EXTRACTOR_PROMPT = (
-    "You convert internal game design documents into canonical AI-friendly knowledge packages. "
-    "Work only from the provided source bundle, user clarifications, shared company/game context, and existing approved package context. "
-    "Do not invent undocumented behavior. If information is missing, leave fields empty. "
-    "Return lowercase ASCII kebab-case slugs for game_slug, market_slug, and feature_slug whenever the source bundle makes them clear. "
-    "Preserve important Chinese wording in the Chinese fields when present, and add concise English normalization when confident. "
-    "For modules, only populate optional module content for config, economy, localization, ui, analytics, or qa when there is enough evidence. "
-    "If the source bundle contains contradictions, list them in conflicts."
-)
+PROMPT_PATH = "agents/document_conversion/AGENT.md"
 
 
 class DocumentConversionAgentNode:
@@ -569,7 +560,7 @@ class DocumentConversionAgentNode:
 
     def _extract_draft(self, source_bundle: str) -> dict[str, Any]:
         messages = [
-            SystemMessage(content=CONVERSION_EXTRACTOR_PROMPT),
+            SystemMessage(content=build_conversion_extractor_prompt()),
             HumanMessage(content=source_bundle),
         ]
         last_error: Exception | None = None
@@ -601,6 +592,23 @@ class DocumentConversionAgentNode:
         if last_error is not None:
             raise last_error
         raise RuntimeError("Conversion extractor failed without returning a payload.")
+
+
+def build_conversion_extractor_prompt() -> str:
+    sections = load_prompt_sections(
+        PROMPT_PATH,
+        required_sections=(
+            "extractor_role",
+            "extractor_responsibilities",
+            "extractor_boundaries",
+        ),
+    )
+    return join_prompt_layers(
+        load_shared_instruction_text(),
+        sections["extractor_role"],
+        sections["extractor_responsibilities"],
+        sections["extractor_boundaries"],
+    )
 
 
 def normalize_draft_payload(payload: dict[str, Any]) -> dict[str, Any]:

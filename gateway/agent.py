@@ -6,28 +6,29 @@ from langchain_core.messages import HumanMessage, SystemMessage
 from pydantic import Field, create_model
 
 from app.agent_registry import AgentRegistration
+from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
 from app.state import AgentState
 
 
 def build_gateway_prompt(agent_registrations: Sequence[AgentRegistration], default_route: str) -> str:
-    lines = [
-        "You are the gateway router for Jade Games Ltd.'s multi-agent system.",
-        "Your job is to classify the user's latest message and choose the correct agent.",
-        "",
-        "Available routes:",
-    ]
-
-    for registration in agent_registrations:
-        lines.append(f"- {registration.name}: {registration.description}")
-
-    lines.extend(
-        [
-            "",
-            f"If the user's message is ambiguous or no route clearly matches, choose {default_route}.",
-            "Return the best route and a short reason.",
-        ]
+    routes = "\n".join(
+        f"- {registration.name}: {registration.description}"
+        for registration in agent_registrations
     )
-    return "\n".join(lines)
+    sections = load_prompt_sections(
+        "gateway/AGENT.md",
+        required_sections=("role", "responsibilities", "available_routes", "routing_rules", "output"),
+        routes=routes,
+        default_route=default_route,
+    )
+    return join_prompt_layers(
+        load_shared_instruction_text(),
+        sections["role"],
+        sections["responsibilities"],
+        sections["available_routes"],
+        sections["routing_rules"],
+        sections["output"],
+    )
 
 
 def build_route_decision_model(agent_registrations: Sequence[AgentRegistration]):
@@ -53,7 +54,6 @@ class GatewayNode:
         self.agent_registrations = tuple(agent_registrations)
         self.valid_routes = {registration.name for registration in self.agent_registrations}
         self.default_route = default_route
-        self.prompt = build_gateway_prompt(self.agent_registrations, default_route)
         self.route_decision_model = build_route_decision_model(self.agent_registrations)
         self.router = llm.with_structured_output(self.route_decision_model)
 
@@ -77,7 +77,7 @@ class GatewayNode:
 
         decision = self.router.invoke(
             [
-                SystemMessage(content=self.prompt),
+                SystemMessage(content=build_gateway_prompt(self.agent_registrations, self.default_route)),
                 HumanMessage(content=latest_user_message),
             ]
         )

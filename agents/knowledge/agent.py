@@ -5,22 +5,12 @@ import re
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
-from app.language import LANGUAGE_MATCHING_PROMPT, detect_response_language
+from app.language import detect_response_language
+from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
 from agents.knowledge.rendering import is_knowledge_payload, render_knowledge_payload
 from app.state import AgentState
 
-
-KNOWLEDGE_AGENT_PROMPT = (
-    "You are the Knowledge Agent for Jade Games Ltd. "
-    "Answer questions about internal documentation, architecture, setup, workflow, and operational guidance that are documented in the knowledge base. "
-    "Use the knowledge tools whenever the answer depends on internal docs or project documentation. "
-    "Do not invent undocumented behavior. If the documentation is missing or unclear, say so plainly. "
-    "After using a knowledge tool, answer the user's question directly instead of repeating raw tool output unless the user explicitly asks to see the document or excerpt. "
-    "For spreadsheet or CSV-style documents, extract the relevant rules, limits, steps, or conclusions instead of reciting raw rows. "
-    "Write concise, plain Markdown. "
-    "When helpful, mention which document you used. "
-    f"{LANGUAGE_MATCHING_PROMPT}"
-)
+PROMPT_PATH = "agents/knowledge/AGENT.md"
 
 REFERENTIAL_KNOWLEDGE_QUERY_PATTERNS = (
     r"\bwhat are those docs\b",
@@ -85,9 +75,24 @@ class KnowledgeAgentNode:
         if rendered_response is not None:
             return {"messages": [AIMessage(content=rendered_response)]}
 
-        messages = [SystemMessage(content=KNOWLEDGE_AGENT_PROMPT), *state["messages"]]
+        messages = [SystemMessage(content=build_knowledge_prompt()), *state["messages"]]
         response = self.llm.invoke(messages)
         return {"messages": [response]}
+
+
+def build_knowledge_prompt() -> str:
+    sections = load_prompt_sections(
+        PROMPT_PATH,
+        required_sections=("role", "responsibilities", "tool_usage", "boundaries", "output"),
+    )
+    return join_prompt_layers(
+        load_shared_instruction_text(),
+        sections["role"],
+        sections["responsibilities"],
+        sections["tool_usage"],
+        sections["boundaries"],
+        sections["output"],
+    )
 
 
 def build_knowledge_response(state: AgentState) -> str | None:

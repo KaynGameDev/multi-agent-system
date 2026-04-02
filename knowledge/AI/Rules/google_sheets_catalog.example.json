@@ -1,0 +1,13 @@
+{
+  "documents": [
+    {
+      "spreadsheet_id": "YOUR_SPREADSHEET_ID",
+      "title": "Example Knowledge Sheet",
+      "aliases": ["example knowledge sheet"],
+      "tabs": ["Sheet1"],
+      "ranges": {
+        "Sheet1": "A1:Z200"
+      }
+    }
+  ]
+}

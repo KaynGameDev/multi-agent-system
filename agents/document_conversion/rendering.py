@@ -6,73 +6,11 @@ from typing import Any
 
 from langchain_core.messages import HumanMessage, SystemMessage
 
+from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
 from tools.document_conversion import ConversionSessionRecord, build_conversion_package_relative_path
 
 logger = logging.getLogger(__name__)
-
-CONVERSION_RENDERER_PROMPT = """You are a response formatter for a document-conversion workflow.
-You do not decide workflow state. You only turn the provided JSON payload into the final user-facing reply.
-
-Rules:
-- Match the language requested by `preferred_language`. If it is `zh`, reply in Chinese. If it is `en`, reply in English.
-- Keep technical literals exact. Do not alter paths, slugs, field names, filenames, counts, IDs, or command words.
-- Any item listed in `render_rules.must_include_verbatim` must appear exactly as written.
-- Do not invent workflow status, facts, or instructions that are not present in the payload.
-- Keep the reply concise and Slack-friendly. Short paragraphs and flat lists are fine.
-- Return only the final reply text.
-
-Example input:
-{
-  "response_kind": "needs_info",
-  "preferred_language": "en",
-  "payload": {
-    "target_path": "games/buyudalouandou/?/lucky-bundle",
-    "missing_fields": ["market_slug"],
-    "questions": ["Which market or package variant does this feature belong to?"]
-  },
-  "render_rules": {
-    "must_include_verbatim": ["`market_slug`"]
-  }
-}
-
-Example output:
-I need a bit more information before I can stage the canonical package.
-
-- Current target: `games/buyudalouandou/?/lucky-bundle`
-- Missing required fields: `market_slug`
-
-Please reply in this thread with:
-1. Which market or package variant does this feature belong to?
-
-Example input:
-{
-  "response_kind": "ready_for_approval",
-  "preferred_language": "zh",
-  "payload": {
-    "target_path": "games/buyudalouandou/indonesia/weekly-activity",
-    "source_count": 1,
-    "populated_modules": ["config"],
-    "missing_optional_modules": ["economy", "ui"],
-    "major_facts": ["周常活动通过每周目标和奖励提升玩家活跃与付费。"]
-  },
-  "render_rules": {
-    "must_include_verbatim": ["`games/buyudalouandou/indonesia/weekly-activity`", "`approve`", "`cancel`"]
-  }
-}
-
-Example output:
-规范知识包已准备好，等待确认。
-
-- 目标路径: `games/buyudalouandou/indonesia/weekly-activity`
-- 来源文件数: `1`
-- 已填充模块: `config`
-- 缺失的可选模块: `economy, ui`
-
-主要提取事实：
-1. 周常活动通过每周目标和奖励提升玩家活跃与付费。
-
-请回复 `approve` 发布该知识包，或回复 `cancel` 丢弃本次会话。
-"""
+PROMPT_PATH = "agents/document_conversion/AGENT.md"
 
 
 def render_conversion_response(
@@ -98,7 +36,7 @@ def render_conversion_response(
     try:
         response = llm.invoke(
             [
-                SystemMessage(content=CONVERSION_RENDERER_PROMPT),
+                SystemMessage(content=build_conversion_renderer_prompt()),
                 HumanMessage(content=json.dumps(payload, ensure_ascii=False, indent=2)),
             ]
         )
@@ -122,6 +60,27 @@ def render_conversion_response(
         )
         return fallback
     return rendered
+
+
+def build_conversion_renderer_prompt() -> str:
+    sections = load_prompt_sections(
+        PROMPT_PATH,
+        required_sections=(
+            "renderer_role",
+            "renderer_responsibilities",
+            "renderer_boundaries",
+            "renderer_output",
+            "renderer_examples",
+        ),
+    )
+    return join_prompt_layers(
+        load_shared_instruction_text(),
+        sections["renderer_role"],
+        sections["renderer_responsibilities"],
+        sections["renderer_boundaries"],
+        sections["renderer_output"],
+        sections["renderer_examples"],
+    )
 
 
 def render_conversion_response_fallback(

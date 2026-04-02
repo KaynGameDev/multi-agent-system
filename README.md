@@ -48,7 +48,15 @@ tools/
   conversion_google_sources.py
   google_workspace_services.py
 knowledge/
-  ... curated source content
+  AI/
+    Rules/
+    Prompts/
+  Docs/
+    00_Shared/
+    10_GameLines/
+    20_Deployments/
+    30_Legacy/
+    40_Templates/
 runtime/
   conversion/
   monitoring/
@@ -59,7 +67,7 @@ main.py
 - `gateway/` holds the entrance routing agent.
 - `agents/` holds specialist agents and their agent-specific helpers.
 - `interfaces/` holds delivery-channel code such as Slack and web.
-- `knowledge/` holds curated knowledge content and can later point at an external vault.
+- `knowledge/` holds curated knowledge content, AI workspace rules/prompts, and can later point at an external vault.
 - `runtime/` holds generated state such as uploads, sqlite data, and monitor state.
 
 ## Environment variables
@@ -83,7 +91,7 @@ Optional:
 - `SLACK_THINKING_REACTION` (default: `eyes`)
 - `KNOWLEDGE_BASE_DIR` (default: `knowledge`)
 - `KNOWLEDGE_FILE_TYPES` (default: `.md,.txt,.rst,.csv,.tsv,.xlsx,.xlsm`)
-- `KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH` (default: `knowledge/google_sheets_catalog.json`)
+- `KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH` (default: `knowledge/AI/Rules/google_sheets_catalog.json`)
 - `KNOWLEDGE_GOOGLE_SHEETS_CACHE_TTL_SECONDS` (default: `120`)
 - `CONVERSION_WORK_DIR` (default: `runtime/conversion`)
 - `TAX_MONITOR_ENABLED` (default: `false`)
@@ -167,9 +175,11 @@ python3 -m unittest tests.test_tax_monitor_otp_smoke
 - The knowledge agent can also read curated online Google Sheets listed in `KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH`.
 - The document conversion flow stages Slack-uploaded source files and session state under `CONVERSION_WORK_DIR`.
 - The tax monitor persists alert cooldown state under [`runtime/monitoring/`](/Users/kayngame/jade_ai_core/runtime/monitoring/) by default.
-- Approved canonical packages are written into the knowledge base under `knowledge/games/<game_slug>/<market_slug>/<feature_slug>/`.
-- Excel exports from Google Sheets should be placed in `KNOWLEDGE_BASE_DIR` as `.xlsx` or `.xlsm` files.
-- The online-sheet catalog is a JSON file with one document per spreadsheet. Use [`knowledge/google_sheets_catalog.example.json`](/Users/kayngame/jade_ai_core/knowledge/google_sheets_catalog.example.json) as the template.
+- The knowledge base is organized under `knowledge/AI/` and `knowledge/Docs/`.
+- Approved canonical packages are written into the knowledge base under `knowledge/Docs/20_Deployments/<deployment>/<game_line>/Features/<feature_slug>/`.
+- Shared cross-game knowledge belongs under `knowledge/Docs/00_Shared/`, and game-line shared context belongs under `knowledge/Docs/10_GameLines/<game_line>/`.
+- Excel exports from Google Sheets can be placed anywhere under `KNOWLEDGE_BASE_DIR` that fits the new hierarchy, such as `Docs/00_Shared/` or a deployment/game folder.
+- The online-sheet catalog is a JSON file with one document per spreadsheet. Use [`knowledge/AI/Rules/google_sheets_catalog.example.json`](/Users/kayngame/jade_ai_core/knowledge/AI/Rules/google_sheets_catalog.example.json) as the template.
 - Each catalog entry supports:
   - `spreadsheet_id`
   - `title`

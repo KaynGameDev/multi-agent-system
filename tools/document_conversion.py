@@ -39,6 +39,65 @@ UPLOAD_ONLY_FALLBACK_TEXT = "Please convert the uploaded document into the canon
 MAX_CONVERSION_SOURCE_BUNDLE_CHARS = 120_000
 MAX_CONVERSION_TABLE_HEAD_ROWS = 20
 MAX_CONVERSION_TABLE_TAIL_ROWS = 5
+CONVERSION_CONTEXT_FILE_TYPES = {".md", ".txt", ".rst", ".csv", ".tsv", ".xlsx", ".xlsm"}
+
+KNOWN_GAME_LINE_DIRECTORY_NAMES = {
+    "buyudalouandou": "BuYuDaLuanDou",
+    "bu-yu-da-luan-dou": "BuYuDaLuanDou",
+    "2-player-fishing": "BuYuDaLuanDou",
+    "two-player-fishing": "BuYuDaLuanDou",
+    "f4buyu": "F4BuYu",
+    "f4-bu-yu": "F4BuYu",
+    "4-player-fishing": "F4BuYu",
+    "four-player-fishing": "F4BuYu",
+    "xybuyu": "XYBuYu",
+    "xy-bu-yu": "XYBuYu",
+    "west-journey-fishing": "XYBuYu",
+}
+
+KNOWN_DEPLOYMENT_DIRECTORY_NAMES = {
+    "indonesia-main": "IndonesiaMain",
+    "indonesia-sub": "IndonesiaSub",
+    "malaysia-sub": "MalaysiaSub",
+    "thailand-sub": "ThailandSub",
+}
+PACKAGE_MARKDOWN_CONTEXT_FILES = (
+    ("README.md", ("README.md",)),
+    ("CORE.md", ("CORE.md", "core.md")),
+    ("facts.tsv", ("facts.tsv",)),
+    ("sources.tsv", ("sources.tsv",)),
+    ("CONFIG.md", ("CONFIG.md", "config.md")),
+    ("ECONOMY.md", ("ECONOMY.md", "economy.md")),
+    ("LOCALIZATION.md", ("LOCALIZATION.md", "localization.md")),
+    ("UI.md", ("UI.md", "ui.md")),
+    ("ANALYTICS.md", ("ANALYTICS.md", "analytics.md")),
+    ("QA.md", ("QA.md", "qa.md")),
+)
+OPTIONAL_MODULE_TITLE_MAP = {
+    "config": "Config",
+    "economy": "Economy",
+    "localization": "Localization",
+    "ui": "UI",
+    "analytics": "Analytics",
+    "qa": "QA",
+}
+OPTIONAL_MODULE_FILENAME_MAP = {
+    "config": "CONFIG.md",
+    "economy": "ECONOMY.md",
+    "localization": "LOCALIZATION.md",
+    "ui": "UI.md",
+    "analytics": "ANALYTICS.md",
+    "qa": "QA.md",
+}
+LEGACY_PACKAGE_MARKDOWN_RENAMES = {
+    "core.md": "CORE.md",
+    "config.md": "CONFIG.md",
+    "economy.md": "ECONOMY.md",
+    "localization.md": "LOCALIZATION.md",
+    "ui.md": "UI.md",
+    "analytics.md": "ANALYTICS.md",
+    "qa.md": "QA.md",
+}
 
 MANIFEST_FIELDNAMES = (
     "package_id",
@@ -202,7 +261,57 @@ def is_active_conversion_status(status: str) -> bool:
 
 
 def build_conversion_package_relative_path(game_slug: str, market_slug: str, feature_slug: str) -> str:
-    return f"games/{game_slug}/{market_slug}/{feature_slug}"
+    deployment_dir = build_deployment_directory_name(market_slug)
+    game_line_dir = build_game_line_directory_name(game_slug)
+    return f"Docs/20_Deployments/{deployment_dir}/{game_line_dir}/Features/{feature_slug or '?'}"
+
+
+def build_game_line_directory_name(game_slug: str) -> str:
+    normalized = normalize_slug(game_slug)
+    if not normalized:
+        return "?"
+    return KNOWN_GAME_LINE_DIRECTORY_NAMES.get(normalized, build_pascal_case_name(normalized))
+
+
+def build_deployment_directory_name(market_slug: str) -> str:
+    normalized = normalize_slug(market_slug)
+    if not normalized:
+        return "?"
+    return KNOWN_DEPLOYMENT_DIRECTORY_NAMES.get(normalized, build_pascal_case_name(normalized))
+
+
+def build_pascal_case_name(value: str) -> str:
+    parts = [part for part in re.split(r"[^a-zA-Z0-9]+", value) if part]
+    if not parts:
+        return "?"
+    rendered_parts: list[str] = []
+    for part in parts:
+        if part.isdigit():
+            rendered_parts.append(part)
+            continue
+        if len(part) <= 2 and any(char.isalpha() for char in part):
+            rendered_parts.append(part.upper())
+            continue
+        rendered_parts.append(part[:1].upper() + part[1:])
+    return "".join(rendered_parts) or "?"
+
+
+def build_shared_docs_root(knowledge_root: Path) -> Path:
+    return knowledge_root / "Docs" / "00_Shared"
+
+
+def build_game_line_root(knowledge_root: Path, game_slug: str) -> Path:
+    return knowledge_root / "Docs" / "10_GameLines" / build_game_line_directory_name(game_slug)
+
+
+def build_deployment_game_root(knowledge_root: Path, game_slug: str, market_slug: str) -> Path:
+    return (
+        knowledge_root
+        / "Docs"
+        / "20_Deployments"
+        / build_deployment_directory_name(market_slug)
+        / build_game_line_directory_name(game_slug)
+    )
 
 
 class ConversionSessionStore:
@@ -583,40 +692,57 @@ def append_questions_to_session(
 
 
 def ensure_company_scaffolding(knowledge_root: Path) -> None:
-    company_root = knowledge_root / "company"
-    company_root.mkdir(parents=True, exist_ok=True)
+    shared_root = build_shared_docs_root(knowledge_root)
+    glossary_root = shared_root / "Glossary"
+    design_root = shared_root / "DesignPrinciples"
+    standards_root = shared_root / "Standards"
+    naming_root = shared_root / "Naming"
+    systems_root = shared_root / "CommonSystems"
 
-    terminology_path = company_root / "terminology.tsv"
-    if not terminology_path.exists():
+    for path in (glossary_root, design_root, standards_root, naming_root, systems_root):
+        path.mkdir(parents=True, exist_ok=True)
+
+    glossary_path = glossary_root / "Glossary.tsv"
+    if not glossary_path.exists():
         write_tsv(
-            terminology_path,
+            glossary_path,
             ("term_id", "canonical_zh", "canonical_en", "aliases", "definition", "approved_wording", "notes"),
             [],
         )
 
-    wording_path = company_root / "wording.md"
-    if not wording_path.exists():
-        wording_path.write_text(
-            "# Company Wording\n\nUse this file for company-level approved wording and reusable phrasing.\n",
-            encoding="utf-8",
-        )
-
-    concepts_path = company_root / "concepts.md"
-    if not concepts_path.exists():
-        concepts_path.write_text(
-            "# Company Concepts\n\nUse this file for company-level product concepts shared across games.\n",
-            encoding="utf-8",
-        )
+    write_markdown_if_missing(
+        design_root / "README.md",
+        "# Shared Design Principles\n\nUse this folder for company-wide design principles that apply across multiple game lines.\n",
+    )
+    write_markdown_if_missing(
+        standards_root / "README.md",
+        "# Shared Standards\n\nUse this folder for reusable technical or design standards across the knowledge base.\n",
+    )
+    write_markdown_if_missing(
+        naming_root / "README.md",
+        "# Naming Conventions\n\nUse this folder for naming rules, canonical labels, and approved wording patterns.\n",
+    )
+    write_markdown_if_missing(
+        systems_root / "README.md",
+        "# Common Systems\n\nUse this folder for shared systems that apply across multiple games or deployments.\n",
+    )
 
 
 def ensure_game_shared_scaffolding(knowledge_root: Path, game_slug: str) -> None:
     if not game_slug:
         return
 
-    shared_root = knowledge_root / "games" / game_slug / "shared"
-    shared_root.mkdir(parents=True, exist_ok=True)
+    game_line_name = build_game_line_directory_name(game_slug)
+    game_line_root = build_game_line_root(knowledge_root, game_slug)
+    line_overview_root = game_line_root / "LineOverview"
+    shared_design_root = game_line_root / "SharedDesign"
+    shared_systems_root = game_line_root / "SharedSystems"
+    shared_terminology_root = game_line_root / "SharedTerminology"
 
-    glossary_path = shared_root / "glossary.tsv"
+    for path in (line_overview_root, shared_design_root, shared_systems_root, shared_terminology_root):
+        path.mkdir(parents=True, exist_ok=True)
+
+    glossary_path = shared_terminology_root / "Glossary.tsv"
     if not glossary_path.exists():
         write_tsv(
             glossary_path,
@@ -624,27 +750,34 @@ def ensure_game_shared_scaffolding(knowledge_root: Path, game_slug: str) -> None
             [],
         )
 
-    basics_path = shared_root / "game_basics.md"
-    if not basics_path.exists():
-        basics_path.write_text(
-            f"# {game_slug} Shared Basics\n\nUse this file for cross-market knowledge shared by the game.\n",
-            encoding="utf-8",
-        )
+    write_markdown_if_missing(
+        line_overview_root / "README.md",
+        f"# {game_line_name} Line Overview\n\nUse this folder for the game line's shared overview, positioning, and cross-deployment context.\n",
+    )
+    write_markdown_if_missing(
+        shared_design_root / "README.md",
+        f"# {game_line_name} Shared Design\n\nUse this folder for design rules shared across deployments of this game line.\n",
+    )
+    write_markdown_if_missing(
+        shared_systems_root / "README.md",
+        f"# {game_line_name} Shared Systems\n\nUse this folder for common systems and reusable mechanics shared across deployments.\n",
+    )
 
-    entities_path = shared_root / "shared_entities.tsv"
-    if not entities_path.exists():
-        write_tsv(
-            entities_path,
-            ("entity_id", "canonical_name", "description", "notes"),
-            [],
-        )
 
-    economy_path = shared_root / "shared_economy.md"
-    if not economy_path.exists():
-        economy_path.write_text(
-            f"# {game_slug} Shared Economy\n\nUse this file for cross-market economy definitions and shared units.\n",
-            encoding="utf-8",
-        )
+def ensure_deployment_game_scaffolding(knowledge_root: Path, game_slug: str, market_slug: str) -> None:
+    if not game_slug or not market_slug:
+        return
+
+    deployment_game_root = build_deployment_game_root(knowledge_root, game_slug, market_slug)
+    for relative_path in ("MasterGDD", "Features", "Review"):
+        (deployment_game_root / relative_path).mkdir(parents=True, exist_ok=True)
+
+
+def write_markdown_if_missing(path: Path, content: str) -> None:
+    if path.exists():
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
 
 
 def build_upload_directory(store: ConversionSessionStore, session_id: str) -> Path:
@@ -999,51 +1132,79 @@ def compact_markdown_table_block(
 
 
 def load_shared_context(knowledge_root: Path, game_slug: str = "") -> str:
-    documents: list[str] = []
-    company_root = knowledge_root / "company"
-    for relative_path in ("terminology.tsv", "wording.md", "concepts.md"):
-        path = company_root / relative_path
-        if path.exists():
-            documents.append(f"# {path.relative_to(knowledge_root).as_posix()}\n{path.read_text(encoding='utf-8', errors='replace').strip()}")
+    documents = collect_context_documents(build_shared_docs_root(knowledge_root), knowledge_root)
 
     if game_slug:
-        shared_root = knowledge_root / "games" / game_slug / "shared"
-        for relative_path in ("glossary.tsv", "game_basics.md", "shared_entities.tsv", "shared_economy.md"):
-            path = shared_root / relative_path
-            if path.exists():
-                if path.suffix.lower() == ".tsv":
-                    content = path.read_text(encoding="utf-8", errors="replace").strip()
-                else:
-                    content = path.read_text(encoding="utf-8", errors="replace").strip()
-                documents.append(f"# {path.relative_to(knowledge_root).as_posix()}\n{content}")
+        documents.extend(
+            collect_context_documents(
+                build_game_line_root(knowledge_root, game_slug),
+                knowledge_root,
+            )
+        )
     return "\n\n".join(documents).strip()
+
+
+def collect_context_documents(root: Path, knowledge_root: Path) -> list[str]:
+    if not root.exists():
+        return []
+
+    documents: list[str] = []
+    for path in sorted(root.rglob("*")):
+        if not path.is_file():
+            continue
+        if path.name.startswith("."):
+            continue
+        try:
+            relative_path = path.relative_to(root)
+        except ValueError:
+            relative_path = path
+        if any(part.startswith(".") for part in relative_path.parts):
+            continue
+        if path.suffix.lower() not in CONVERSION_CONTEXT_FILE_TYPES:
+            continue
+        content = load_knowledge_document(path).strip()
+        if not content:
+            continue
+        documents.append(f"# {path.relative_to(knowledge_root).as_posix()}\n{content}")
+    return documents
 
 
 def load_existing_package_context(knowledge_root: Path, game_slug: str, market_slug: str, feature_slug: str) -> str:
     if not game_slug or not market_slug or not feature_slug:
         return ""
-    package_root = knowledge_root / "games" / game_slug / market_slug / feature_slug
+    package_root = knowledge_root / build_conversion_package_relative_path(game_slug, market_slug, feature_slug)
     if not package_root.exists():
         return ""
 
     documents: list[str] = []
-    for file_name in (
-        "README.md",
-        "core.md",
-        "facts.tsv",
-        "sources.tsv",
-        "config.md",
-        "economy.md",
-        "localization.md",
-        "ui.md",
-        "analytics.md",
-        "qa.md",
-    ):
-        path = package_root / file_name
-        if not path.exists():
+    for display_name, candidate_names in PACKAGE_MARKDOWN_CONTEXT_FILES:
+        path = next(
+            (package_root / candidate_name for candidate_name in candidate_names if (package_root / candidate_name).exists()),
+            None,
+        )
+        if path is None or not path.exists():
             continue
-        documents.append(f"# {file_name}\n{path.read_text(encoding='utf-8', errors='replace').strip()}")
+        documents.append(f"# {display_name}\n{path.read_text(encoding='utf-8', errors='replace').strip()}")
     return "\n\n".join(documents).strip()
+
+
+def migrate_legacy_package_markdown_files(package_root: Path) -> None:
+    for legacy_name, canonical_name in LEGACY_PACKAGE_MARKDOWN_RENAMES.items():
+        legacy_path = package_root / legacy_name
+        canonical_path = package_root / canonical_name
+        if not legacy_path.exists() or canonical_path.exists():
+            continue
+        legacy_path.rename(canonical_path)
+
+
+def get_optional_module_filename(module_name: str) -> str:
+    return OPTIONAL_MODULE_FILENAME_MAP[module_name]
+
+
+def has_optional_module_file(package_root: Path, module_name: str) -> bool:
+    canonical_name = get_optional_module_filename(module_name)
+    legacy_name = f"{module_name}.md"
+    return (package_root / canonical_name).exists() or (package_root / legacy_name).exists()
 
 
 def build_missing_required_fields(draft_payload: dict[str, Any], sources: list[ConversionSourceRecord]) -> list[str]:
@@ -1468,16 +1629,8 @@ def stage_conversion_package(
         ),
         encoding="utf-8",
     )
-    (package_path / "core.md").write_text(render_core_markdown(draft_payload), encoding="utf-8")
+    (package_path / "CORE.md").write_text(render_core_markdown(draft_payload), encoding="utf-8")
 
-    module_title_map = {
-        "config": "Config",
-        "economy": "Economy",
-        "localization": "Localization",
-        "ui": "UI",
-        "analytics": "Analytics",
-        "qa": "QA",
-    }
     modules = draft_payload.get("modules", [])
     if isinstance(modules, list):
         for module in modules:
@@ -1487,8 +1640,8 @@ def stage_conversion_package(
             content = str(module.get("content", "")).strip()
             if module_name not in OPTIONAL_MODULE_NAMES or not content:
                 continue
-            (package_path / f"{module_name}.md").write_text(
-                render_optional_module_markdown(module_name, module_title_map[module_name], content),
+            (package_path / get_optional_module_filename(module_name)).write_text(
+                render_optional_module_markdown(module_name, OPTIONAL_MODULE_TITLE_MAP[module_name], content),
                 encoding="utf-8",
             )
 
@@ -1572,11 +1725,13 @@ def publish_conversion_package(
     market_slug = str(draft_payload.get("market_slug", "")).strip()
     feature_slug = str(draft_payload.get("feature_slug", "")).strip()
     relative_package_path = build_conversion_package_relative_path(game_slug, market_slug, feature_slug)
-    package_root = knowledge_root / relative_package_path
-    package_root.mkdir(parents=True, exist_ok=True)
-
     ensure_company_scaffolding(knowledge_root)
     ensure_game_shared_scaffolding(knowledge_root, game_slug)
+    ensure_deployment_game_scaffolding(knowledge_root, game_slug, market_slug)
+
+    package_root = knowledge_root / relative_package_path
+    package_root.mkdir(parents=True, exist_ok=True)
+    migrate_legacy_package_markdown_files(package_root)
 
     sources = store.list_sources(session.session_id)
     new_source_rows = [
@@ -1617,7 +1772,7 @@ def publish_conversion_package(
     write_tsv(package_root / "manifest.tsv", MANIFEST_FIELDNAMES, manifest_rows)
 
     populated_modules = list_populated_modules(draft_payload)
-    existing_optional_modules = [name for name in OPTIONAL_MODULE_NAMES if (package_root / f"{name}.md").exists()]
+    existing_optional_modules = [name for name in OPTIONAL_MODULE_NAMES if has_optional_module_file(package_root, name)]
     all_populated_modules = sorted(set(populated_modules + existing_optional_modules))
     missing_optional_modules = [name for name in OPTIONAL_MODULE_NAMES if name not in all_populated_modules]
 
@@ -1631,16 +1786,8 @@ def publish_conversion_package(
         ),
         encoding="utf-8",
     )
-    (package_root / "core.md").write_text(render_core_markdown(draft_payload), encoding="utf-8")
+    (package_root / "CORE.md").write_text(render_core_markdown(draft_payload), encoding="utf-8")
 
-    module_title_map = {
-        "config": "Config",
-        "economy": "Economy",
-        "localization": "Localization",
-        "ui": "UI",
-        "analytics": "Analytics",
-        "qa": "QA",
-    }
     modules = draft_payload.get("modules", [])
     if isinstance(modules, list):
         for module in modules:
@@ -1650,8 +1797,8 @@ def publish_conversion_package(
             content = str(module.get("content", "")).strip()
             if module_name not in OPTIONAL_MODULE_NAMES or not content:
                 continue
-            (package_root / f"{module_name}.md").write_text(
-                render_optional_module_markdown(module_name, module_title_map[module_name], content),
+            (package_root / get_optional_module_filename(module_name)).write_text(
+                render_optional_module_markdown(module_name, OPTIONAL_MODULE_TITLE_MAP[module_name], content),
                 encoding="utf-8",
             )
 
