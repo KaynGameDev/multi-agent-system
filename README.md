@@ -22,20 +22,27 @@ That keeps routing explicit, tool execution bounded, and the runtime easier to d
 ## Project layout
 
 ```text
-core/
+app/
   config.py
-  gateway.py
   graph.py
-  state.py
-agents/workers/
-  general_chat_agent.py
-  project_task_agent.py
+gateway/
+  agent.py
+agents/
+  general_chat/
+    agent.py
+  project_task/
+    agent.py
 interfaces/
-  slack_listener.py
+  slack/
+    listener.py
+  web/
+    server.py
 tools/
   project_tracker_google_sheets.py
   conversion_google_sources.py
   google_workspace_services.py
+knowledge/
+runtime/
 main.py
 ```
 
@@ -58,11 +65,11 @@ Optional:
 - `PROJECT_SHEET_RANGE` (default: `Tasks!A1:Z`)
 - `PROJECT_SHEET_CACHE_TTL_SECONDS` (default: `30`)
 - `SLACK_THINKING_REACTION` (default: `eyes`)
-- `KNOWLEDGE_BASE_DIR` (default: `data/knowledge`)
+- `KNOWLEDGE_BASE_DIR` (default: `knowledge`)
 - `KNOWLEDGE_FILE_TYPES` (default: `.md,.txt,.rst,.csv,.tsv,.xlsx,.xlsm`)
-- `KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH` (default: `data/knowledge/google_sheets_catalog.json`)
+- `KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH` (default: `knowledge/google_sheets_catalog.json`)
 - `KNOWLEDGE_GOOGLE_SHEETS_CACHE_TTL_SECONDS` (default: `120`)
-- `CONVERSION_WORK_DIR` (default: `data/conversion`)
+- `CONVERSION_WORK_DIR` (default: `runtime/conversion`)
 - `TAX_MONITOR_ENABLED` (default: `false`)
 - `TAX_MONITOR_URL` (default: `https://ghv2.rydgames.com:62933/Page/index.html`)
 - `TAX_MONITOR_USERNAME`
@@ -73,7 +80,7 @@ Optional:
 - `TAX_MONITOR_POLL_INTERVAL_SECONDS` (default: `300`)
 - `TAX_MONITOR_ALERT_COOLDOWN_SECONDS` (default: `7200`)
 - `TAX_MONITOR_ERROR_COOLDOWN_SECONDS` (default: `1800`)
-- `TAX_MONITOR_STATE_PATH` (default: `data/monitoring/tax_monitor_state.json`)
+- `TAX_MONITOR_STATE_PATH` (default: `runtime/monitoring/tax_monitor_state.json`)
 - `TAX_MONITOR_BROWSER_TIMEOUT_SECONDS` (default: `45`)
 - `TAX_MONITOR_HEADLESS` (default: `true`)
 - `TAX_MONITOR_NAVIGATION_PATH` (default: `税收调控管理,税收详情（新）`)
@@ -140,13 +147,13 @@ python3 -m unittest tests.test_tax_monitor_otp_smoke
 
 - Conversation memory is handled with a LangGraph checkpointer keyed by interface thread/channel.
 - The Google Sheets tool is cached briefly to avoid reading the whole sheet on every request.
-- The knowledge agent reads local files from `KNOWLEDGE_BASE_DIR`; the default local folder is [`data/knowledge/`](/Users/kayngame/jade_ai_core/data/knowledge/).
+- The knowledge agent reads local files from `KNOWLEDGE_BASE_DIR`; the default local folder is [`knowledge/`](/Users/kayngame/jade_ai_core/knowledge/).
 - The knowledge agent can also read curated online Google Sheets listed in `KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH`.
 - The document conversion flow stages Slack-uploaded source files and session state under `CONVERSION_WORK_DIR`.
-- The tax monitor persists alert cooldown state under [`data/monitoring/`](/Users/kayngame/jade_ai_core/data/monitoring/) by default.
-- Approved canonical packages are written into the knowledge base under `data/knowledge/games/<game_slug>/<market_slug>/<feature_slug>/`.
+- The tax monitor persists alert cooldown state under [`runtime/monitoring/`](/Users/kayngame/jade_ai_core/runtime/monitoring/) by default.
+- Approved canonical packages are written into the knowledge base under `knowledge/games/<game_slug>/<market_slug>/<feature_slug>/`.
 - Excel exports from Google Sheets should be placed in `KNOWLEDGE_BASE_DIR` as `.xlsx` or `.xlsm` files.
-- The online-sheet catalog is a JSON file with one document per spreadsheet. Use [`data/knowledge/google_sheets_catalog.example.json`](/Users/kayngame/jade_ai_core/data/knowledge/google_sheets_catalog.example.json) as the template.
+- The online-sheet catalog is a JSON file with one document per spreadsheet. Use [`knowledge/google_sheets_catalog.example.json`](/Users/kayngame/jade_ai_core/knowledge/google_sheets_catalog.example.json) as the template.
 - Each catalog entry supports:
   - `spreadsheet_id`
   - `title`

@@ -8,8 +8,8 @@ from typing import Iterable
 
 from langchain_core.tools import tool
 
-from core.config import load_settings
-from core.identity_map import normalize_sheet_identity
+from app.config import load_settings
+from app.identity import normalize_sheet_identity
 from tools.google_workspace_services import get_google_sheets_service
 
 ITERATION_ALIASES = ("迭代", "iteration")

@@ -1,0 +1,2 @@
+package_id	game_slug	market_slug	feature_slug	package_status	inherits_company	inherits_game_shared	approved_revision	completeness_state
+fishing-2p-id:id:2p-weekly-activity	fishing-2p-id	id	2p-weekly-activity	draft	true	true	1	ready_for_approval

@@ -102,7 +102,7 @@ Example conversions:
 - bullet → • bullet
 
 This formatter lives in:
-core/slack_formatting.py
+interfaces/slack/formatting.py
 
 Identity Resolution
 The system maps Slack users to internal employee identities using an IDENTITY_MAP.
@@ -117,7 +117,7 @@ Users may reference people via:
 The system resolves these to the canonical Google Sheets name.
 
 File:
-core/identity_map.py
+app/identity.py
 
 Google Sheets Integration
 The project task data source is a Google Sheet.
@@ -176,11 +176,11 @@ user_sheet_name
 user_job_title
 
 Defined in:
-core/state.py
+app/state.py
 
 Graph Definition
 The orchestration graph is defined in:
-core/graph.py
+app/graph.py
 
 It wires:
 gateway
@@ -190,7 +190,7 @@ tool execution
 
 Interface Entry Points
 Slack integration is implemented in:
-interfaces/slack_listener.py
+interfaces/slack/listener.py
 
 Responsibilities:
 • handle incoming platform events
@@ -207,7 +207,7 @@ Handles internal documentation, architecture, setup, and repository guidance que
 
 Current v1 knowledge source:
 • local files under `KNOWLEDGE_BASE_DIR`
-• recommended default folder: `data/knowledge/`
+• recommended default folder: `knowledge/`
 • supported formats include Markdown/text and Excel exports (`.xlsx`, `.xlsm`)
 • curated online Google Sheets listed in `KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH`
 

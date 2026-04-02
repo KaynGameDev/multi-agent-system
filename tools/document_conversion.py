@@ -16,7 +16,7 @@ from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
-from core.config import DEFAULT_KNOWLEDGE_BASE_DIR, load_settings
+from app.config import DEFAULT_KNOWLEDGE_BASE_DIR, load_settings
 from tools.conversion_google_sources import GoogleDocumentReference, fetch_google_document_source
 from tools.knowledge_base import load_knowledge_document
 
@@ -33,7 +33,7 @@ CONVERSION_ACTIVE_STATUSES = {
 }
 CONVERSION_TERMINAL_STATUSES = {"published", "cancelled", "failed"}
 OPTIONAL_MODULE_NAMES = ("config", "economy", "localization", "ui", "analytics", "qa")
-DEFAULT_CONVERSION_WORK_DIR = "data/conversion"
+DEFAULT_CONVERSION_WORK_DIR = "runtime/conversion"
 UPLOAD_ONLY_FALLBACK_TEXT = "Please convert the uploaded document into the canonical knowledge format."
 MAX_CONVERSION_SOURCE_BUNDLE_CHARS = 120_000
 MAX_CONVERSION_TABLE_HEAD_ROWS = 20

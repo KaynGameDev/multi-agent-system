@@ -1,0 +1,14 @@
+{
+  "error_alert_timestamps": {
+    "fetch": "2026-03-31T11:46:37.125301+00:00"
+  },
+  "negative_alert_days": {
+    "West Journey Fishing|||西游捕鱼": "2026-03-31"
+  },
+  "threshold_alert_timestamps": {
+    "2 Player Fishing|||二人捕鱼": "2026-03-31T12:01:39.063231+00:00",
+    "4 Player Fishing|||四人捕鱼": "2026-03-31T12:01:39.063231+00:00",
+    "SkyFire Fishing|||飞机捕鱼": "2026-03-31T12:01:39.063231+00:00",
+    "West Journey Fishing|||西游捕鱼": "2026-03-31T12:01:39.063231+00:00"
+  }
+}

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 
 from dotenv import load_dotenv
 
-from core.config import Settings, load_settings, validate_tax_monitor_settings
+from app.config import Settings, load_settings, validate_tax_monitor_settings
 from tax_monitor_tool.service import TaxMonitorService
 from tax_monitor_tool.verification import TaxMonitorVerificationBroker
 

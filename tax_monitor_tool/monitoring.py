@@ -9,7 +9,7 @@ from html import unescape
 from pathlib import Path
 from typing import Protocol
 
-from core.config import Settings
+from app.config import Settings
 
 logger = logging.getLogger(__name__)
 

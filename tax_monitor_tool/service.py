@@ -7,8 +7,8 @@ from threading import Event
 
 from slack_sdk import WebClient
 
-from core.config import Settings
-from core.slack_formatting import to_slack_mrkdwn
+from app.config import Settings
+from interfaces.slack.formatting import to_slack_mrkdwn
 from tax_monitor_tool.monitoring import (
     PlaywrightTaxPageClient,
     TaxMonitorAlert,

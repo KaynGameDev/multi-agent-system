@@ -6,7 +6,7 @@ from pathlib import Path
 from google.oauth2 import service_account
 from googleapiclient.discovery import build
 
-from core.config import load_settings
+from app.config import load_settings
 
 GOOGLE_SHEETS_SCOPES = ("https://www.googleapis.com/auth/spreadsheets.readonly",)
 GOOGLE_DOCS_SCOPES = ("https://www.googleapis.com/auth/documents.readonly",)

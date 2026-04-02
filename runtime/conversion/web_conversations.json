@@ -1,0 +1,36 @@
+{
+  "conversations": [
+    {
+      "conversation_id": "a15622ec47eb45129b869c682997effc",
+      "title": "hello how are you",
+      "created_at": "2026-03-30T10:32:32.326862+00:00",
+      "updated_at": "2026-03-30T10:34:10.790660+00:00",
+      "messages": [
+        {
+          "id": "d9d94db6e8d24171b7ef1832334bdbd6",
+          "role": "user",
+          "markdown": "hello how are you",
+          "created_at": "2026-03-30T10:32:38.320544+00:00"
+        },
+        {
+          "id": "24e2c9ef81bf415d8b46ffe16a698454",
+          "role": "assistant",
+          "markdown": "Hello! I'm doing well, thank you for asking.\n\nI am Jade, your General Chat Agent here at Jade Games. I'm here to help with greetings, casual conversation, or general questions.\n\nHow can I help you today?",
+          "created_at": "2026-03-30T10:33:05.093630+00:00"
+        },
+        {
+          "id": "af1a55b045a34d54beac9020d5036665",
+          "role": "user",
+          "markdown": "awesome, I am testing if you can have chat memory now. So we are just chatting.",
+          "created_at": "2026-03-30T10:33:57.570842+00:00"
+        },
+        {
+          "id": "41f907c711bf4cb4aabba6c1f404035e",
+          "role": "assistant",
+          "markdown": "That sounds like a great plan! I'm happy to help you test things out.\n\nI do maintain the context of our current conversation, so feel free to keep the chat going. What's on your mind today?",
+          "created_at": "2026-03-30T10:34:10.790660+00:00"
+        }
+      ]
+    }
+  ]
+}
