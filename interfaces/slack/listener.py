@@ -13,7 +13,6 @@ from app.messages import extract_final_text
 from app.paths import resolve_project_path
 from interfaces.slack.formatting import to_slack_mrkdwn
 from interfaces.slack.home import build_home_view
-from tax_monitor_tool.verification import TaxMonitorVerificationBroker
 from tools.document_conversion import ConversionSessionStore, UPLOAD_ONLY_FALLBACK_TEXT
 
 MENTION_PATTERN = re.compile(r"<@([A-Z0-9]+)>")
@@ -32,12 +31,9 @@ class SlackListener:
         self,
         agent_graph,
         settings: Settings,
-        *,
-        tax_monitor_verification_broker: TaxMonitorVerificationBroker | None = None,
     ) -> None:
         self.agent_graph = agent_graph
         self.settings = settings
-        self.tax_monitor_verification_broker = tax_monitor_verification_broker
         self.app = App(token=settings.slack_bot_token)
         self.conversion_store = ConversionSessionStore(self._resolve_path(settings.conversion_work_dir))
         self._user_context_cache: dict[str, dict] = {}
@@ -73,53 +69,14 @@ class SlackListener:
         self.process_and_respond(event=event, say=say, is_mention=True)
 
     def handle_message_event(self, event, say) -> None:
-        channel_id = str(event.get("channel", "")).strip()
-        user_id = str(event.get("user", "")).strip()
         subtype = str(event.get("subtype", "")).strip()
-        pending_request = (
-            self.tax_monitor_verification_broker.get_active_request()
-            if self.tax_monitor_verification_broker is not None
-            else None
-        )
-        should_trace_verification = pending_request is not None or channel_id == self.settings.tax_monitor_slack_channel
-        if should_trace_verification:
-            logger.info(
-                "Received Slack message event channel=%s user=%s subtype=%s channel_type=%s pending_tax_monitor_verification=%s text=%r",
-                channel_id,
-                user_id,
-                subtype or "",
-                str(event.get("channel_type", "")).strip(),
-                pending_request is not None,
-                truncate_for_log(str(event.get("text", ""))),
-            )
         if event.get("bot_id"):
-            if should_trace_verification:
-                logger.info(
-                    "Ignoring Slack message event from a bot during tax monitor verification channel=%s user=%s",
-                    channel_id,
-                    user_id,
-                )
             return
         if subtype and subtype != "file_share":
-            if should_trace_verification:
-                logger.info(
-                    "Ignoring Slack message event with unsupported subtype during tax monitor verification channel=%s user=%s subtype=%s",
-                    channel_id,
-                    user_id,
-                    subtype,
-                )
-            return
-        if self._handle_tax_monitor_verification_event(event=event, say=say):
             return
         if event.get("channel_type") != "im" and not (
             self._has_active_conversion_session(event) or self._contains_bot_mention(event.get("text", ""))
         ):
-            if should_trace_verification:
-                logger.info(
-                    "Slack message event did not route to normal chat handling channel=%s user=%s reason=no_mention_or_active_session",
-                    channel_id,
-                    user_id,
-                )
             return
 
         self.process_and_respond(
@@ -127,62 +84,6 @@ class SlackListener:
             say=say,
             is_mention=self._contains_bot_mention(event.get("text", "")),
         )
-
-    def _handle_tax_monitor_verification_event(self, *, event, say) -> bool:
-        if self.tax_monitor_verification_broker is None:
-            return False
-
-        channel_id = str(event.get("channel", "")).strip()
-        user_id = str(event.get("user", "")).strip()
-        text = str(event.get("text", ""))
-        active_request = self.tax_monitor_verification_broker.get_active_request()
-        contains_code = bool(re.search(r"\b\d{6}\b", text))
-        logger.info(
-            "Received Slack message during tax monitor verification channel=%s user=%s has_active_request=%s contains_code=%s",
-            channel_id,
-            user_id,
-            active_request is not None,
-            contains_code,
-        )
-        if not self.tax_monitor_verification_broker.has_pending_request(channel_id=channel_id):
-            if active_request is not None:
-                logger.warning(
-                    "Ignoring Slack message for tax monitor verification because it arrived in a different channel active_channel=%s event_channel=%s user=%s",
-                    active_request.channel_id,
-                    channel_id,
-                    user_id,
-                )
-            return False
-
-        submission = self.tax_monitor_verification_broker.submit_code_from_text(
-            channel_id=channel_id,
-            text=text,
-            user_id=user_id,
-        )
-        if submission is None:
-            logger.warning(
-                "Slack message did not satisfy the pending tax monitor verification request channel=%s user=%s contains_code=%s",
-                channel_id,
-                user_id,
-                contains_code,
-            )
-            return False
-
-        logger.info(
-            "Slack message satisfied the pending tax monitor verification request channel=%s user=%s request_id=%s",
-            channel_id,
-            user_id,
-            submission.request_id,
-        )
-        active_request = self.tax_monitor_verification_broker.get_active_request()
-        reply_kwargs = {
-            "channel": channel_id,
-            "text": to_slack_mrkdwn("已收到税率监控登录验证码，正在重试登录。"),
-        }
-        if active_request is not None and active_request.message_ts:
-            reply_kwargs["thread_ts"] = active_request.message_ts
-        say(**reply_kwargs)
-        return True
 
     def process_and_respond(self, event, say, is_mention: bool) -> None:
         user_id = event.get("user")

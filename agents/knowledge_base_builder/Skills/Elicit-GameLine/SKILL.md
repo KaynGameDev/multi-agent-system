@@ -1,4 +1,5 @@
 ---
+skill_id: elicit-gameline
 name: GameLine 层知识抽取
 description: 用于梳理 GameLine 层的母体共性、共享系统、共享术语，以及各 Deployment 之间的差异边界。
 disable_model_invocation: false

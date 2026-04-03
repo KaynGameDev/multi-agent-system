@@ -14,7 +14,6 @@ from app.config import is_agent_runtime_enabled, is_slack_enabled, load_settings
 from app.graph import build_agent_graph, build_web_agent_registrations
 from interfaces.slack.listener import SlackListener
 from interfaces.web.server import WebServer, format_web_chat_url
-from tax_monitor_tool import TaxMonitorService, TaxMonitorVerificationBroker
 
 logger = logging.getLogger(__name__)
 
@@ -58,11 +57,6 @@ def bootstrap_system() -> list[object]:
     )
 
     listeners: list[object] = []
-    tax_monitor_verification_broker = None
-    if settings.tax_monitor_enabled:
-        tax_monitor_verification_broker = TaxMonitorVerificationBroker(
-            channel_id=settings.tax_monitor_slack_channel,
-        )
     if is_agent_runtime_enabled(settings):
         llm = ChatGoogleGenerativeAI(
             model=settings.gemini_model,
@@ -84,7 +78,6 @@ def bootstrap_system() -> list[object]:
                 SlackListener(
                     agent_graph=agent_graph,
                     settings=settings,
-                    tax_monitor_verification_broker=tax_monitor_verification_broker,
                 )
             )
         elif not settings.slack_enabled and (settings.slack_bot_token or settings.slack_app_token):
@@ -92,15 +85,6 @@ def bootstrap_system() -> list[object]:
         if settings.web_enabled:
             listeners.append(WebServer(agent_graph=web_graph, settings=settings))
             print(f"🌐 Web chat: {format_web_chat_url(settings.web_host, settings.web_port)}")
-
-    if settings.tax_monitor_enabled:
-        listeners.append(
-            TaxMonitorService(
-                settings=settings,
-                verification_broker=tax_monitor_verification_broker,
-            )
-        )
-        print("📈 Tax monitor enabled.")
 
     print("⚙ Compiled Jade Agent graph.")
     return listeners

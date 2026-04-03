@@ -1,4 +1,5 @@
 ---
+skill_id: consolidate-session
 name: 会话归纳沉淀
 description: 用于把一轮多人讨论或知识抽取会话整理成结构化沉淀结果，输出结论、冲突、待确认和下一步。
 disable_model_invocation: false
@@ -37,6 +38,16 @@ disable_model_invocation: false
 - 冲突列表
 - 文档骨架
 - 下一轮讨论建议
+
+## 建议输出
+
+- 本轮主题
+- 已确认
+- 推断
+- 冲突
+- 待确认
+- 建议落点
+- 下一轮建议
 
 ## 注意事项
 

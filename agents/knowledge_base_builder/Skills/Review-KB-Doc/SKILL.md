@@ -1,4 +1,5 @@
 ---
+skill_id: review-kb-doc
 name: KB 文档审查
 description: 用于审查知识库文档的 metadata、层级归属、结构完整性、风险点和建议状态，不自动提升 Legacy 材料。
 disable_model_invocation: false
@@ -13,7 +14,7 @@ disable_model_invocation: false
 - review 某份 `feature_spec`
 - 检查 metadata、层级归属、结构完整性和可批准状态
 
-## 检查维度
+## 工作方式
 
 ### 1. 层级归属是否正确
 

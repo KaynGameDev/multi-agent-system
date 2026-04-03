@@ -1,4 +1,5 @@
 ---
+skill_id: track-execution
 name: KB V1 执行跟踪
 description: 用于跟踪 KB V1 的当前阶段、已完成项、阻塞项和下一步动作，不把未确认讨论误算为已完成。
 disable_model_invocation: false
@@ -33,6 +34,14 @@ disable_model_invocation: false
 ### 3. 给出最小可执行动作
 
 下一步建议优先给 1~3 个最关键动作，避免空泛口号。
+
+## 建议输出
+
+- 当前阶段
+- 已完成
+- 进行中
+- 阻塞项
+- 下一步建议
 
 ## 注意事项
 

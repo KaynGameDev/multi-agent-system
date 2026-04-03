@@ -35,9 +35,6 @@ DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH = "knowledge/AI/Rules/google_sheets
 DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CACHE_TTL_SECONDS = 120
 DEFAULT_CONVERSION_WORK_DIR = "runtime/conversion"
 DEFAULT_JADE_PROJECT_SKILLS_DIR = ".jade/skills"
-DEFAULT_TAX_MONITOR_URL = "https://ghv2.rydgames.com:62933/Page/index.html"
-DEFAULT_TAX_MONITOR_STATE_PATH = "runtime/monitoring/tax_monitor_state.json"
-DEFAULT_TAX_MONITOR_NAVIGATION_PATH = ("税收调控管理", "税收详情（新）")
 
 
 @dataclass(frozen=True)
@@ -64,26 +61,6 @@ class Settings:
     knowledge_google_sheets_cache_ttl_seconds: int = DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CACHE_TTL_SECONDS
     conversion_work_dir: str = DEFAULT_CONVERSION_WORK_DIR
     gemini_http_trust_env: bool = False
-    tax_monitor_enabled: bool = False
-    tax_monitor_url: str = DEFAULT_TAX_MONITOR_URL
-    tax_monitor_username: str = ""
-    tax_monitor_password: str = ""
-    tax_monitor_token: str = ""
-    tax_monitor_capture_group: str = ""
-    tax_monitor_slack_channel: str = ""
-    tax_monitor_poll_interval_seconds: int = 300
-    tax_monitor_alert_cooldown_seconds: int = 7200
-    tax_monitor_error_cooldown_seconds: int = 1800
-    tax_monitor_state_path: str = DEFAULT_TAX_MONITOR_STATE_PATH
-    tax_monitor_browser_timeout_seconds: int = 45
-    tax_monitor_headless: bool = True
-    tax_monitor_navigation_path: tuple[str, ...] = DEFAULT_TAX_MONITOR_NAVIGATION_PATH
-    tax_monitor_username_selector: str = ""
-    tax_monitor_password_selector: str = ""
-    tax_monitor_token_selector: str = ""
-    tax_monitor_login_button_selector: str = ""
-    tax_monitor_capture_group_selector: str = ""
-    tax_monitor_query_button_selector: str = ""
 
 
 _cached_settings: Settings | None = None
@@ -107,12 +84,6 @@ def load_settings(force_reload: bool = False) -> Settings:
         for item in knowledge_file_types_value.split(",")
         if item.strip()
     ) or DEFAULT_KNOWLEDGE_FILE_TYPES
-    tax_navigation_path_value = os.getenv("TAX_MONITOR_NAVIGATION_PATH", "")
-    tax_navigation_path = tuple(
-        item.strip()
-        for item in tax_navigation_path_value.split(",")
-        if item.strip()
-    ) or DEFAULT_TAX_MONITOR_NAVIGATION_PATH
 
     _cached_settings = Settings(
         slack_enabled=parse_bool_env("SLACK_ENABLED", True),
@@ -154,29 +125,6 @@ def load_settings(force_reload: bool = False) -> Settings:
             or DEFAULT_CONVERSION_WORK_DIR
         ),
         gemini_http_trust_env=parse_bool_env("GEMINI_HTTP_TRUST_ENV", False),
-        tax_monitor_enabled=parse_bool_env("TAX_MONITOR_ENABLED", False),
-        tax_monitor_url=os.getenv("TAX_MONITOR_URL", DEFAULT_TAX_MONITOR_URL).strip() or DEFAULT_TAX_MONITOR_URL,
-        tax_monitor_username=os.getenv("TAX_MONITOR_USERNAME", "").strip(),
-        tax_monitor_password=os.getenv("TAX_MONITOR_PASSWORD", ""),
-        tax_monitor_token=os.getenv("TAX_MONITOR_TOKEN", ""),
-        tax_monitor_capture_group=os.getenv("TAX_MONITOR_CAPTURE_GROUP", "").strip(),
-        tax_monitor_slack_channel=os.getenv("TAX_MONITOR_SLACK_CHANNEL", "").strip(),
-        tax_monitor_poll_interval_seconds=int(os.getenv("TAX_MONITOR_POLL_INTERVAL_SECONDS", "300")),
-        tax_monitor_alert_cooldown_seconds=int(os.getenv("TAX_MONITOR_ALERT_COOLDOWN_SECONDS", "7200")),
-        tax_monitor_error_cooldown_seconds=int(os.getenv("TAX_MONITOR_ERROR_COOLDOWN_SECONDS", "1800")),
-        tax_monitor_state_path=(
-            os.getenv("TAX_MONITOR_STATE_PATH", DEFAULT_TAX_MONITOR_STATE_PATH).strip()
-            or DEFAULT_TAX_MONITOR_STATE_PATH
-        ),
-        tax_monitor_browser_timeout_seconds=int(os.getenv("TAX_MONITOR_BROWSER_TIMEOUT_SECONDS", "45")),
-        tax_monitor_headless=parse_bool_env("TAX_MONITOR_HEADLESS", True),
-        tax_monitor_navigation_path=tax_navigation_path,
-        tax_monitor_username_selector=os.getenv("TAX_MONITOR_USERNAME_SELECTOR", "").strip(),
-        tax_monitor_password_selector=os.getenv("TAX_MONITOR_PASSWORD_SELECTOR", "").strip(),
-        tax_monitor_token_selector=os.getenv("TAX_MONITOR_TOKEN_SELECTOR", "").strip(),
-        tax_monitor_login_button_selector=os.getenv("TAX_MONITOR_LOGIN_BUTTON_SELECTOR", "").strip(),
-        tax_monitor_capture_group_selector=os.getenv("TAX_MONITOR_CAPTURE_GROUP_SELECTOR", "").strip(),
-        tax_monitor_query_button_selector=os.getenv("TAX_MONITOR_QUERY_BUTTON_SELECTOR", "").strip(),
     )
     return _cached_settings
 
@@ -187,9 +135,6 @@ def validate_bootstrap_settings(settings: Settings) -> None:
 
 
 def validate_core_settings(settings: Settings) -> None:
-    if settings.tax_monitor_enabled:
-        validate_tax_monitor_settings(settings)
-
     if not is_agent_runtime_enabled(settings):
         return
 
@@ -207,7 +152,7 @@ def validate_core_settings(settings: Settings) -> None:
 
 
 def validate_interface_settings(settings: Settings) -> None:
-    if not (is_agent_runtime_enabled(settings) or settings.tax_monitor_enabled):
+    if not is_agent_runtime_enabled(settings):
         raise RuntimeError("No communication interface is configured.")
 
     if settings.slack_enabled:
@@ -226,22 +171,6 @@ def is_slack_enabled(settings: Settings) -> bool:
 
 def is_agent_runtime_enabled(settings: Settings) -> bool:
     return bool(is_slack_enabled(settings) or settings.web_enabled)
-
-
-def validate_tax_monitor_settings(settings: Settings) -> None:
-    missing: list[str] = []
-    if not settings.tax_monitor_url:
-        missing.append("TAX_MONITOR_URL")
-    if not settings.tax_monitor_username:
-        missing.append("TAX_MONITOR_USERNAME")
-    if not settings.tax_monitor_password:
-        missing.append("TAX_MONITOR_PASSWORD")
-    if not settings.slack_bot_token:
-        missing.append("SLACK_BOT_TOKEN")
-    if not settings.tax_monitor_slack_channel:
-        missing.append("TAX_MONITOR_SLACK_CHANNEL")
-    if missing:
-        raise RuntimeError(f"Missing required environment variables: {', '.join(missing)}")
 
 
 def normalize_knowledge_file_type(value: str) -> str:

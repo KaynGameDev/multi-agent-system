@@ -1,12 +1,13 @@
 from __future__ import annotations
 
+import subprocess
 import tempfile
 import unittest
 from pathlib import Path
 
 from agents.general_chat.agent import build_general_chat_prompt
 from agents.knowledge_base_builder.agent import build_knowledge_base_builder_prompt
-from app.skills import SkillRegistry
+from app.skills import SkillRegistry, normalize_metadata_keys, split_skill_frontmatter
 from tests.common import build_registration, write_skill
 
 
@@ -222,6 +223,33 @@ class SkillRegistryTests(unittest.TestCase):
 
         self.assertIn("知识库构建 Agent", prompt)
         self.assertIn("必须包含决策记录与变更记录。", prompt)
+
+    def test_repo_builder_skills_use_normalized_frontmatter_and_sections(self) -> None:
+        repo_root = Path(__file__).resolve().parents[1]
+        skill_files = subprocess.check_output(
+            ["git", "ls-files", "agents/knowledge_base_builder/Skills/*/SKILL.md"],
+            text=True,
+            cwd=repo_root,
+        ).splitlines()
+
+        expected_sections = [
+            "## 适用场景",
+            "## 工作方式",
+            "## 建议输出",
+            "## 注意事项",
+        ]
+        self.assertTrue(skill_files)
+
+        for relative_path in skill_files:
+            path = repo_root / relative_path
+            metadata, _body = split_skill_frontmatter(path.read_text(encoding="utf-8"))
+            metadata = normalize_metadata_keys(metadata)
+            sections = [line.strip() for line in path.read_text(encoding="utf-8").splitlines() if line.startswith("## ")]
+
+            self.assertIn("skill_id", metadata, msg=relative_path)
+            self.assertIn("name", metadata, msg=relative_path)
+            self.assertIn("description", metadata, msg=relative_path)
+            self.assertEqual(sections, expected_sections, msg=relative_path)
 
 
 if __name__ == "__main__":

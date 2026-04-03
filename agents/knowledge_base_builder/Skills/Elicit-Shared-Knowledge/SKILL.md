@@ -1,4 +1,5 @@
 ---
+skill_id: elicit-shared-knowledge
 name: Shared 层知识抽取
 description: 用于梳理 Shared 层公共知识，例如术语、命名规范、设计原则、通用规则和公司级标准。
 disable_model_invocation: false

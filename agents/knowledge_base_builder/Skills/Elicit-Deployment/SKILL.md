@@ -1,4 +1,5 @@
 ---
+skill_id: elicit-deployment
 name: Deployment 层知识抽取
 description: 用于梳理某个 Deployment 的当前事实、与 GameLine 共性的差异，以及该分支独有的规则、功能和限制。
 disable_model_invocation: false

@@ -1,4 +1,5 @@
 ---
+skill_id: elicit-featurespec
 name: Feature Spec 抽取
 description: 用于围绕单个功能逐步抽取知识，并整理成 feature_spec 草稿骨架，包含决策记录和变更记录。
 disable_model_invocation: false
@@ -43,6 +44,15 @@ disable_model_invocation: false
 - 待确认内容
 - 缺失章节提醒
 - 当前可落下的 `feature_spec` 骨架
+
+## 建议输出
+
+- 本轮目标
+- 本轮问题
+- 已确认内容
+- 待确认内容
+- 缺失章节提醒
+- 当前可沉淀的 `feature_spec` 骨架
 
 ## 注意事项
 

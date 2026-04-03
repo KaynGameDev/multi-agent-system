@@ -1,4 +1,5 @@
 ---
+skill_id: elicit-knowledge
 name: 通用知识抽取
 description: 用于主持一轮通用知识抽取，分步提问、实时归纳，并输出已确认、推断、冲突、待确认和建议落点。
 disable_model_invocation: false
@@ -42,6 +43,17 @@ disable_model_invocation: false
 ### 4. 判断是否进入文档化
 
 当信息已经足够稳定时，再提示可整理成哪类文档骨架，不要一上来直接生成完整文档。
+
+## 建议输出
+
+- 本轮目标
+- 本轮问题
+- 已确认
+- 推断
+- 冲突
+- 待确认
+- 建议落点
+- 下一步建议
 
 ## 注意事项
 
