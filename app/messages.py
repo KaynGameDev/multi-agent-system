@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from langchain_core.messages import HumanMessage
+
 
 def stringify_message_content(content) -> str:
     if isinstance(content, str):
@@ -27,3 +29,11 @@ def extract_final_text(final_state: dict) -> str:
     last_message = messages[-1]
     content = getattr(last_message, "content", "")
     return stringify_message_content(content) or "I couldn't generate a response."
+
+
+def extract_latest_human_text(state: dict) -> str:
+    messages = state.get("messages") or []
+    for message in reversed(messages):
+        if isinstance(message, HumanMessage):
+            return stringify_message_content(getattr(message, "content", ""))
+    return ""

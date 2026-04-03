@@ -14,26 +14,9 @@ from app.paths import resolve_project_path
 from interfaces.slack.formatting import to_slack_mrkdwn
 from interfaces.slack.home import build_home_view
 from tax_monitor_tool.verification import TaxMonitorVerificationBroker
-from tools.conversion_google_sources import extract_google_document_references
 from tools.document_conversion import ConversionSessionStore, UPLOAD_ONLY_FALLBACK_TEXT
 
 MENTION_PATTERN = re.compile(r"<@([A-Z0-9]+)>")
-CASUAL_GREETING_NORMALIZED_TEXTS = {
-    "hi",
-    "hello",
-    "hey",
-    "yo",
-    "good morning",
-    "good afternoon",
-    "good evening",
-    "你好",
-    "您好",
-    "嗨",
-    "哈喽",
-    "早上好",
-    "下午好",
-    "晚上好",
-}
 logger = logging.getLogger(__name__)
 
 
@@ -240,20 +223,18 @@ class SlackListener:
                 "user_id": user_id,
                 "channel_id": channel_id,
                 "uploaded_files": uploaded_files,
+                "context_paths": [item["name"] for item in uploaded_files if str(item.get("name", "")).strip()],
                 **user_context,
             }
-            if self._should_route_to_conversion(active_session=active_session, text=text, uploaded_files=uploaded_files):
-                initial_state["route"] = "document_conversion_agent"
-                initial_state["route_reason"] = "Slack document conversion session."
             if active_session is not None:
                 initial_state["conversion_session_id"] = active_session.session_id
 
             logger.debug(
-                "Invoking agent graph channel=%s user=%s thread=%s route=%s conversion_session_id=%s",
+                "Invoking agent graph channel=%s user=%s thread=%s requested_agent=%s conversion_session_id=%s",
                 channel_id,
                 user_id,
                 thread_id,
-                initial_state.get("route", "gateway"),
+                initial_state.get("requested_agent", ""),
                 initial_state.get("conversion_session_id", ""),
             )
 
@@ -405,21 +386,6 @@ class SlackListener:
 
     def _has_active_conversion_session(self, event) -> bool:
         return self.conversion_store.has_active_session(self._build_thread_id(event))
-
-    def _should_route_to_conversion(self, *, active_session, text: str, uploaded_files: list[dict[str, str]]) -> bool:
-        if uploaded_files:
-            return True
-        if extract_google_document_references(text):
-            return True
-        if active_session is None:
-            return False
-        return not self._is_casual_greeting(text)
-
-    def _is_casual_greeting(self, text: str) -> bool:
-        normalized = re.sub(r"[!?,.，。！？\s]+", " ", text.strip().lower()).strip()
-        if not normalized:
-            return False
-        return normalized in CASUAL_GREETING_NORMALIZED_TEXTS
 
     def _contains_bot_mention(self, text: str) -> bool:
         if not self._bot_user_id or not text:

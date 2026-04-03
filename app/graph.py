@@ -12,6 +12,13 @@ from agents.project_task.agent import ProjectTaskAgentNode
 from app.agent_registry import AgentRegistration
 from app.config import load_settings
 from gateway.agent import GatewayNode
+from gateway.agent import (
+    document_conversion_matcher,
+    general_chat_matcher,
+    knowledge_matcher,
+    project_task_matcher_factory,
+)
+from app.skills import SkillRegistry
 from app.state import AgentState
 from tools.knowledge_base import list_knowledge_documents, read_knowledge_document, search_knowledge_documents
 from tools.project_tracker_google_sheets import get_project_sheet_overview, read_project_tasks
@@ -30,7 +37,15 @@ def build_default_agent_registrations(settings=None) -> tuple[AgentRegistration,
         AgentRegistration(
             name="general_chat_agent",
             description="Use for greetings, casual chat, and general questions that do not require project data or internal documentation.",
-            build_node=lambda llm: GeneralChatAgentNode(llm),
+            build_node=lambda llm, skill_registry=None: GeneralChatAgentNode(
+                llm,
+                skill_registry=skill_registry,
+                agent_name="general_chat_agent",
+            ),
+            selection_order=40,
+            is_general_assistant=True,
+            skill_namespace="general_chat",
+            matcher=general_chat_matcher,
         ),
         AgentRegistration(
             name="knowledge_agent",
@@ -38,8 +53,16 @@ def build_default_agent_registrations(settings=None) -> tuple[AgentRegistration,
                 "Use for internal documentation, system architecture, setup instructions, repository guidance, "
                 "and documented company workflows."
             ),
-            build_node=lambda llm, tools=knowledge_tools: KnowledgeAgentNode(llm, list(tools)),
+            build_node=lambda llm, tools=knowledge_tools, skill_registry=None: KnowledgeAgentNode(
+                llm,
+                list(tools),
+                skill_registry=skill_registry,
+                agent_name="knowledge_agent",
+            ),
             tools=knowledge_tools,
+            selection_order=30,
+            skill_namespace="knowledge",
+            matcher=knowledge_matcher,
         ),
         AgentRegistration(
             name="project_task_agent",
@@ -47,8 +70,16 @@ def build_default_agent_registrations(settings=None) -> tuple[AgentRegistration,
                 "Use for project tracker questions, assignees, deadlines, schedules, priorities, iterations, "
                 "project status, or anything that likely requires Google Sheets data."
             ),
-            build_node=lambda llm, tools=project_tools: ProjectTaskAgentNode(llm, list(tools)),
+            build_node=lambda llm, tools=project_tools, skill_registry=None: ProjectTaskAgentNode(
+                llm,
+                list(tools),
+                skill_registry=skill_registry,
+                agent_name="project_task_agent",
+            ),
             tools=project_tools,
+            selection_order=20,
+            skill_namespace="project_task",
+            matcher=project_task_matcher_factory(resolved_settings.project_lookup_keywords),
         ),
         AgentRegistration(
             name="document_conversion_agent",
@@ -56,7 +87,15 @@ def build_default_agent_registrations(settings=None) -> tuple[AgentRegistration,
                 "Use for Slack-driven design document conversion, canonical knowledge package staging, "
                 "follow-up questions about missing conversion fields, and approval-gated publishing."
             ),
-            build_node=lambda llm, settings=resolved_settings: DocumentConversionAgentNode(llm, settings=settings),
+            build_node=lambda llm, settings=resolved_settings, skill_registry=None: DocumentConversionAgentNode(
+                llm,
+                settings=settings,
+                skill_registry=skill_registry,
+                agent_name="document_conversion_agent",
+            ),
+            selection_order=10,
+            skill_namespace="document_conversion",
+            matcher=document_conversion_matcher,
         ),
     )
 
@@ -126,14 +165,21 @@ def build_graph(
     agent_registrations: Sequence[AgentRegistration] | None = None,
     default_route: str | None = None,
     settings=None,
+    skill_registry: SkillRegistry | None = None,
 ):
     registrations = normalize_agent_registrations(agent_registrations, settings=settings)
     resolved_default_route = resolve_default_route(registrations, default_route=default_route)
+    resolved_settings = settings or load_settings()
+    resolved_skill_registry = skill_registry or SkillRegistry(
+        registrations,
+        project_skills_dir=resolved_settings.jade_project_skills_dir,
+    )
 
     gateway_node = GatewayNode(
         llm,
         agent_registrations=registrations,
         default_route=resolved_default_route,
+        skill_registry=resolved_skill_registry,
     )
 
     graph = StateGraph(AgentState)
@@ -142,7 +188,7 @@ def build_graph(
 
     route_map: dict[str, str] = {}
     for registration in registrations:
-        graph.add_node(registration.name, registration.build_node(llm))
+        graph.add_node(registration.name, registration.build_node(llm, skill_registry=resolved_skill_registry))
         route_map[registration.name] = registration.name
 
     graph.add_conditional_edges(
@@ -182,6 +228,7 @@ def build_agent_graph(
     agent_registrations: Sequence[AgentRegistration] | None = None,
     default_route: str | None = None,
     settings=None,
+    skill_registry: SkillRegistry | None = None,
 ):
     return build_graph(
         llm,
@@ -189,4 +236,5 @@ def build_agent_graph(
         agent_registrations=agent_registrations,
         default_route=default_route,
         settings=settings,
+        skill_registry=skill_registry,
     )

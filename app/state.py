@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from typing import Any
 from typing import Annotated
 
 from langchain_core.messages import AnyMessage
@@ -14,6 +15,13 @@ class AgentState(TypedDict, total=False):
     route: RouteName
     route_reason: str
     interface_name: str
+    requested_agent: str
+    requested_skill_ids: list[str]
+    resolved_skill_ids: list[str]
+    context_paths: list[str]
+    skill_resolution_diagnostics: list[dict[str, Any]]
+    agent_selection_diagnostics: list[dict[str, Any]]
+    selection_warnings: list[str]
     thread_id: str
     user_id: str
     channel_id: str

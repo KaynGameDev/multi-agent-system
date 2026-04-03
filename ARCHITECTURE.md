@@ -42,7 +42,7 @@ Agents include:
 Agents should be responsible for reasoning but not platform formatting.
 
 3. Gateway Layer
-A gateway agent decides which worker agent should handle the user request.
+A deterministic gateway decides which worker agent should handle the user request.
 
 Routing currently supports:
 • project_task_agent
@@ -50,7 +50,12 @@ Routing currently supports:
 • knowledge_agent
 • document_conversion_agent
 
-The gateway uses an LLM classification step to determine intent.
+The gateway uses policy code instead of LLM classification. It centralizes:
+• deterministic agent selection
+• shared skill precedence
+• fallback routing
+• forked-skill delegation
+• selection diagnostics
 
 Defined in:
 gateway/agent.py
@@ -75,7 +80,28 @@ gateway → project_task_agent → tools → project_task_agent → END
 
 This allows tool-calling loops.
 
-5. Interface Layer
+Resolved skills stay attached to the turn state, and tool callbacks do not rerun gateway selection.
+
+5. Skill Registry Layer
+Skills resolve through one shared registry.
+
+Current scopes:
+• agent-local skills under `agents/<agent>/Skills/*/SKILL.md`
+• project-shared skills under `.jade/skills/*/SKILL.md` or `JADE_PROJECT_SKILLS_DIR`
+
+Resolution policy:
+• every skill normalizes into one `SkillDefinition`
+• one `skill_id` maps to one effective definition per request
+• same-scope duplicates are configuration conflicts
+• precedence is `path-scoped > agent-local > project-shared`
+
+Execution policy:
+• `inline` skills stay in the current agent context
+• `forked` skills with `delegate_agent` route to that agent
+• `forked` skills without `delegate_agent` route to `GeneralAssistant`
+• if `GeneralAssistant` is missing, the first active agent is used and a warning is recorded
+
+6. Interface Layer
 Interface listeners are responsible for:
 • receiving platform events
 • resolving user identity where possible
@@ -85,6 +111,7 @@ Interface listeners are responsible for:
 Background services can also live at this layer when they own delivery concerns such as outbound Slack alerts.
 
 Slack formatting is applied only at the Slack boundary.
+Transport layers no longer inject route overrides. They pass raw request context to the gateway.
 
 Formatting Strategy
 We use a 3-layer formatting approach:
@@ -169,6 +196,13 @@ The LangGraph state contains:
 messages
 route
 route_reason
+requested_agent
+requested_skill_ids
+resolved_skill_ids
+context_paths
+skill_resolution_diagnostics
+agent_selection_diagnostics
+selection_warnings
 user_id
 channel_id
 user_display_name
@@ -189,6 +223,8 @@ It wires:
 gateway
 general_chat_agent
 project_task_agent
+knowledge_agent
+document_conversion_agent
 tool execution
 
 Interface Entry Points

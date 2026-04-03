@@ -4,7 +4,8 @@ A lean LangGraph + Slack + Gemini starter for a company-facing multi-agent assis
 
 ## Current architecture
 
-- `gateway` decides which specialist should handle the request
+- `gateway` is the deterministic policy layer for routing, skill precedence, fallback, and delegation
+- `app/skills.py` holds the shared skill registry and normalized skill resolution
 - `project_task_agent` answers questions that depend on the Google Sheets project tracker
 - `knowledge_agent` answers questions about internal docs, architecture, and setup guidance
 - `document_conversion_agent` handles Slack-driven design document conversion into canonical AI-friendly knowledge packages
@@ -25,6 +26,7 @@ That keeps routing explicit, tool execution bounded, and the runtime easier to d
 app/
   config.py
   graph.py
+  skills.py
   paths.py
 gateway/
   agent.py
@@ -64,7 +66,7 @@ main.py
 ```
 
 - `app/` holds shared runtime code and bootstrap helpers.
-- `gateway/` holds the entrance routing agent.
+- `gateway/` holds the deterministic gateway policy and entrypoint.
 - `agents/` holds specialist agents and their agent-specific helpers.
 - `interfaces/` holds delivery-channel code such as Slack and web.
 - `knowledge/` holds curated knowledge content, AI workspace rules/prompts, and can later point at an external vault.
@@ -91,6 +93,7 @@ Optional:
 - `SLACK_THINKING_REACTION` (default: `eyes`)
 - `KNOWLEDGE_BASE_DIR` (default: `knowledge`)
 - `KNOWLEDGE_FILE_TYPES` (default: `.md,.txt,.rst,.csv,.tsv,.xlsx,.xlsm`)
+- `JADE_PROJECT_SKILLS_DIR` (default: `.jade/skills`)
 - `KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH` (default: `knowledge/AI/Rules/google_sheets_catalog.json`)
 - `KNOWLEDGE_GOOGLE_SHEETS_CACHE_TTL_SECONDS` (default: `120`)
 - `CONVERSION_WORK_DIR` (default: `runtime/conversion`)
@@ -170,6 +173,11 @@ python3 -m unittest tests.test_tax_monitor_otp_smoke
 ## Notes
 
 - Conversation memory is handled with a LangGraph checkpointer keyed by interface thread/channel.
+- Skill discovery is centralized in the shared registry. Agent-local skills live under `agents/<agent>/Skills/*/SKILL.md`, and project-shared skills live under `JADE_PROJECT_SKILLS_DIR`.
+- Skill precedence is deterministic: `path-scoped > agent-local > project-shared`.
+- One `skill_id` resolves to one effective definition per request. Same-scope duplicates are surfaced as configuration conflicts in diagnostics.
+- Routing is deterministic and centralized in the orchestrator. Slack and web no longer force worker routes directly.
+- `general_chat_agent` is treated as the `GeneralAssistant` fallback in gateway policy.
 - The Google Sheets tool is cached briefly to avoid reading the whole sheet on every request.
 - The knowledge agent reads local files from `KNOWLEDGE_BASE_DIR`; the default local folder is [`knowledge/`](/Users/kayngame/jade_ai_core/knowledge/).
 - The knowledge agent can also read curated online Google Sheets listed in `KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH`.
@@ -191,4 +199,5 @@ python3 -m unittest tests.test_tax_monitor_otp_smoke
 - If the login page requires a 6-digit dynamic verification code, the monitor posts a Slack prompt in `TAX_MONITOR_SLACK_CHANNEL`, waits for a user to send the code in that channel, and retries the login automatically.
 - For the OTP flow to work, keep the Slack listener enabled so channel messages can be received.
 - It sends one alert per project/game per day for a first negative rate, and rate-range alerts no more than once every two hours per project/game.
+- The web API now returns structured `skill_resolution_diagnostics`, `agent_selection_diagnostics`, and `selection_warnings` alongside legacy `route` metadata.
 - Do **not** commit `.env`, `credentials.json`, `.venv`, or IDE folders.

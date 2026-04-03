@@ -8,6 +8,7 @@ from langchain_core.tools import BaseTool
 
 
 AgentNodeFactory = Callable[[Any], Any]
+AgentMatcher = Callable[[Any, str], Any]
 
 
 @dataclass(frozen=True)
@@ -16,3 +17,7 @@ class AgentRegistration:
     description: str
     build_node: AgentNodeFactory
     tools: tuple[BaseTool, ...] = field(default_factory=tuple)
+    selection_order: int = 100
+    is_general_assistant: bool = False
+    skill_namespace: str = ""
+    matcher: AgentMatcher | None = None

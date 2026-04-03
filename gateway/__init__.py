@@ -1,8 +1,7 @@
 """Gateway routing package."""
 
-from gateway.agent import GatewayNode, build_gateway_prompt
+from gateway.agent import GatewayNode
 
 __all__ = [
     "GatewayNode",
-    "build_gateway_prompt",
 ]

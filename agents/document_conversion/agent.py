@@ -12,6 +12,7 @@ from pydantic import BaseModel, Field
 from app.config import DEFAULT_KNOWLEDGE_BASE_DIR, load_settings
 from app.paths import resolve_project_path
 from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
+from app.skills import SkillRegistry
 from agents.document_conversion.rendering import (
     build_targeted_questions,
     classify_conversion_failure,
@@ -131,10 +132,12 @@ PROMPT_PATH = "agents/document_conversion/AGENT.md"
 
 
 class DocumentConversionAgentNode:
-    def __init__(self, llm, settings=None) -> None:
+    def __init__(self, llm, settings=None, *, skill_registry: SkillRegistry | None = None, agent_name: str = "") -> None:
         self.llm = llm
         self.extractor = llm.with_structured_output(ConversionDraftPayload)
         self.settings = settings or load_settings()
+        self.skill_registry = skill_registry
+        self.agent_name = agent_name
         self.store = ConversionSessionStore(self._resolve_path(self.settings.conversion_work_dir, DEFAULT_CONVERSION_WORK_DIR))
         self.knowledge_root = self._resolve_path(
             self.settings.knowledge_base_dir,
@@ -368,7 +371,7 @@ class DocumentConversionAgentNode:
             answer_history=session.answer_history,
             latest_user_text=latest_text,
         )
-        first_pass = self._extract_draft(source_bundle)
+        first_pass = self._extract_draft(source_bundle, state)
         first_pass = normalize_draft_payload(first_pass)
 
         game_slug = str(first_pass.get("game_slug", "")).strip()
@@ -396,7 +399,7 @@ class DocumentConversionAgentNode:
                 market_slug=market_slug,
                 feature_slug=feature_slug,
             )
-            draft_payload = normalize_draft_payload(self._extract_draft(source_bundle))
+            draft_payload = normalize_draft_payload(self._extract_draft(source_bundle, state))
         else:
             draft_payload = first_pass
 
@@ -558,9 +561,15 @@ class DocumentConversionAgentNode:
             return self.store.get_active_session_by_thread(thread_id)
         return None
 
-    def _extract_draft(self, source_bundle: str) -> dict[str, Any]:
+    def _extract_draft(self, source_bundle: str, state: AgentState) -> dict[str, Any]:
         messages = [
-            SystemMessage(content=build_conversion_extractor_prompt()),
+            SystemMessage(
+                content=build_conversion_extractor_prompt(
+                    self.skill_registry,
+                    agent_name=self.agent_name,
+                    state=state,
+                )
+            ),
             HumanMessage(content=source_bundle),
         ]
         last_error: Exception | None = None
@@ -594,7 +603,12 @@ class DocumentConversionAgentNode:
         raise RuntimeError("Conversion extractor failed without returning a payload.")
 
 
-def build_conversion_extractor_prompt() -> str:
+def build_conversion_extractor_prompt(
+    skill_registry: SkillRegistry | None = None,
+    *,
+    agent_name: str = "",
+    state: AgentState | None = None,
+) -> str:
     sections = load_prompt_sections(
         PROMPT_PATH,
         required_sections=(
@@ -603,10 +617,22 @@ def build_conversion_extractor_prompt() -> str:
             "extractor_boundaries",
         ),
     )
+    resolved_skill_ids = state.get("resolved_skill_ids", []) if isinstance(state, dict) else []
+    context_paths = state.get("context_paths", []) if isinstance(state, dict) else []
+    skill_prompt = (
+        skill_registry.build_prompt_layers(
+            resolved_skill_ids,
+            agent_name=agent_name,
+            context_paths=context_paths,
+        )
+        if skill_registry is not None and agent_name
+        else ""
+    )
     return join_prompt_layers(
         load_shared_instruction_text(),
         sections["extractor_role"],
         sections["extractor_responsibilities"],
+        skill_prompt,
         sections["extractor_boundaries"],
     )
 

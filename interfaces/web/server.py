@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import re
 from pathlib import Path
 
 import uvicorn
@@ -16,33 +15,9 @@ from app.identity import build_user_identity_context
 from app.messages import extract_final_text
 from app.paths import resolve_project_path
 from interfaces.web.conversations import ConversationNotFoundError, WebConversationStore
-from tools.conversion_google_sources import extract_google_document_references
 from tools.document_conversion import ConversionSessionStore
 
 logger = logging.getLogger(__name__)
-
-UPLOAD_PATTERN = re.compile(r"\b(upload|attach|attachment|file)\b", re.IGNORECASE)
-CONVERSION_PATTERN = re.compile(r"\b(convert|conversion|knowledge package)\b", re.IGNORECASE)
-UNSUPPORTED_WEB_MESSAGE = (
-    "Google Docs and Sheets links can be converted here. "
-    "Raw file uploads still live in Slack for now."
-)
-CASUAL_GREETING_NORMALIZED_TEXTS = {
-    "hi",
-    "hello",
-    "hey",
-    "yo",
-    "good morning",
-    "good afternoon",
-    "good evening",
-    "你好",
-    "您好",
-    "嗨",
-    "哈喽",
-    "早上好",
-    "下午好",
-    "晚上好",
-}
 
 
 def format_web_chat_url(host: str, port: int) -> str:
@@ -135,20 +110,6 @@ class WebServer:
             thread_id = f"web:{conversation_id}"
             active_session = self.conversion_store.get_active_session_by_thread(thread_id)
 
-            if self._is_unsupported_web_request(user_message):
-                assistant_text = UNSUPPORTED_WEB_MESSAGE
-                conversation = self.conversation_store.append_message(
-                    conversation_id,
-                    role="assistant",
-                    markdown=assistant_text,
-                )
-                return {
-                    **conversation,
-                    "assistant_message": conversation["messages"][-1],
-                    "route": "",
-                    "route_reason": "Raw file uploads remain Slack-only for web v1.",
-                }
-
             user_context = build_user_identity_context(
                 slack_display_name=payload.display_name,
                 slack_real_name=payload.display_name,
@@ -162,9 +123,6 @@ class WebServer:
                 "channel_id": conversation_id,
                 **user_context,
             }
-            if self._should_route_to_conversion(active_session=active_session, text=user_message):
-                initial_state["route"] = "document_conversion_agent"
-                initial_state["route_reason"] = "Web document conversion session."
             if active_session is not None:
                 initial_state["conversion_session_id"] = active_session.session_id
 
@@ -184,11 +142,17 @@ class WebServer:
                 assistant_text = extract_final_text(final_state)
                 route = str(final_state.get("route", "")).strip()
                 route_reason = str(final_state.get("route_reason", "")).strip()
+                skill_resolution_diagnostics = final_state.get("skill_resolution_diagnostics", [])
+                agent_selection_diagnostics = final_state.get("agent_selection_diagnostics", [])
+                selection_warnings = final_state.get("selection_warnings", [])
             except Exception as exc:
                 logger.exception("Failed while processing web conversation=%s", conversation_id)
                 assistant_text = f"I hit an error while processing that request: {exc}"
                 route = ""
                 route_reason = "Request failed before a route completed."
+                skill_resolution_diagnostics = []
+                agent_selection_diagnostics = []
+                selection_warnings = []
 
             conversation = self.conversation_store.append_message(
                 conversation_id,
@@ -200,27 +164,12 @@ class WebServer:
                 "assistant_message": conversation["messages"][-1],
                 "route": route,
                 "route_reason": route_reason,
+                "skill_resolution_diagnostics": skill_resolution_diagnostics,
+                "agent_selection_diagnostics": agent_selection_diagnostics,
+                "selection_warnings": selection_warnings,
             }
 
         return app
-
-    def _is_unsupported_web_request(self, text: str) -> bool:
-        if extract_google_document_references(text):
-            return False
-        return bool(UPLOAD_PATTERN.search(text) and CONVERSION_PATTERN.search(text))
-
-    def _should_route_to_conversion(self, *, active_session, text: str) -> bool:
-        if extract_google_document_references(text):
-            return True
-        if active_session is None:
-            return False
-        return not self._is_casual_greeting(text)
-
-    def _is_casual_greeting(self, text: str) -> bool:
-        normalized = re.sub(r"[!?,.，。！？\s]+", " ", text.strip().lower()).strip()
-        if not normalized:
-            return False
-        return normalized in CASUAL_GREETING_NORMALIZED_TEXTS
 
     def _resolve_path(self, configured_value: str) -> Path:
         return resolve_project_path(configured_value, self.settings.conversion_work_dir)

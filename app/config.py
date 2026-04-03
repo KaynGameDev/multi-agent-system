@@ -34,6 +34,7 @@ DEFAULT_KNOWLEDGE_FILE_TYPES = (
 DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH = "knowledge/AI/Rules/google_sheets_catalog.json"
 DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CACHE_TTL_SECONDS = 120
 DEFAULT_CONVERSION_WORK_DIR = "runtime/conversion"
+DEFAULT_JADE_PROJECT_SKILLS_DIR = ".jade/skills"
 DEFAULT_TAX_MONITOR_URL = "https://ghv2.rydgames.com:62933/Page/index.html"
 DEFAULT_TAX_MONITOR_STATE_PATH = "runtime/monitoring/tax_monitor_state.json"
 DEFAULT_TAX_MONITOR_NAVIGATION_PATH = ("税收调控管理", "税收详情（新）")
@@ -58,6 +59,7 @@ class Settings:
     project_lookup_keywords: tuple[str, ...]
     knowledge_base_dir: str
     knowledge_file_types: tuple[str, ...]
+    jade_project_skills_dir: str = DEFAULT_JADE_PROJECT_SKILLS_DIR
     knowledge_google_sheets_catalog_path: str = DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH
     knowledge_google_sheets_cache_ttl_seconds: int = DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CACHE_TTL_SECONDS
     conversion_work_dir: str = DEFAULT_CONVERSION_WORK_DIR
@@ -130,6 +132,10 @@ def load_settings(force_reload: bool = False) -> Settings:
         project_lookup_keywords=keywords,
         knowledge_base_dir=os.getenv("KNOWLEDGE_BASE_DIR", DEFAULT_KNOWLEDGE_BASE_DIR).strip() or DEFAULT_KNOWLEDGE_BASE_DIR,
         knowledge_file_types=knowledge_file_types,
+        jade_project_skills_dir=(
+            os.getenv("JADE_PROJECT_SKILLS_DIR", DEFAULT_JADE_PROJECT_SKILLS_DIR).strip()
+            or DEFAULT_JADE_PROJECT_SKILLS_DIR
+        ),
         knowledge_google_sheets_catalog_path=(
             os.getenv(
                 "KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH",

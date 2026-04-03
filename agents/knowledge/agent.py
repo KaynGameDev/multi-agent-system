@@ -7,6 +7,7 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 
 from app.language import detect_response_language
 from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
+from app.skills import SkillRegistry
 from agents.knowledge.rendering import is_knowledge_payload, render_knowledge_payload
 from app.state import AgentState
 
@@ -67,29 +68,55 @@ READ_KNOWLEDGE_QUERY_PATTERNS = (
 
 
 class KnowledgeAgentNode:
-    def __init__(self, llm, tools: list) -> None:
+    def __init__(self, llm, tools: list, *, skill_registry: SkillRegistry | None = None, agent_name: str = "") -> None:
         self.llm = llm.bind_tools(tools)
+        self.skill_registry = skill_registry
+        self.agent_name = agent_name
 
     def __call__(self, state: AgentState) -> dict:
         rendered_response = build_knowledge_response(state)
         if rendered_response is not None:
             return {"messages": [AIMessage(content=rendered_response)]}
 
-        messages = [SystemMessage(content=build_knowledge_prompt()), *state["messages"]]
+        messages = [
+            SystemMessage(
+                content=build_knowledge_prompt(
+                    state,
+                    skill_registry=self.skill_registry,
+                    agent_name=self.agent_name,
+                )
+            ),
+            *state["messages"],
+        ]
         response = self.llm.invoke(messages)
         return {"messages": [response]}
 
 
-def build_knowledge_prompt() -> str:
+def build_knowledge_prompt(
+    state: AgentState,
+    *,
+    skill_registry: SkillRegistry | None = None,
+    agent_name: str = "",
+) -> str:
     sections = load_prompt_sections(
         PROMPT_PATH,
         required_sections=("role", "responsibilities", "tool_usage", "boundaries", "output"),
+    )
+    skill_prompt = (
+        skill_registry.build_prompt_layers(
+            state.get("resolved_skill_ids", []),
+            agent_name=agent_name,
+            context_paths=state.get("context_paths", []),
+        )
+        if skill_registry is not None and agent_name
+        else ""
     )
     return join_prompt_layers(
         load_shared_instruction_text(),
         sections["role"],
         sections["responsibilities"],
         sections["tool_usage"],
+        skill_prompt,
         sections["boundaries"],
         sections["output"],
     )

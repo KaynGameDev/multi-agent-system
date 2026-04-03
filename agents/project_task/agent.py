@@ -8,26 +8,43 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 
 from app.language import detect_response_language
 from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
+from app.skills import SkillRegistry
 from app.state import AgentState
 
 PROMPT_PATH = "agents/project_task/AGENT.md"
 
 
 class ProjectTaskAgentNode:
-    def __init__(self, llm, tools: list) -> None:
+    def __init__(self, llm, tools: list, *, skill_registry: SkillRegistry | None = None, agent_name: str = "") -> None:
         self.llm = llm.bind_tools(tools)
+        self.skill_registry = skill_registry
+        self.agent_name = agent_name
 
     def __call__(self, state: AgentState) -> dict:
         task_list_response = build_task_list_response(state)
         if task_list_response is not None:
             return {"messages": [AIMessage(content=task_list_response)]}
 
-        messages = [SystemMessage(content=build_project_task_prompt(state)), *state["messages"]]
+        messages = [
+            SystemMessage(
+                content=build_project_task_prompt(
+                    state,
+                    skill_registry=self.skill_registry,
+                    agent_name=self.agent_name,
+                )
+            ),
+            *state["messages"],
+        ]
         response = self.llm.invoke(messages)
         return {"messages": [response]}
 
 
-def build_project_task_prompt(state: AgentState) -> str:
+def build_project_task_prompt(
+    state: AgentState,
+    *,
+    skill_registry: SkillRegistry | None = None,
+    agent_name: str = "",
+) -> str:
     user_sheet_name = str(state.get("user_sheet_name", "")).strip()
     user_mapped_slack_name = str(
         state.get("user_mapped_slack_name", state.get("user_display_name", ""))
@@ -69,6 +86,14 @@ def build_project_task_prompt(state: AgentState) -> str:
         lines.append(sections["default_output"])
     lines.append(sections["date_context"])
     lines.append(sections["tool_guidance"])
+    if skill_registry is not None and agent_name:
+        lines.append(
+            skill_registry.build_prompt_layers(
+                state.get("resolved_skill_ids", []),
+                agent_name=agent_name,
+                context_paths=state.get("context_paths", []),
+            )
+        )
     if user_sheet_name:
         lines.append(sections["identity_context"])
     lines.append(sections["name_resolution"])
