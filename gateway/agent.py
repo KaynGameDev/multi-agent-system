@@ -157,9 +157,7 @@ class GatewayNode:
         latest_user_text = extract_latest_human_text(state)
         context_paths = normalize_context_paths(state)
         requested_skill_ids = normalize_requested_skill_ids(state)
-        requested_agent = self._normalize_agent_name(
-            str(state.get("requested_agent") or state.get("route") or "").strip()
-        )
+        requested_agent = self._normalize_agent_name(str(state.get("requested_agent") or "").strip())
 
         warnings: list[str] = []
         skill_diagnostics: list[dict[str, Any]] = list(self.skill_registry.discovery_diagnostics)

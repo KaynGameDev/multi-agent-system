@@ -123,12 +123,13 @@ class SlackListener:
                 "thread_id": thread_id,
                 "user_id": user_id,
                 "channel_id": channel_id,
+                "requested_agent": "",
+                "requested_skill_ids": [],
                 "uploaded_files": uploaded_files,
                 "context_paths": [item["name"] for item in uploaded_files if str(item.get("name", "")).strip()],
+                "conversion_session_id": active_session.session_id if active_session is not None else "",
                 **user_context,
             }
-            if active_session is not None:
-                initial_state["conversion_session_id"] = active_session.session_id
 
             logger.debug(
                 "Invoking agent graph channel=%s user=%s thread=%s requested_agent=%s conversion_session_id=%s",

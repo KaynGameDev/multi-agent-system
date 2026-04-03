@@ -121,10 +121,13 @@ class WebServer:
                 "thread_id": thread_id,
                 "user_id": payload.email.strip() or payload.display_name.strip() or thread_id,
                 "channel_id": conversation_id,
+                "requested_agent": "",
+                "requested_skill_ids": [],
+                "uploaded_files": [],
+                "context_paths": [],
+                "conversion_session_id": active_session.session_id if active_session is not None else "",
                 **user_context,
             }
-            if active_session is not None:
-                initial_state["conversion_session_id"] = active_session.session_id
 
             logger.debug(
                 "Invoking web graph conversation=%s thread=%s email=%s display_name=%s",

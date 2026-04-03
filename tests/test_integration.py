@@ -7,6 +7,7 @@ from pathlib import Path
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
+from langgraph.checkpoint.memory import InMemorySaver
 
 from app.graph import build_default_agent_registrations, build_graph, build_web_agent_registrations
 from app.skills import SkillRegistry
@@ -54,6 +55,15 @@ class StaticAgentNode:
 
 def always_match(_state, _latest_user_text: str) -> AgentMatchResult:
     return AgentMatchResult(matched=True, score=100, reasons=("Always matched for integration test.",))
+
+
+def keyword_match(keyword: str, *, score: int = 100):
+    def matcher(_state, latest_user_text: str) -> AgentMatchResult:
+        if keyword in latest_user_text.lower():
+            return AgentMatchResult(matched=True, score=score, reasons=(f"Matched `{keyword}`.",))
+        return AgentMatchResult(matched=False, score=0, reasons=())
+
+    return matcher
 
 
 class DeterministicIntegrationTests(unittest.TestCase):
@@ -144,10 +154,85 @@ class DeterministicIntegrationTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
         payload = response.json()
         self.assertNotIn("route", fake_graph.last_state)
+        self.assertEqual(fake_graph.last_state["requested_agent"], "")
+        self.assertEqual(fake_graph.last_state["requested_skill_ids"], [])
+        self.assertEqual(fake_graph.last_state["uploaded_files"], [])
+        self.assertEqual(fake_graph.last_state["context_paths"], [])
+        self.assertEqual(fake_graph.last_state["conversion_session_id"], "")
         self.assertIn("skill_resolution_diagnostics", payload)
         self.assertIn("agent_selection_diagnostics", payload)
         self.assertIn("selection_warnings", payload)
         self.assertEqual(payload["route"], "general_chat_agent")
+
+    def test_checkpointed_graph_does_not_reuse_prior_route_or_requested_skills(self) -> None:
+        registrations = (
+            build_registration(
+                "general_chat_agent",
+                namespace="general_chat",
+                is_general_assistant=True,
+                selection_order=30,
+                build_node=lambda _llm=None, skill_registry=None: StaticAgentNode(),
+            ),
+            build_registration(
+                "alpha_agent",
+                namespace="alpha",
+                selection_order=10,
+                matcher=keyword_match("alpha"),
+                build_node=lambda _llm=None, skill_registry=None: StaticAgentNode(),
+            ),
+            build_registration(
+                "beta_agent",
+                namespace="beta",
+                selection_order=20,
+                matcher=keyword_match("beta"),
+                build_node=lambda _llm=None, skill_registry=None: StaticAgentNode(),
+            ),
+        )
+        write_skill(
+            self.root,
+            ".jade/skills/alpha-skill",
+            frontmatter={
+                "name": "Alpha Skill",
+                "description": "Integration alpha skill.",
+                "available_to_agents": ["alpha_agent"],
+            },
+            body="# Alpha Skill\n\nIntegration alpha skill.",
+        )
+        registry = SkillRegistry(registrations, project_root=self.root)
+        graph = build_graph(
+            None,
+            checkpointer=InMemorySaver(),
+            agent_registrations=registrations,
+            default_route="general_chat_agent",
+            skill_registry=registry,
+        )
+        config = {"configurable": {"thread_id": "integration-thread"}}
+
+        first_state = graph.invoke(
+            {
+                "messages": [HumanMessage(content="please alpha")],
+                "requested_agent": "",
+                "requested_skill_ids": ["alpha-skill"],
+                "context_paths": [],
+            },
+            config=config,
+        )
+        second_state = graph.invoke(
+            {
+                "messages": [HumanMessage(content="please beta")],
+                "requested_agent": "",
+                "requested_skill_ids": [],
+                "context_paths": [],
+            },
+            config=config,
+        )
+
+        self.assertEqual(first_state["route"], "alpha_agent")
+        self.assertEqual(first_state["resolved_skill_ids"], ["alpha-skill"])
+        self.assertEqual(second_state["route"], "beta_agent")
+        self.assertEqual(second_state["requested_skill_ids"], [])
+        self.assertEqual(second_state["resolved_skill_ids"], [])
+        self.assertNotIn("Explicit requested agent", second_state["route_reason"])
 
     def test_default_and_web_registrations_include_builder_agent(self) -> None:
         settings = make_settings(self.root / "runtime")
