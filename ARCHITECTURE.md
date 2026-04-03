@@ -249,7 +249,7 @@ KnowledgeAgent
 Handles internal documentation, architecture, setup, and repository guidance questions.
 
 KnowledgeBaseBuilderAgent
-Handles knowledge elicitation, KB document review, layer placement decisions, Feature Spec skeleton building, and KB V1 execution tracking. It reuses the read-only knowledge tools and does not auto-publish or auto-promote legacy materials.
+Handles knowledge elicitation, KB document review, layer placement decisions, Feature Spec skeleton building, and KB V1 execution tracking. It uses read-only knowledge tools for evidence gathering, can resolve canonical KB draft paths, and can write Markdown drafts into the knowledge base when explicitly asked, but it does not auto-publish or auto-promote legacy materials.
 
 Current v1 knowledge source:
 • local files under `KNOWLEDGE_BASE_DIR`

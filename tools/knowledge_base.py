@@ -12,6 +12,7 @@ from langchain_core.tools import tool
 from openpyxl import load_workbook
 
 from app.config import DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH, load_settings
+from app.knowledge_paths import build_knowledge_markdown_relative_path
 from app.paths import resolve_project_path
 from tools.google_workspace_services import get_google_sheets_service
 
@@ -964,6 +965,15 @@ def build_knowledge_base_context() -> dict[str, object]:
     }
 
 
+def resolve_knowledge_markdown_target(relative_path: str) -> tuple[Path, Path]:
+    root = get_knowledge_base_root().resolve()
+    candidate = (root / str(relative_path or "").strip()).resolve()
+    candidate.relative_to(root)
+    if candidate.suffix.lower() != ".md":
+        raise ValueError("Only Markdown files ending in .md can be written by this tool.")
+    return root, candidate
+
+
 @tool
 def list_knowledge_documents() -> dict[str, object]:
     """List knowledge documents available to the knowledge agent."""
@@ -1086,4 +1096,97 @@ def read_knowledge_document(document_name: str, section_query: str = "", max_lin
         "truncated": excerpt["truncated"],
         "block_type": excerpt["block_type"],
         "section_title": excerpt["section_title"],
+    }
+
+
+@tool
+def resolve_knowledge_markdown_path(
+    layer: str,
+    category: str,
+    filename: str = "README.md",
+    game_slug: str = "",
+    market_slug: str = "",
+    feature_slug: str = "",
+    legacy_bucket: str = "",
+) -> dict[str, object]:
+    """Resolve a canonical Markdown path inside the knowledge base hierarchy."""
+    context = build_knowledge_base_context()
+    try:
+        relative_path = build_knowledge_markdown_relative_path(
+            layer=layer,
+            category=category,
+            filename=filename,
+            game_slug=game_slug,
+            market_slug=market_slug,
+            feature_slug=feature_slug,
+            legacy_bucket=legacy_bucket,
+        )
+        root, absolute_path = resolve_knowledge_markdown_target(relative_path)
+    except Exception as exc:
+        return {
+            "ok": False,
+            **context,
+            "error": str(exc),
+            "layer": layer,
+            "category": category,
+        }
+
+    return {
+        "ok": True,
+        **context,
+        "layer": layer,
+        "category": category,
+        "relative_path": relative_path,
+        "absolute_path": str(absolute_path),
+        "knowledge_root": str(root),
+    }
+
+
+@tool
+def write_knowledge_markdown_document(
+    relative_path: str,
+    content: str,
+    overwrite: bool = False,
+) -> dict[str, object]:
+    """Write a Markdown document inside the knowledge base root."""
+    context = build_knowledge_base_context()
+    if not str(content or "").strip():
+        return {
+            "ok": False,
+            **context,
+            "error": "Document content cannot be empty.",
+            "relative_path": relative_path,
+        }
+
+    try:
+        _root, absolute_path = resolve_knowledge_markdown_target(relative_path)
+    except Exception as exc:
+        return {
+            "ok": False,
+            **context,
+            "error": str(exc),
+            "relative_path": relative_path,
+        }
+
+    existed = absolute_path.exists()
+    if existed and not overwrite:
+        return {
+            "ok": False,
+            **context,
+            "error": "Target file already exists. Retry with overwrite=True to replace it.",
+            "relative_path": relative_path,
+            "absolute_path": str(absolute_path),
+        }
+
+    absolute_path.parent.mkdir(parents=True, exist_ok=True)
+    absolute_path.write_text(content, encoding="utf-8")
+
+    return {
+        "ok": True,
+        **context,
+        "relative_path": relative_path,
+        "absolute_path": str(absolute_path),
+        "created": not existed,
+        "overwritten": existed,
+        "bytes_written": absolute_path.stat().st_size,
     }

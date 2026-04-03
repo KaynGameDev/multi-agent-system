@@ -7,7 +7,6 @@ import os
 import re
 import shutil
 import sqlite3
-import unicodedata
 import urllib.error
 import urllib.request
 from dataclasses import dataclass
@@ -17,6 +16,14 @@ from typing import Any
 from uuid import uuid4
 
 from app.config import DEFAULT_KNOWLEDGE_BASE_DIR, load_settings
+from app.knowledge_paths import (
+    build_conversion_package_relative_path,
+    build_deployment_game_root,
+    build_game_line_directory_name,
+    build_game_line_root,
+    build_shared_docs_root,
+    normalize_slug,
+)
 from app.paths import resolve_project_path
 from tools.conversion_google_sources import GoogleDocumentReference, fetch_google_document_source
 from tools.knowledge_base import load_knowledge_document
@@ -40,27 +47,6 @@ MAX_CONVERSION_SOURCE_BUNDLE_CHARS = 120_000
 MAX_CONVERSION_TABLE_HEAD_ROWS = 20
 MAX_CONVERSION_TABLE_TAIL_ROWS = 5
 CONVERSION_CONTEXT_FILE_TYPES = {".md", ".txt", ".rst", ".csv", ".tsv", ".xlsx", ".xlsm"}
-
-KNOWN_GAME_LINE_DIRECTORY_NAMES = {
-    "buyudalouandou": "BuYuDaLuanDou",
-    "bu-yu-da-luan-dou": "BuYuDaLuanDou",
-    "2-player-fishing": "BuYuDaLuanDou",
-    "two-player-fishing": "BuYuDaLuanDou",
-    "f4buyu": "F4BuYu",
-    "f4-bu-yu": "F4BuYu",
-    "4-player-fishing": "F4BuYu",
-    "four-player-fishing": "F4BuYu",
-    "xybuyu": "XYBuYu",
-    "xy-bu-yu": "XYBuYu",
-    "west-journey-fishing": "XYBuYu",
-}
-
-KNOWN_DEPLOYMENT_DIRECTORY_NAMES = {
-    "indonesia-main": "IndonesiaMain",
-    "indonesia-sub": "IndonesiaSub",
-    "malaysia-sub": "MalaysiaSub",
-    "thailand-sub": "ThailandSub",
-}
 PACKAGE_MARKDOWN_CONTEXT_FILES = (
     ("README.md", ("README.md",)),
     ("CORE.md", ("CORE.md", "core.md")),
@@ -229,16 +215,6 @@ def get_knowledge_root() -> Path:
         DEFAULT_KNOWLEDGE_BASE_DIR,
     )
 
-
-def normalize_slug(value: str) -> str:
-    normalized = unicodedata.normalize("NFKD", value or "")
-    ascii_value = normalized.encode("ascii", "ignore").decode("ascii")
-    lowered = ascii_value.lower().strip()
-    lowered = re.sub(r"[^a-z0-9]+", "-", lowered)
-    lowered = re.sub(r"-{2,}", "-", lowered)
-    return lowered.strip("-")
-
-
 def sanitize_filename(value: str) -> str:
     cleaned = re.sub(r"[^\w.\-]+", "_", value.strip(), flags=re.UNICODE)
     return cleaned.strip("._") or "upload"
@@ -258,60 +234,6 @@ def build_conversion_store() -> "ConversionSessionStore":
 
 def is_active_conversion_status(status: str) -> bool:
     return status in CONVERSION_ACTIVE_STATUSES
-
-
-def build_conversion_package_relative_path(game_slug: str, market_slug: str, feature_slug: str) -> str:
-    deployment_dir = build_deployment_directory_name(market_slug)
-    game_line_dir = build_game_line_directory_name(game_slug)
-    return f"Docs/20_Deployments/{deployment_dir}/{game_line_dir}/Features/{feature_slug or '?'}"
-
-
-def build_game_line_directory_name(game_slug: str) -> str:
-    normalized = normalize_slug(game_slug)
-    if not normalized:
-        return "?"
-    return KNOWN_GAME_LINE_DIRECTORY_NAMES.get(normalized, build_pascal_case_name(normalized))
-
-
-def build_deployment_directory_name(market_slug: str) -> str:
-    normalized = normalize_slug(market_slug)
-    if not normalized:
-        return "?"
-    return KNOWN_DEPLOYMENT_DIRECTORY_NAMES.get(normalized, build_pascal_case_name(normalized))
-
-
-def build_pascal_case_name(value: str) -> str:
-    parts = [part for part in re.split(r"[^a-zA-Z0-9]+", value) if part]
-    if not parts:
-        return "?"
-    rendered_parts: list[str] = []
-    for part in parts:
-        if part.isdigit():
-            rendered_parts.append(part)
-            continue
-        if len(part) <= 2 and any(char.isalpha() for char in part):
-            rendered_parts.append(part.upper())
-            continue
-        rendered_parts.append(part[:1].upper() + part[1:])
-    return "".join(rendered_parts) or "?"
-
-
-def build_shared_docs_root(knowledge_root: Path) -> Path:
-    return knowledge_root / "Docs" / "00_Shared"
-
-
-def build_game_line_root(knowledge_root: Path, game_slug: str) -> Path:
-    return knowledge_root / "Docs" / "10_GameLines" / build_game_line_directory_name(game_slug)
-
-
-def build_deployment_game_root(knowledge_root: Path, game_slug: str, market_slug: str) -> Path:
-    return (
-        knowledge_root
-        / "Docs"
-        / "20_Deployments"
-        / build_deployment_directory_name(market_slug)
-        / build_game_line_directory_name(game_slug)
-    )
 
 
 class ConversionSessionStore:

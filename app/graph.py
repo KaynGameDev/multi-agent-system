@@ -22,16 +22,27 @@ from gateway.agent import (
 )
 from app.skills import SkillRegistry
 from app.state import AgentState
-from tools.knowledge_base import list_knowledge_documents, read_knowledge_document, search_knowledge_documents
+from tools.knowledge_base import (
+    list_knowledge_documents,
+    read_knowledge_document,
+    resolve_knowledge_markdown_path,
+    search_knowledge_documents,
+    write_knowledge_markdown_document,
+)
 from tools.project_tracker_google_sheets import get_project_sheet_overview, read_project_tasks
 
 
 def build_default_agent_registrations(settings=None) -> tuple[AgentRegistration, ...]:
     resolved_settings = settings or load_settings()
-    knowledge_tools = (
+    knowledge_read_tools = (
         list_knowledge_documents,
         search_knowledge_documents,
         read_knowledge_document,
+    )
+    knowledge_builder_tools = (
+        *knowledge_read_tools,
+        resolve_knowledge_markdown_path,
+        write_knowledge_markdown_document,
     )
     project_tools = (read_project_tasks, get_project_sheet_overview)
 
@@ -55,13 +66,13 @@ def build_default_agent_registrations(settings=None) -> tuple[AgentRegistration,
                 "Use for internal documentation, system architecture, setup instructions, repository guidance, "
                 "and documented company workflows."
             ),
-            build_node=lambda llm, tools=knowledge_tools, skill_registry=None: KnowledgeAgentNode(
+            build_node=lambda llm, tools=knowledge_read_tools, skill_registry=None: KnowledgeAgentNode(
                 llm,
                 list(tools),
                 skill_registry=skill_registry,
                 agent_name="knowledge_agent",
             ),
-            tools=knowledge_tools,
+            tools=knowledge_read_tools,
             selection_order=30,
             skill_namespace="knowledge",
             matcher=knowledge_matcher,
@@ -72,13 +83,13 @@ def build_default_agent_registrations(settings=None) -> tuple[AgentRegistration,
                 "Use for knowledge elicitation, KB document review, layer placement decisions, "
                 "feature-spec skeleton building, and KB V1 execution tracking."
             ),
-            build_node=lambda llm, tools=knowledge_tools, skill_registry=None: KnowledgeBaseBuilderAgentNode(
+            build_node=lambda llm, tools=knowledge_builder_tools, skill_registry=None: KnowledgeBaseBuilderAgentNode(
                 llm,
                 list(tools),
                 skill_registry=skill_registry,
                 agent_name="knowledge_base_builder_agent",
             ),
-            tools=knowledge_tools,
+            tools=knowledge_builder_tools,
             selection_order=35,
             skill_namespace="knowledge_base_builder",
             matcher=knowledge_base_builder_matcher,
