@@ -8,6 +8,7 @@ A lean LangGraph + Slack + Gemini starter for a company-facing multi-agent assis
 - `app/skills.py` holds the shared skill registry and normalized skill resolution
 - `project_task_agent` answers questions that depend on the Google Sheets project tracker
 - `knowledge_agent` answers questions about internal docs, architecture, and setup guidance
+- `knowledge_base_builder_agent` handles knowledge elicitation, KB document review, layer placement, and KB V1 tracking
 - `document_conversion_agent` handles Slack-driven design document conversion into canonical AI-friendly knowledge packages
 - `general_chat_agent` handles greetings, general chat, and everything outside the project tracker
 - `tax_monitor_tool` is the standalone tax-monitor package and CLI entrypoint for polling the tax-control webpage without the agent graph
@@ -35,6 +36,8 @@ agents/
     agent.py
   knowledge/
     agent.py
+  knowledge_base_builder/
+    agent.py
   project_task/
     agent.py
   document_conversion/
@@ -57,8 +60,9 @@ knowledge/
     00_Shared/
     10_GameLines/
     20_Deployments/
-    30_Legacy/
-    40_Templates/
+    30_Review/
+    40_Legacy/
+    50_Templates/
 runtime/
   conversion/
   monitoring/
@@ -176,10 +180,11 @@ python3 -m unittest tests.test_tax_monitor_otp_smoke
 - Skill discovery is centralized in the shared registry. Agent-local skills live under `agents/<agent>/Skills/*/SKILL.md`, and project-shared skills live under `JADE_PROJECT_SKILLS_DIR`.
 - Skill precedence is deterministic: `path-scoped > agent-local > project-shared`.
 - One `skill_id` resolves to one effective definition per request. Same-scope duplicates are surfaced as configuration conflicts in diagnostics.
-- Routing is deterministic and centralized in the orchestrator. Slack and web no longer force worker routes directly.
+- Routing is deterministic and centralized in the gateway. Slack and web no longer force worker routes directly.
 - `general_chat_agent` is treated as the `GeneralAssistant` fallback in gateway policy.
 - The Google Sheets tool is cached briefly to avoid reading the whole sheet on every request.
 - The knowledge agent reads local files from `KNOWLEDGE_BASE_DIR`; the default local folder is [`knowledge/`](/Users/kayngame/jade_ai_core/knowledge/).
+- The knowledge-base builder agent reuses the same read-only knowledge tools for evidence gathering, elicitation support, KB review, and KB V1 tracking.
 - The knowledge agent can also read curated online Google Sheets listed in `KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH`.
 - The document conversion flow stages Slack-uploaded source files and session state under `CONVERSION_WORK_DIR`.
 - The tax monitor persists alert cooldown state under [`runtime/monitoring/`](/Users/kayngame/jade_ai_core/runtime/monitoring/) by default.

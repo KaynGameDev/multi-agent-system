@@ -7,7 +7,13 @@ from pathlib import Path
 from langchain_core.messages import HumanMessage
 
 from app.skills import SkillRegistry
-from gateway.agent import AgentMatchResult, GatewayNode, document_conversion_matcher
+from gateway.agent import (
+    AgentMatchResult,
+    GatewayNode,
+    document_conversion_matcher,
+    knowledge_base_builder_matcher,
+    knowledge_matcher,
+)
 from tests.common import build_registration, write_skill
 
 
@@ -175,6 +181,90 @@ class GatewayTests(unittest.TestCase):
         )
 
         self.assertEqual(result["route"], "document_conversion_agent")
+
+    def test_builder_elicitation_request_routes_to_knowledge_base_builder(self) -> None:
+        registrations = (
+            build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
+            build_registration("knowledge_agent", namespace="knowledge", selection_order=30, matcher=knowledge_matcher),
+            build_registration(
+                "knowledge_base_builder_agent",
+                namespace="knowledge_base_builder",
+                selection_order=35,
+                matcher=knowledge_base_builder_matcher,
+            ),
+        )
+        orchestrator = self.build_orchestrator(registrations)
+
+        result = orchestrator(
+            {
+                "messages": [HumanMessage(content="请一步步提问，帮我们梳理这个功能并整理成 feature spec 骨架。")],
+            }
+        )
+
+        self.assertEqual(result["route"], "knowledge_base_builder_agent")
+
+    def test_builder_review_request_routes_to_knowledge_base_builder(self) -> None:
+        registrations = (
+            build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
+            build_registration("knowledge_agent", namespace="knowledge", selection_order=30, matcher=knowledge_matcher),
+            build_registration(
+                "knowledge_base_builder_agent",
+                namespace="knowledge_base_builder",
+                selection_order=35,
+                matcher=knowledge_base_builder_matcher,
+            ),
+        )
+        orchestrator = self.build_orchestrator(registrations)
+
+        result = orchestrator(
+            {
+                "messages": [HumanMessage(content="请 review 这份 KB 文档的 metadata 和层级归属。")],
+            }
+        )
+
+        self.assertEqual(result["route"], "knowledge_base_builder_agent")
+
+    def test_builder_tracking_request_routes_to_knowledge_base_builder(self) -> None:
+        registrations = (
+            build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
+            build_registration("knowledge_agent", namespace="knowledge", selection_order=30, matcher=knowledge_matcher),
+            build_registration(
+                "knowledge_base_builder_agent",
+                namespace="knowledge_base_builder",
+                selection_order=35,
+                matcher=knowledge_base_builder_matcher,
+            ),
+        )
+        orchestrator = self.build_orchestrator(registrations)
+
+        result = orchestrator(
+            {
+                "messages": [HumanMessage(content="当前 KB V1 到哪个 milestone 了？")],
+            }
+        )
+
+        self.assertEqual(result["route"], "knowledge_base_builder_agent")
+
+    def test_generic_repository_question_stays_on_knowledge_agent(self) -> None:
+        registrations = (
+            build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
+            build_registration("knowledge_agent", namespace="knowledge", selection_order=30, matcher=knowledge_matcher),
+            build_registration(
+                "knowledge_base_builder_agent",
+                namespace="knowledge_base_builder",
+                selection_order=35,
+                matcher=knowledge_base_builder_matcher,
+            ),
+        )
+        orchestrator = self.build_orchestrator(registrations)
+
+        result = orchestrator(
+            {
+                "messages": [HumanMessage(content="请介绍一下这个仓库的 setup 文档和架构说明。")],
+            }
+        )
+
+        self.assertEqual(result["route"], "knowledge_agent")
 
     def test_no_specialist_match_falls_back_to_general_assistant(self) -> None:
         registrations = (

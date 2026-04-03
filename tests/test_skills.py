@@ -5,6 +5,7 @@ import unittest
 from pathlib import Path
 
 from agents.general_chat.agent import build_general_chat_prompt
+from agents.knowledge_base_builder.agent import build_knowledge_base_builder_prompt
 from app.skills import SkillRegistry
 from tests.common import build_registration, write_skill
 
@@ -168,6 +169,59 @@ class SkillRegistryTests(unittest.TestCase):
 
         self.assertIn("Greeting Enhancer", prompt)
         self.assertIn("Always greet the user warmly and concisely.", prompt)
+
+    def test_builder_skill_frontmatter_is_parsed(self) -> None:
+        registrations = (
+            build_registration("knowledge_base_builder_agent", namespace="knowledge_base_builder"),
+        )
+        write_skill(
+            self.root,
+            "agents/knowledge_base_builder/Skills/Review-KB-Doc",
+            frontmatter={
+                "name": "KB 文档审查",
+                "description": "用于审查知识库文档的 metadata、层级归属与结构完整性。",
+                "disable_model_invocation": False,
+            },
+            body="# KB 文档审查\n\n用于审查知识库文档。",
+        )
+
+        registry = SkillRegistry(registrations, project_root=self.root)
+        resolution = registry.resolve_skill("review-kb-doc")
+
+        self.assertIsNotNone(resolution.effective_definition)
+        self.assertEqual(resolution.effective_definition.name, "KB 文档审查")
+        self.assertIn("metadata", resolution.effective_definition.description)
+        self.assertEqual(
+            resolution.effective_definition.available_to_agents,
+            ("knowledge_base_builder_agent",),
+        )
+
+    def test_builder_prompt_loads_and_injects_skill_layers(self) -> None:
+        registrations = (
+            build_registration("knowledge_base_builder_agent", namespace="knowledge_base_builder"),
+        )
+        write_skill(
+            self.root,
+            "agents/knowledge_base_builder/Skills/Elicit-FeatureSpec",
+            frontmatter={
+                "name": "Feature Spec 抽取",
+                "description": "用于围绕单个功能整理成 feature_spec 草稿骨架。",
+            },
+            body="# Feature Spec 抽取\n\n必须包含决策记录与变更记录。",
+        )
+        registry = SkillRegistry(registrations, project_root=self.root)
+
+        prompt = build_knowledge_base_builder_prompt(
+            {
+                "resolved_skill_ids": ["elicit-featurespec"],
+                "context_paths": [],
+            },
+            skill_registry=registry,
+            agent_name="knowledge_base_builder_agent",
+        )
+
+        self.assertIn("知识库构建 Agent", prompt)
+        self.assertIn("必须包含决策记录与变更记录。", prompt)
 
 
 if __name__ == "__main__":

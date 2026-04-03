@@ -8,6 +8,7 @@ from langgraph.prebuilt import ToolNode, tools_condition
 from agents.document_conversion.agent import DocumentConversionAgentNode
 from agents.general_chat.agent import GeneralChatAgentNode
 from agents.knowledge.agent import KnowledgeAgentNode
+from agents.knowledge_base_builder.agent import KnowledgeBaseBuilderAgentNode
 from agents.project_task.agent import ProjectTaskAgentNode
 from app.agent_registry import AgentRegistration
 from app.config import load_settings
@@ -15,6 +16,7 @@ from gateway.agent import GatewayNode
 from gateway.agent import (
     document_conversion_matcher,
     general_chat_matcher,
+    knowledge_base_builder_matcher,
     knowledge_matcher,
     project_task_matcher_factory,
 )
@@ -65,6 +67,23 @@ def build_default_agent_registrations(settings=None) -> tuple[AgentRegistration,
             matcher=knowledge_matcher,
         ),
         AgentRegistration(
+            name="knowledge_base_builder_agent",
+            description=(
+                "Use for knowledge elicitation, KB document review, layer placement decisions, "
+                "feature-spec skeleton building, and KB V1 execution tracking."
+            ),
+            build_node=lambda llm, tools=knowledge_tools, skill_registry=None: KnowledgeBaseBuilderAgentNode(
+                llm,
+                list(tools),
+                skill_registry=skill_registry,
+                agent_name="knowledge_base_builder_agent",
+            ),
+            tools=knowledge_tools,
+            selection_order=35,
+            skill_namespace="knowledge_base_builder",
+            matcher=knowledge_base_builder_matcher,
+        ),
+        AgentRegistration(
             name="project_task_agent",
             description=(
                 "Use for project tracker questions, assignees, deadlines, schedules, priorities, iterations, "
@@ -104,6 +123,7 @@ def build_web_agent_registrations(settings=None) -> tuple[AgentRegistration, ...
     allowed_agent_names = {
         "general_chat_agent",
         "knowledge_agent",
+        "knowledge_base_builder_agent",
         "project_task_agent",
         "document_conversion_agent",
     }

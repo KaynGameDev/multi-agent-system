@@ -8,7 +8,7 @@ from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 
-from app.graph import build_graph
+from app.graph import build_default_agent_registrations, build_graph, build_web_agent_registrations
 from app.skills import SkillRegistry
 from gateway.agent import AgentMatchResult
 from interfaces.web.server import WebServer
@@ -148,6 +148,15 @@ class DeterministicIntegrationTests(unittest.TestCase):
         self.assertIn("agent_selection_diagnostics", payload)
         self.assertIn("selection_warnings", payload)
         self.assertEqual(payload["route"], "general_chat_agent")
+
+    def test_default_and_web_registrations_include_builder_agent(self) -> None:
+        settings = make_settings(self.root / "runtime")
+
+        default_names = {registration.name for registration in build_default_agent_registrations(settings=settings)}
+        web_names = {registration.name for registration in build_web_agent_registrations(settings=settings)}
+
+        self.assertIn("knowledge_base_builder_agent", default_names)
+        self.assertIn("knowledge_base_builder_agent", web_names)
 
 
 if __name__ == "__main__":

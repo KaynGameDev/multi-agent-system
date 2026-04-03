@@ -37,6 +37,7 @@ Agents include:
 • project_task_agent
 • general_chat_agent
 • knowledge_agent
+• knowledge_base_builder_agent
 • document_conversion_agent
 
 Agents should be responsible for reasoning but not platform formatting.
@@ -48,6 +49,7 @@ Routing currently supports:
 • project_task_agent
 • general_chat_agent
 • knowledge_agent
+• knowledge_base_builder_agent
 • document_conversion_agent
 
 The gateway uses policy code instead of LLM classification. It centralizes:
@@ -74,6 +76,9 @@ gateway → general_chat_agent → END
 
 Knowledge route:
 gateway → knowledge_agent → tools → knowledge_agent → END
+
+KB builder route:
+gateway → knowledge_base_builder_agent → tools → knowledge_base_builder_agent → END
 
 Project query route:
 gateway → project_task_agent → tools → project_task_agent → END
@@ -224,6 +229,7 @@ gateway
 general_chat_agent
 project_task_agent
 knowledge_agent
+knowledge_base_builder_agent
 document_conversion_agent
 tool execution
 
@@ -246,6 +252,9 @@ Handles greetings and general conversation.
 
 KnowledgeAgent
 Handles internal documentation, architecture, setup, and repository guidance questions.
+
+KnowledgeBaseBuilderAgent
+Handles knowledge elicitation, KB document review, layer placement decisions, Feature Spec skeleton building, and KB V1 execution tracking. It reuses the read-only knowledge tools and does not auto-publish or auto-promote legacy materials.
 
 Current v1 knowledge source:
 • local files under `KNOWLEDGE_BASE_DIR`
