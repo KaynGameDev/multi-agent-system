@@ -134,7 +134,7 @@ python main.py
 - `general_chat_agent` is treated as the `GeneralAssistant` fallback in gateway policy.
 - The Google Sheets tool is cached briefly to avoid reading the whole sheet on every request.
 - The knowledge agent reads local files from `KNOWLEDGE_BASE_DIR`; the default local folder is [`knowledge/`](/Users/kayngame/jade_ai_core/knowledge/).
-- The knowledge-base builder agent uses the read-only knowledge tools for evidence gathering and also has builder-only tools to resolve canonical KB paths and write Markdown drafts under `knowledge/Docs/` when the user asks it to save the result.
+- The knowledge-base builder agent uses the read-only knowledge tools for evidence gathering and also has builder-only tools to resolve canonical KB paths and write Markdown drafts under `knowledge/Docs/`, but any KB file mutation is approval-gated and requires an explicit follow-up confirmation before execution.
 - The knowledge agent can also read curated online Google Sheets listed in `KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH`.
 - The document conversion flow stages Slack-uploaded source files and session state under `CONVERSION_WORK_DIR`.
 - The knowledge base is organized under `knowledge/AI/` and `knowledge/Docs/`.

@@ -2,8 +2,11 @@ from __future__ import annotations
 
 import logging
 import re
+import json
 from dataclasses import dataclass, field
 from typing import Any
+
+from langchain_core.messages import ToolMessage
 
 from app.agent_registry import AgentRegistration
 from app.messages import extract_latest_human_text
@@ -583,6 +586,14 @@ def knowledge_matcher(_state: dict[str, Any], latest_user_text: str) -> AgentMat
 
 
 def knowledge_base_builder_matcher(_state: dict[str, Any], latest_user_text: str) -> AgentMatchResult:
+    pending_mutation_payload = get_latest_knowledge_mutation_payload(_state)
+    if pending_mutation_payload and pending_mutation_payload.get("requires_confirmation") is True and not is_casual_greeting(latest_user_text):
+        return AgentMatchResult(
+            matched=True,
+            score=92,
+            reasons=("Pending knowledge-base file confirmation should continue in knowledge_base_builder_agent.",),
+        )
+
     normalized = normalize_text(latest_user_text)
     reasons: list[str] = []
     score = 0
@@ -611,6 +622,22 @@ def knowledge_base_builder_matcher(_state: dict[str, Any], latest_user_text: str
     if not reasons:
         return AgentMatchResult(matched=False, score=0, reasons=())
     return AgentMatchResult(matched=True, score=score, reasons=tuple(reasons))
+
+
+def get_latest_knowledge_mutation_payload(state: dict[str, Any]) -> dict[str, Any] | None:
+    for message in reversed(state.get("messages") or []):
+        if not isinstance(message, ToolMessage):
+            continue
+        content = getattr(message, "content", "")
+        if not isinstance(content, str):
+            continue
+        try:
+            payload = json.loads(content)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(payload, dict) and str(payload.get("knowledge_mutation", "")).strip():
+            return payload
+    return None
 
 
 def general_chat_matcher(_state: dict[str, Any], latest_user_text: str) -> AgentMatchResult:

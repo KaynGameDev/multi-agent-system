@@ -6,12 +6,14 @@ import re
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Iterable
+from typing import Annotated, Iterable
 
 from langchain_core.tools import tool
+from langgraph.prebuilt import InjectedState
 from openpyxl import load_workbook
 
 from app.config import DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH, load_settings
+from app.messages import extract_latest_human_text
 from app.knowledge_paths import build_knowledge_markdown_relative_path
 from app.paths import resolve_project_path
 from tools.google_workspace_services import get_google_sheets_service
@@ -63,6 +65,16 @@ class KnowledgeIndexCacheEntry:
 
 
 _google_sheet_index_cache: dict[str, KnowledgeIndexCacheEntry] = {}
+KNOWLEDGE_MUTATION_CONFIRMATION_PATTERNS = (
+    r"^\s*approve(?:d)?\s*$",
+    r"^\s*confirm(?:ed)?\s*$",
+    r"^\s*yes[, ]+(?:approve|confirm|proceed)\s*$",
+    r"^\s*proceed with (?:the )?(?:write|save|update)\s*$",
+    r"^\s*批准\s*$",
+    r"^\s*确认\s*$",
+    r"^\s*确认(?:写入|保存|更新)\s*$",
+    r"^\s*同意(?:写入|保存|更新)\s*$",
+)
 
 
 def get_knowledge_base_root() -> Path:
@@ -965,6 +977,45 @@ def build_knowledge_base_context() -> dict[str, object]:
     }
 
 
+def parse_tool_payload(message) -> dict[str, object] | None:
+    content = getattr(message, "content", "")
+    if not isinstance(content, str):
+        return None
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    if not isinstance(payload, dict):
+        return None
+    return payload
+
+
+def get_latest_knowledge_mutation_payload(state: dict | None) -> dict[str, object] | None:
+    if not isinstance(state, dict):
+        return None
+    for message in reversed(state.get("messages") or []):
+        payload = parse_tool_payload(message)
+        if not isinstance(payload, dict):
+            continue
+        if str(payload.get("knowledge_mutation", "")).strip():
+            return payload
+    return None
+
+
+def latest_user_explicitly_confirms_knowledge_mutation(state: dict | None) -> bool:
+    latest_user_text = extract_latest_human_text(state or {})
+    if not latest_user_text.strip():
+        return False
+    return any(re.search(pattern, latest_user_text, re.IGNORECASE) for pattern in KNOWLEDGE_MUTATION_CONFIRMATION_PATTERNS)
+
+
+def knowledge_mutation_is_approved(state: dict | None) -> bool:
+    latest_payload = get_latest_knowledge_mutation_payload(state)
+    if not latest_payload or latest_payload.get("requires_confirmation") is not True:
+        return False
+    return latest_user_explicitly_confirms_knowledge_mutation(state)
+
+
 def resolve_knowledge_markdown_target(relative_path: str) -> tuple[Path, Path]:
     root = get_knowledge_base_root().resolve()
     candidate = (root / str(relative_path or "").strip()).resolve()
@@ -1147,6 +1198,7 @@ def write_knowledge_markdown_document(
     relative_path: str,
     content: str,
     overwrite: bool = False,
+    state: Annotated[dict | None, InjectedState] = None,
 ) -> dict[str, object]:
     """Write a Markdown document inside the knowledge base root."""
     context = build_knowledge_base_context()
@@ -1154,6 +1206,8 @@ def write_knowledge_markdown_document(
         return {
             "ok": False,
             **context,
+            "knowledge_mutation": "write_markdown",
+            "requires_confirmation": False,
             "error": "Document content cannot be empty.",
             "relative_path": relative_path,
         }
@@ -1164,8 +1218,26 @@ def write_knowledge_markdown_document(
         return {
             "ok": False,
             **context,
+            "knowledge_mutation": "write_markdown",
+            "requires_confirmation": False,
             "error": str(exc),
             "relative_path": relative_path,
+        }
+
+    if not knowledge_mutation_is_approved(state):
+        return {
+            "ok": False,
+            **context,
+            "knowledge_mutation": "write_markdown",
+            "requires_confirmation": True,
+            "error": (
+                "Knowledge base mutations require an explicit follow-up confirmation after preview. "
+                "Ask the user to reply `approve`/`confirm` or `批准`/`确认`, then retry."
+            ),
+            "relative_path": relative_path,
+            "absolute_path": str(absolute_path),
+            "target_exists": absolute_path.exists(),
+            "confirmation_commands": ["approve", "confirm", "批准", "确认"],
         }
 
     existed = absolute_path.exists()
@@ -1173,6 +1245,8 @@ def write_knowledge_markdown_document(
         return {
             "ok": False,
             **context,
+            "knowledge_mutation": "write_markdown",
+            "requires_confirmation": False,
             "error": "Target file already exists. Retry with overwrite=True to replace it.",
             "relative_path": relative_path,
             "absolute_path": str(absolute_path),
@@ -1184,6 +1258,8 @@ def write_knowledge_markdown_document(
     return {
         "ok": True,
         **context,
+        "knowledge_mutation": "write_markdown",
+        "requires_confirmation": False,
         "relative_path": relative_path,
         "absolute_path": str(absolute_path),
         "created": not existed,

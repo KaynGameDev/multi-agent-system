@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
 from pathlib import Path
+
+from langchain_core.messages import HumanMessage, ToolMessage
 
 from app.config import load_settings
 from app.graph import build_default_agent_registrations
@@ -77,26 +80,54 @@ class KnowledgeBaseBuilderToolTests(unittest.TestCase):
             "Docs/10_GameLines/BuYuDaLuanDou/LineOverview/Shooting_TowerDefense_Group_Overview.md",
         )
 
-        written = write_knowledge_markdown_document.invoke(
-            {
-                "relative_path": resolved["relative_path"],
-                "content": "# 射击塔防组概览\n\n测试内容。\n",
-            }
+        blocked = write_knowledge_markdown_document.invoke(
+            {"relative_path": resolved["relative_path"], "content": "# 射击塔防组概览\n\n测试内容。\n"}
+        )
+        self.assertFalse(blocked["ok"])
+        self.assertTrue(blocked["requires_confirmation"])
+        self.assertEqual(blocked["knowledge_mutation"], "write_markdown")
+
+        written = write_knowledge_markdown_document.func(
+            relative_path=resolved["relative_path"],
+            content="# 射击塔防组概览\n\n测试内容。\n",
+            state={
+                "messages": [
+                    HumanMessage(content="请写入知识库"),
+                    ToolMessage(content=json.dumps(blocked, ensure_ascii=False), tool_call_id="call_write"),
+                    HumanMessage(content="approve"),
+                ]
+            },
         )
         self.assertTrue(written["ok"])
+        self.assertFalse(written["requires_confirmation"])
         self.assertTrue(written["created"])
         output_path = Path(written["absolute_path"])
         self.assertTrue(output_path.exists())
         self.assertEqual(output_path.read_text(encoding="utf-8"), "# 射击塔防组概览\n\n测试内容。\n")
 
-        second_write = write_knowledge_markdown_document.invoke(
-            {
-                "relative_path": resolved["relative_path"],
-                "content": "# 新版本\n",
-            }
+        second_write = write_knowledge_markdown_document.func(
+            relative_path=resolved["relative_path"],
+            content="# 新版本\n",
+            state={
+                "messages": [
+                    HumanMessage(content="请覆盖更新"),
+                    ToolMessage(content=json.dumps(blocked, ensure_ascii=False), tool_call_id="call_write"),
+                    HumanMessage(content="confirm"),
+                ]
+            },
         )
         self.assertFalse(second_write["ok"])
         self.assertIn("already exists", second_write["error"])
+
+    def test_builder_write_still_blocks_if_user_says_approve_without_prior_preview(self) -> None:
+        result = write_knowledge_markdown_document.func(
+            relative_path="Docs/10_GameLines/BuYuDaLuanDou/LineOverview/Test.md",
+            content="# Test\n",
+            state={"messages": [HumanMessage(content="approve")]},
+        )
+
+        self.assertFalse(result["ok"])
+        self.assertTrue(result["requires_confirmation"])
 
     def test_builder_agent_gets_write_tools_but_reader_does_not(self) -> None:
         registrations = {registration.name: registration for registration in build_default_agent_registrations()}
