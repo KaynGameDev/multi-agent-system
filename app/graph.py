@@ -30,6 +30,7 @@ from tools.knowledge_base import (
     write_knowledge_markdown_document,
 )
 from tools.project_tracker_google_sheets import get_project_sheet_overview, read_project_tasks
+from app.tool_registry import KNOWLEDGE_BUILDER_TOOL_IDS, KNOWLEDGE_TOOL_IDS, PROJECT_TOOL_IDS
 
 
 def build_default_agent_registrations(settings=None) -> tuple[AgentRegistration, ...]:
@@ -39,12 +40,15 @@ def build_default_agent_registrations(settings=None) -> tuple[AgentRegistration,
         search_knowledge_documents,
         read_knowledge_document,
     )
+    knowledge_read_tool_ids = KNOWLEDGE_TOOL_IDS
     knowledge_builder_tools = (
         *knowledge_read_tools,
         resolve_knowledge_markdown_path,
         write_knowledge_markdown_document,
     )
+    knowledge_builder_tool_ids = KNOWLEDGE_BUILDER_TOOL_IDS
     project_tools = (read_project_tasks, get_project_sheet_overview)
+    project_tool_ids = PROJECT_TOOL_IDS
 
     return (
         AgentRegistration(
@@ -71,8 +75,10 @@ def build_default_agent_registrations(settings=None) -> tuple[AgentRegistration,
                 list(tools),
                 skill_registry=skill_registry,
                 agent_name="knowledge_agent",
+                tool_ids=knowledge_read_tool_ids,
             ),
             tools=knowledge_read_tools,
+            tool_ids=knowledge_read_tool_ids,
             selection_order=30,
             skill_namespace="knowledge",
             matcher=knowledge_matcher,
@@ -88,8 +94,10 @@ def build_default_agent_registrations(settings=None) -> tuple[AgentRegistration,
                 list(tools),
                 skill_registry=skill_registry,
                 agent_name="knowledge_base_builder_agent",
+                tool_ids=knowledge_builder_tool_ids,
             ),
             tools=knowledge_builder_tools,
+            tool_ids=knowledge_builder_tool_ids,
             selection_order=35,
             skill_namespace="knowledge_base_builder",
             matcher=knowledge_base_builder_matcher,
@@ -105,8 +113,10 @@ def build_default_agent_registrations(settings=None) -> tuple[AgentRegistration,
                 list(tools),
                 skill_registry=skill_registry,
                 agent_name="project_task_agent",
+                tool_ids=project_tool_ids,
             ),
             tools=project_tools,
+            tool_ids=project_tool_ids,
             selection_order=20,
             skill_namespace="project_task",
             matcher=project_task_matcher_factory(resolved_settings.project_lookup_keywords),

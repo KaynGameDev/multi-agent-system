@@ -10,8 +10,10 @@ from langchain_core.messages import ToolMessage
 
 from app.agent_registry import AgentRegistration
 from app.messages import extract_latest_human_text
+from app.pending_interactions import get_pending_interaction, is_pending_interaction_active
 from app.skills import SkillDefinition, SkillRegistry, normalize_skill_id
 from app.state import AgentState
+from app.tool_registry import ToolMetadata, get_tool_metadata
 from tools.conversion_google_sources import extract_google_document_references
 
 logger = logging.getLogger(__name__)
@@ -116,6 +118,45 @@ KB_BUILDER_LAYER_DECISION_PHRASES = (
     "放在哪层",
     "放到哪层",
 )
+KB_BUILDER_FILE_WRITE_PHRASES = (
+    "写入文件",
+    "写入知识库",
+    "写到知识库",
+    "存入知识库",
+    "更新知识库",
+    "更新到知识库",
+    "保存到知识库",
+    "创建知识库文档",
+    "更新知识库文档",
+    "修改知识库文档",
+    "写文件",
+    "改文件",
+    "创建文件",
+    "保存文件",
+    "删除文件",
+    "能写文件吗",
+    "可以写文件吗",
+    "你能写文件吗",
+    "能改文件吗",
+    "可以改文件吗",
+    "能创建文件吗",
+    "可以创建文件吗",
+    "有写入权限吗",
+    "有修改权限吗",
+    "can you write files",
+    "can you write file",
+    "can you edit files",
+    "can you edit file",
+    "can you create files",
+    "can you create file",
+    "can you save files",
+    "can you save file",
+    "can you delete files",
+    "can you modify files",
+    "write to the knowledge base",
+    "write knowledge base files",
+    "edit knowledge base files",
+)
 PROJECT_PATTERNS = (
     "my tasks",
     "my work",
@@ -130,6 +171,74 @@ PROJECT_PATTERNS = (
     "任务",
     "截止",
     "负责人",
+)
+TOOL_AVAILABILITY_PATTERNS = (
+    r"\bcan you\b",
+    r"\bcould you\b",
+    r"\bdo you have\b",
+    r"\bdo you support\b",
+    r"\bare you able to\b",
+    "你能",
+    "你可以",
+    "能不能",
+    "可以吗",
+    "能否",
+    "会不会",
+    "支持",
+)
+TOOL_ACTION_PATTERNS = (
+    "help me",
+    "please",
+    "save",
+    "write",
+    "create",
+    "edit",
+    "update",
+    "read",
+    "open",
+    "list",
+    "search",
+    "find",
+    "show",
+    "帮我",
+    "请",
+    "保存",
+    "写",
+    "创建",
+    "修改",
+    "更新",
+    "读取",
+    "读",
+    "打开",
+    "列出",
+    "搜索",
+    "查",
+    "找",
+    "展示",
+)
+TOOL_ACTION_TARGET_HINTS = (
+    "discussion",
+    "chat",
+    "summary",
+    "content",
+    "note",
+    "notes",
+    "document",
+    "doc",
+    "draft",
+    "task",
+    "tasks",
+    "kb",
+    "knowledge base",
+    "讨论",
+    "聊天",
+    "对话",
+    "总结",
+    "内容",
+    "文档",
+    "草稿",
+    "任务",
+    "知识库",
 )
 GENERAL_ASSISTANT_ALIAS = "GeneralAssistant"
 
@@ -292,6 +401,25 @@ class GatewayNode:
                 reason_prefix="Selected from explicit inline skill compatibility",
             )
             return selected, diagnostics, warnings
+
+        pending_interaction = get_pending_interaction(state)
+        if is_pending_interaction_active(pending_interaction):
+            owner_agent = self._normalize_agent_name(str(pending_interaction.get("owner_agent", "")).strip())
+            if owner_agent in self.registrations_by_name:
+                diagnostics.append(
+                    {
+                        "kind": "pending_interaction",
+                        "selected_agent": owner_agent,
+                        "reason": f"Active pending interaction is owned by `{owner_agent}`.",
+                    }
+                )
+                return owner_agent, diagnostics, warnings
+
+        tool_intent_selection = select_agent_from_tool_intent(self.agent_registrations, state, latest_user_text)
+        if tool_intent_selection is not None:
+            selected_agent, tool_diagnostics = tool_intent_selection
+            diagnostics.extend(tool_diagnostics)
+            return selected_agent, diagnostics, warnings
 
         candidate_results: list[tuple[AgentRegistration, AgentMatchResult]] = []
         for registration in self.agent_registrations:
@@ -598,6 +726,22 @@ def knowledge_base_builder_matcher(_state: dict[str, Any], latest_user_text: str
     reasons: list[str] = []
     score = 0
 
+    file_write_hits = [phrase for phrase in KB_BUILDER_FILE_WRITE_PHRASES if phrase in normalized]
+    if file_write_hits:
+        score = max(score, 89 + min(len(file_write_hits), 5))
+        reasons.append(f"Knowledge-base file write signals matched: {', '.join(file_write_hits[:4])}.")
+
+    if (
+        "知识库" in normalized
+        and any(keyword in normalized for keyword in ("写入", "更新", "修改", "创建", "保存", "删除"))
+    ):
+        score = max(score, 90)
+        reasons.append("Knowledge-base update intent matched via `知识库` + mutation verb.")
+
+    if "文件" in normalized and any(keyword in normalized for keyword in ("写入", "写", "修改", "创建", "保存", "删除")):
+        score = max(score, 88)
+        reasons.append("File write intent matched via `文件` + mutation verb.")
+
     elicitation_hits = [phrase for phrase in KB_BUILDER_ELICITATION_PHRASES if phrase in normalized]
     if elicitation_hits:
         score = max(score, 90 + min(len(elicitation_hits), 5))
@@ -687,6 +831,79 @@ def build_route_reason(agent_diagnostics: list[dict[str, Any]], route: str) -> s
     return f"Selected `{route}` from deterministic gateway policy."
 
 
+def select_agent_from_tool_intent(
+    agent_registrations: tuple[AgentRegistration, ...],
+    state: dict[str, Any],
+    latest_user_text: str,
+) -> tuple[str, list[dict[str, Any]]] | None:
+    normalized = normalize_text(latest_user_text)
+    if not normalized:
+        return None
+
+    candidate_rows: list[tuple[AgentRegistration, int, AgentMatchResult, list[dict[str, Any]]]] = []
+    matched_tool_ids: list[str] = []
+    for registration in agent_registrations:
+        if not registration.tool_ids:
+            continue
+        tool_matches = collect_tool_matches(registration.tool_ids, normalized)
+        tool_score = sum(int(item["score"]) for item in tool_matches)
+        if tool_score <= 0:
+            continue
+        matcher_result = evaluate_agent_match(registration, state, latest_user_text)
+        matched_tool_ids.extend(str(item["tool_id"]) for item in tool_matches)
+        candidate_rows.append((registration, tool_score, matcher_result, tool_matches))
+
+    if not candidate_rows:
+        return None
+
+    intent_kind = classify_tool_intent(normalized)
+    if intent_kind == "plain_query":
+        return None
+
+    diagnostics: list[dict[str, Any]] = [
+        {
+            "kind": "tool_intent_detected",
+            "intent_kind": intent_kind,
+            "matched_tool_ids": list(dict.fromkeys(matched_tool_ids)),
+            "reason": f"Detected `{intent_kind}` from tool metadata overlap.",
+        }
+    ]
+    for registration, tool_score, matcher_result, tool_matches in candidate_rows:
+        diagnostics.append(
+            {
+                "kind": "tool_intent_candidate",
+                "agent": registration.name,
+                "tool_score": tool_score,
+                "domain_matched": matcher_result.matched and matcher_result.score > 0,
+                "declared_tool_count": len(registration.tool_ids),
+                "tool_matches": tool_matches,
+            }
+        )
+
+    selected_registration, selected_tool_score, selected_matcher_result, selected_tool_matches = sorted(
+        candidate_rows,
+        key=lambda item: (
+            -item[1],
+            -int(item[2].matched and item[2].score > 0),
+            len(item[0].tool_ids),
+            item[0].selection_order,
+            item[0].name,
+        ),
+    )[0]
+    matched_tools = ", ".join(str(item["tool_id"]) for item in selected_tool_matches[:3])
+    reason_parts = [f"Tool intent `{intent_kind}` matched `{selected_registration.name}` via {matched_tools}."]
+    if selected_matcher_result.matched and selected_matcher_result.score > 0:
+        reason_parts.append("Existing domain matcher also matched.")
+    diagnostics.append(
+        {
+            "kind": "selected",
+            "selected_agent": selected_registration.name,
+            "reason": " ".join(reason_parts),
+        }
+    )
+    return selected_registration.name, diagnostics
+
+
 def normalize_requested_skill_ids(state: dict[str, Any]) -> tuple[str, ...]:
     raw_value = state.get("requested_skill_ids") or []
     if isinstance(raw_value, str):
@@ -727,6 +944,56 @@ def tokenize_text(text: str) -> set[str]:
 
 def normalize_text(text: str) -> str:
     return re.sub(r"\s+", " ", (text or "").strip().casefold())
+
+
+def collect_tool_matches(tool_ids: tuple[str, ...], normalized_text: str) -> list[dict[str, Any]]:
+    matches: list[dict[str, Any]] = []
+    for tool_id in tool_ids:
+        metadata = get_tool_metadata(tool_id)
+        hits = find_tool_phrase_hits(metadata, normalized_text)
+        if not hits:
+            continue
+        matches.append(
+            {
+                "tool_id": tool_id,
+                "score": score_tool_metadata_hits(hits),
+                "hits": hits,
+            }
+        )
+    return matches
+
+
+def find_tool_phrase_hits(metadata: ToolMetadata, normalized_text: str) -> list[str]:
+    phrases = []
+    for phrase in [*metadata.semantic_aliases, *metadata.examples]:
+        normalized_phrase = normalize_text(phrase)
+        if normalized_phrase and normalized_phrase in normalized_text:
+            phrases.append(normalized_phrase)
+    return list(dict.fromkeys(phrases))
+
+
+def score_tool_metadata_hits(hits: list[str]) -> int:
+    return sum(5 + min(len(hit), 20) for hit in hits)
+
+
+def classify_tool_intent(normalized_text: str) -> str:
+    if not normalized_text:
+        return "plain_query"
+
+    availability = any(
+        (pattern in normalized_text if not pattern.startswith(r"\b") else re.search(pattern, normalized_text))
+        for pattern in TOOL_AVAILABILITY_PATTERNS
+    )
+    action = any(pattern in normalized_text for pattern in TOOL_ACTION_PATTERNS)
+    action_target = any(pattern in normalized_text for pattern in TOOL_ACTION_TARGET_HINTS)
+
+    if availability and action_target:
+        return "tool_action_request"
+    if availability:
+        return "tool_availability_question"
+    if action:
+        return "tool_action_request"
+    return "plain_query"
 
 
 def is_casual_greeting(text: str) -> bool:

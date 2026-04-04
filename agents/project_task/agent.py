@@ -1,29 +1,45 @@
 from __future__ import annotations
 
 import json
-import re
 from datetime import date
+from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from app.language import detect_response_language
+from app.pending_interactions import (
+    PendingInteractionOption,
+    build_selection_interaction,
+    get_pending_interaction,
+    match_pending_interaction_reply,
+)
 from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
 from app.skills import SkillRegistry
 from app.state import AgentState
+from app.tool_registry import TOOL_PROJECT_READ_TASKS, TOOL_PROJECT_SHEET_OVERVIEW, build_agent_tool_prompt
 
 PROMPT_PATH = "agents/project_task/AGENT.md"
 
 
 class ProjectTaskAgentNode:
-    def __init__(self, llm, tools: list, *, skill_registry: SkillRegistry | None = None, agent_name: str = "") -> None:
+    def __init__(
+        self,
+        llm,
+        tools: list,
+        *,
+        skill_registry: SkillRegistry | None = None,
+        agent_name: str = "",
+        tool_ids: tuple[str, ...] = (),
+    ) -> None:
         self.llm = llm.bind_tools(tools)
         self.skill_registry = skill_registry
         self.agent_name = agent_name
+        self.tool_ids = tuple(tool_ids)
 
     def __call__(self, state: AgentState) -> dict:
-        task_list_response = build_task_list_response(state)
+        task_list_response = build_task_list_response(state, agent_name=self.agent_name)
         if task_list_response is not None:
-            return {"messages": [AIMessage(content=task_list_response)]}
+            return task_list_response
 
         messages = [
             SystemMessage(
@@ -31,12 +47,19 @@ class ProjectTaskAgentNode:
                     state,
                     skill_registry=self.skill_registry,
                     agent_name=self.agent_name,
+                    tool_ids=self.tool_ids,
                 )
             ),
             *state["messages"],
         ]
         response = self.llm.invoke(messages)
-        return {"messages": [response]}
+        result: dict[str, Any] = {"messages": [response]}
+        latest_payload = get_latest_task_tool_payload(state)
+        if latest_payload is not None:
+            interaction = build_task_pending_interaction(latest_payload)
+            if interaction is not None:
+                result["pending_interaction"] = interaction
+        return result
 
 
 def build_project_task_prompt(
@@ -44,6 +67,7 @@ def build_project_task_prompt(
     *,
     skill_registry: SkillRegistry | None = None,
     agent_name: str = "",
+    tool_ids: tuple[str, ...] = (),
 ) -> str:
     user_sheet_name = str(state.get("user_sheet_name", "")).strip()
     user_mapped_slack_name = str(
@@ -76,6 +100,7 @@ def build_project_task_prompt(
         sections["role"],
         sections["responsibilities"],
         sections["tool_usage"],
+        build_agent_tool_prompt(tool_ids),
         sections["boundaries"],
     ]
     if interface_name == "slack":
@@ -99,30 +124,6 @@ def build_project_task_prompt(
     lines.append(sections["name_resolution"])
 
     return join_prompt_layers(load_shared_instruction_text(), *lines)
-
-
-REFERENTIAL_TASK_QUERY_PATTERNS = (
-    r"\bwhat are those tasks\b",
-    r"\bwhat are these tasks\b",
-    r"\bwhat are those\b",
-    r"\bwhat are these\b",
-    r"\bwhat are they\b",
-    r"\bshow (?:them|those|these)\b",
-    r"\blist (?:them|those|these)\b",
-    r"\bmore details\b",
-    r"^details?\??$",
-    r"those tasks",
-    r"these tasks",
-    r"那些任务",
-    r"这些任务",
-    r"把它们列出来",
-    r"把这些任务列出来",
-    r"把那些任务列出来",
-    r"列一下这些任务",
-    r"这些任务详情",
-    r"那些任务详情",
-    r"^详情$",
-)
 
 DUE_SCOPE_LABELS = {
     "overdue": "Overdue tasks",
@@ -153,34 +154,19 @@ TASK_FIELD_LABELS_ZH = {
 }
 
 
-def build_task_list_response(state: AgentState) -> str | None:
+def build_task_list_response(state: AgentState, *, agent_name: str) -> dict[str, Any] | None:
     latest_user_text = get_latest_user_text(state)
-    if not should_render_task_list(latest_user_text):
-        return None
-
-    payload = get_latest_task_payload(state)
-    if payload is None:
-        return None
-
-    tasks = payload.get("tasks")
-    if not isinstance(tasks, list) or not tasks:
-        return None
-
     preferred_language = detect_response_language(latest_user_text)
-    lines = [build_task_list_header(payload, preferred_language=preferred_language)]
-    for index, task in enumerate(tasks, start=1):
-        if not isinstance(task, dict):
-            continue
-        lines.extend(format_task_block(index, task, preferred_language=preferred_language))
-
-    return "\n\n".join(line for line in lines if line).strip() or None
-
-
-def should_render_task_list(user_text: str) -> bool:
-    normalized = user_text.strip().lower()
-    if not normalized:
-        return False
-    return any(re.search(pattern, normalized) for pattern in REFERENTIAL_TASK_QUERY_PATTERNS)
+    interaction = get_pending_interaction(state)
+    if interaction and interaction.get("owner_agent") == agent_name:
+        follow_up_result = build_task_interaction_response(
+            interaction=interaction,
+            latest_user_text=latest_user_text,
+            preferred_language=preferred_language,
+        )
+        if follow_up_result is not None:
+            return follow_up_result
+    return None
 
 
 def get_latest_user_text(state: AgentState) -> str:
@@ -206,20 +192,95 @@ def stringify_message_content(content) -> str:
     return " ".join(parts).strip()
 
 
-def get_latest_task_payload(state: AgentState) -> dict | None:
-    for message in reversed(state.get("messages", [])):
-        if not isinstance(message, ToolMessage):
-            continue
-        content = getattr(message, "content", "")
-        if not isinstance(content, str):
-            continue
-        try:
-            payload = json.loads(content)
-        except json.JSONDecodeError:
-            continue
-        if isinstance(payload, dict) and isinstance(payload.get("tasks"), list):
-            return payload
+def get_latest_task_tool_payload(state: AgentState) -> dict | None:
+    messages = state.get("messages", [])
+    if not messages:
+        return None
+    return get_task_tool_payload(messages[-1])
+
+
+def get_task_tool_payload(message) -> dict | None:
+    if not isinstance(message, ToolMessage):
+        return None
+    content = getattr(message, "content", "")
+    if not isinstance(content, str):
+        return None
+    try:
+        payload = json.loads(content)
+    except json.JSONDecodeError:
+        return None
+    if isinstance(payload, dict) and isinstance(payload.get("tasks"), list):
+        return payload
     return None
+
+
+def build_task_interaction_response(
+    *,
+    interaction: dict[str, Any],
+    latest_user_text: str,
+    preferred_language: str,
+) -> dict[str, Any] | None:
+    outcome = match_pending_interaction_reply(interaction, latest_user_text)
+    if outcome is None:
+        return None
+
+    if outcome["action"] == "cancel":
+        return {
+            "messages": [AIMessage(content="已取消待处理的任务跟进。" if preferred_language == "zh" else "Cancelled the pending task follow-up.")],
+            "pending_interaction": None,
+        }
+
+    if outcome["action"] != "select":
+        return None
+
+    option = outcome["option"]
+    task = option.get("payload", {}).get("task")
+    if not isinstance(task, dict):
+        return None
+
+    header = str(interaction.get("payload", {}).get("header", "")).strip()
+    rendered = render_task_payload(
+        {"tasks": [task], "filters": {}, "match_count": 1},
+        preferred_language=preferred_language,
+        header_override=header,
+    )
+    if rendered is None:
+        return None
+    return {
+        "messages": [AIMessage(content=rendered)],
+        "pending_interaction": None,
+    }
+
+
+def build_task_pending_interaction(payload: dict) -> dict[str, Any] | None:
+    tasks = payload.get("tasks") if isinstance(payload.get("tasks"), list) else []
+    if not tasks:
+        return None
+
+    preferred_language = "zh" if any(task_contains_chinese(task) for task in tasks if isinstance(task, dict)) else "en"
+    header = build_task_list_header(payload, preferred_language=preferred_language)
+    single_option = len(tasks) == 1
+    options = [
+        build_task_option(task, index=index, include_referential_aliases=single_option)
+        for index, task in enumerate(tasks, start=1)
+        if isinstance(task, dict)
+    ]
+    if not options:
+        return None
+
+    source_tool_id = TOOL_PROJECT_SHEET_OVERVIEW if "total_rows" in payload else TOOL_PROJECT_READ_TASKS
+    prompt_context = (
+        "回复任务编号或任务标题可查看详情；回复 `取消` 结束。"
+        if preferred_language == "zh"
+        else "Reply with the task number or exact task title for details, or reply `cancel` to stop."
+    )
+    return build_selection_interaction(
+        owner_agent="project_task_agent",
+        source_tool_id=source_tool_id,
+        prompt_context=prompt_context,
+        options=options,
+        payload={"header": header},
+    )
 
 
 def build_task_list_header(payload: dict, *, preferred_language: str = "en") -> str:
@@ -244,6 +305,25 @@ def build_task_list_header(payload: dict, *, preferred_language: str = "en") -> 
     if isinstance(total_count, int) and total_count > shown_count:
         return f"{base} ({shown_count} shown of {total_count})"
     return f"{base} ({shown_count})"
+
+
+def render_task_payload(
+    payload: dict,
+    *,
+    preferred_language: str = "en",
+    header_override: str = "",
+) -> str | None:
+    tasks = payload.get("tasks")
+    if not isinstance(tasks, list) or not tasks:
+        return None
+
+    header = header_override.strip() or build_task_list_header(payload, preferred_language=preferred_language)
+    lines = [header]
+    for index, task in enumerate(tasks, start=1):
+        if not isinstance(task, dict):
+            continue
+        lines.extend(format_task_block(index, task, preferred_language=preferred_language))
+    return "\n\n".join(line for line in lines if line).strip() or None
 
 
 def format_task_block(index: int, task: dict, *, preferred_language: str = "en") -> list[str]:
@@ -287,6 +367,22 @@ def format_task_block(index: int, task: dict, *, preferred_language: str = "en")
     if owners:
         lines.append(owners)
     return lines
+
+
+def build_task_option(task: dict[str, Any], *, index: int, include_referential_aliases: bool) -> PendingInteractionOption:
+    title = first_non_empty(task.get("content"), "Untitled task")
+    aliases = [str(index), title]
+    project = first_non_empty(task.get("project"))
+    if project:
+        aliases.append(f"{project} {title}")
+    if include_referential_aliases:
+        aliases.extend(["that one", "this one", "details", "detail", "那个", "这个", "详情"])
+    return PendingInteractionOption(
+        label=title,
+        aliases=list(dict.fromkeys(alias for alias in aliases if alias)),
+        value=title,
+        payload={"task": task},
+    )
 
 
 def labeled_value(label: str, value) -> str:
@@ -344,3 +440,12 @@ def humanize_due_status(value, *, preferred_language: str = "en") -> str:
         return ""
     localized_mapping = mapping.get(preferred_language, mapping["en"])
     return localized_mapping.get(value, value)
+
+
+def task_contains_chinese(task: dict[str, Any]) -> bool:
+    text = " ".join(
+        str(value)
+        for value in (task.get("content"), task.get("project"), task.get("assignee"))
+        if isinstance(value, str) and value.strip()
+    )
+    return any("\u4e00" <= char <= "\u9fff" for char in text)

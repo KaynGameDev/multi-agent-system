@@ -7,6 +7,7 @@ from pathlib import Path
 
 from langchain_core.messages import HumanMessage, ToolMessage
 
+from app.graph import build_default_agent_registrations
 from app.skills import SkillRegistry
 from gateway.agent import (
     AgentMatchResult,
@@ -281,6 +282,82 @@ class GatewayTests(unittest.TestCase):
 
         self.assertEqual(result["route"], "knowledge_base_builder_agent")
 
+    def test_direct_file_write_capability_question_routes_to_knowledge_base_builder(self) -> None:
+        registrations = build_default_agent_registrations()
+        orchestrator = self.build_orchestrator(registrations)
+
+        result = orchestrator(
+            {
+                "messages": [HumanMessage(content="你可以写文件吗")],
+            }
+        )
+
+        self.assertEqual(result["route"], "knowledge_base_builder_agent")
+
+    def test_english_tool_availability_question_routes_to_knowledge_base_builder(self) -> None:
+        registrations = build_default_agent_registrations()
+        orchestrator = self.build_orchestrator(registrations)
+
+        result = orchestrator({"messages": [HumanMessage(content="can you write files?")]})
+
+        self.assertEqual(result["route"], "knowledge_base_builder_agent")
+        self.assertIn("tool_availability_question", result["route_reason"])
+
+    def test_write_into_file_phrase_routes_to_knowledge_base_builder(self) -> None:
+        registrations = (
+            build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
+            build_registration("knowledge_agent", namespace="knowledge", selection_order=30, matcher=knowledge_matcher),
+            build_registration(
+                "knowledge_base_builder_agent",
+                namespace="knowledge_base_builder",
+                selection_order=35,
+                matcher=knowledge_base_builder_matcher,
+            ),
+        )
+        orchestrator = self.build_orchestrator(registrations)
+
+        result = orchestrator(
+            {
+                "messages": [HumanMessage(content="你能帮我写入文件吗")],
+            }
+        )
+
+        self.assertEqual(result["route"], "knowledge_base_builder_agent")
+
+    def test_save_discussion_to_knowledge_base_routes_to_builder(self) -> None:
+        registrations = build_default_agent_registrations()
+        orchestrator = self.build_orchestrator(registrations)
+
+        result = orchestrator(
+            {
+                "messages": [HumanMessage(content="can you save our discussion to the knowledge base?")],
+            }
+        )
+
+        self.assertEqual(result["route"], "knowledge_base_builder_agent")
+        self.assertIn("tool_action_request", result["route_reason"])
+
+    def test_update_into_knowledge_base_phrase_routes_to_knowledge_base_builder(self) -> None:
+        registrations = (
+            build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
+            build_registration("knowledge_agent", namespace="knowledge", selection_order=30, matcher=knowledge_matcher),
+            build_registration(
+                "knowledge_base_builder_agent",
+                namespace="knowledge_base_builder",
+                selection_order=35,
+                matcher=knowledge_base_builder_matcher,
+            ),
+        )
+        orchestrator = self.build_orchestrator(registrations)
+
+        result = orchestrator(
+            {
+                "messages": [HumanMessage(content="你能帮我把内容更新到知识库吗")],
+            }
+        )
+
+        self.assertEqual(result["route"], "knowledge_base_builder_agent")
+
     def test_generic_repository_question_stays_on_knowledge_agent(self) -> None:
         registrations = (
             build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
@@ -301,6 +378,34 @@ class GatewayTests(unittest.TestCase):
         )
 
         self.assertEqual(result["route"], "knowledge_agent")
+
+    def test_pending_interaction_short_circuits_to_owner_agent(self) -> None:
+        registrations = (
+            build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
+            build_registration("knowledge_agent", namespace="knowledge", selection_order=30, matcher=knowledge_matcher),
+            build_registration("project_task_agent", namespace="project_task", selection_order=20),
+        )
+        orchestrator = self.build_orchestrator(registrations)
+
+        result = orchestrator(
+            {
+                "messages": [HumanMessage(content="details")],
+                "pending_interaction": {
+                    "kind": "selection",
+                    "owner_agent": "project_task_agent",
+                    "source_tool_id": "project.read_tasks",
+                    "status": "awaiting_reply",
+                    "prompt_context": "Reply with a task number.",
+                    "options": [],
+                    "accepted_replies": [],
+                    "cancel_replies": ["cancel"],
+                    "payload": {},
+                },
+            }
+        )
+
+        self.assertEqual(result["route"], "project_task_agent")
+        self.assertIn("pending interaction", result["route_reason"].lower())
 
     def test_no_specialist_match_falls_back_to_general_assistant(self) -> None:
         registrations = (

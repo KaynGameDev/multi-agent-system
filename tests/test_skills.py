@@ -226,6 +226,7 @@ class SkillRegistryTests(unittest.TestCase):
         self.assertIn("knowledge/Docs/10_GameLines/", prompt)
         self.assertIn("不要再输出“我没有写文件权限", prompt)
         self.assertIn("approve` / `confirm", prompt)
+        self.assertIn("你能不能写文件 / 改文件 / 创建文件", prompt)
 
     def test_repo_builder_skills_use_normalized_frontmatter_and_sections(self) -> None:
         repo_root = Path(__file__).resolve().parents[1]

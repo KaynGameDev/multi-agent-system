@@ -17,6 +17,7 @@ class AgentRegistration:
     description: str
     build_node: AgentNodeFactory
     tools: tuple[BaseTool, ...] = field(default_factory=tuple)
+    tool_ids: tuple[str, ...] = field(default_factory=tuple)
     selection_order: int = 100
     is_general_assistant: bool = False
     skill_namespace: str = ""

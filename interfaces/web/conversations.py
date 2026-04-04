@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import json
 import logging
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
@@ -15,6 +16,15 @@ from langchain_core.messages import AIMessage, HumanMessage
 from interfaces.web.markdown import render_markdown_html
 
 logger = logging.getLogger(__name__)
+LEGACY_KB_WRITE_PERMISSION_LINES = (
+    "由于我目前的权限主要是**读取和检索**知识库，无法直接在你的本地磁盘上创建新文件，建议你将以下内容保存到对应的目录下（参考 `KnowledgeTopology.md` 的结构）。",
+    "我目前拥有**读取**和**检索**公司知识库的权限，但**没有直接修改或创建物理文件**的权限。",
+)
+LEGACY_KB_WRITE_HISTORY_NOTE = (
+    "这是旧版本保存的历史回复。旧版本当时错误地声称自己不能直接写知识库文件；"
+    "当前版本会先预览目标路径，并在你确认后再执行写入。\n\n"
+    "注意：如果下面出现 `Docs/10_Projects/...` 之类路径，它们也是旧版本路径，仅供历史参考。"
+)
 
 
 def utc_now_iso() -> str:
@@ -49,6 +59,23 @@ def transcript_to_langchain_messages(messages: list[dict[str, Any]] | list["Tran
     return converted
 
 
+def normalize_legacy_assistant_markdown(markdown: str) -> str:
+    normalized = str(markdown or "")
+    replaced_legacy_intro = False
+    for legacy_line in LEGACY_KB_WRITE_PERMISSION_LINES:
+        if legacy_line in normalized:
+            normalized = normalized.replace(legacy_line, LEGACY_KB_WRITE_HISTORY_NOTE, 1)
+            replaced_legacy_intro = True
+
+    if replaced_legacy_intro and "`Docs/10_Projects/" in normalized:
+        normalized = re.sub(
+            r"\*\*建议路径：\*\*\s*`Docs/10_Projects/",
+            "**历史旧路径（已过时）：** `Docs/10_Projects/",
+            normalized,
+        )
+    return normalized
+
+
 @dataclass
 class TranscriptMessage:
     id: str
@@ -76,6 +103,7 @@ class WebConversationStore:
         self._storage_path = Path(storage_path).expanduser().resolve() if storage_path else None
         self._conversations: dict[str, Conversation] = {}
         self._lock = RLock()
+        self._legacy_normalization_applied = False
         self._load()
 
     def create_conversation(self, *, title: str = "New chat") -> dict:
@@ -151,6 +179,9 @@ class WebConversationStore:
                 continue
             conversations[conversation.conversation_id] = conversation
         self._conversations = conversations
+        if self._legacy_normalization_applied:
+            self._persist_locked()
+            self._legacy_normalization_applied = False
 
     def _persist_locked(self) -> None:
         if self._storage_path is None:
@@ -227,6 +258,11 @@ class WebConversationStore:
         created_at = str(payload.get("created_at", "")).strip() or utc_now_iso()
         if role not in {"user", "assistant"}:
             return None
+        if role == "assistant":
+            normalized_markdown = normalize_legacy_assistant_markdown(markdown)
+            if normalized_markdown != markdown:
+                self._legacy_normalization_applied = True
+            markdown = normalized_markdown
         return TranscriptMessage(
             id=message_id,
             role=role,

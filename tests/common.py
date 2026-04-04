@@ -16,6 +16,7 @@ def build_registration(
     matcher=None,
     build_node=None,
     tools=(),
+    tool_ids=(),
 ) -> AgentRegistration:
     node_builder = build_node or (lambda _llm=None, skill_registry=None: None)
     return AgentRegistration(
@@ -23,6 +24,7 @@ def build_registration(
         description=f"Registration for {name}",
         build_node=node_builder,
         tools=tuple(tools),
+        tool_ids=tuple(tool_ids),
         selection_order=selection_order,
         is_general_assistant=is_general_assistant,
         skill_namespace=namespace,
