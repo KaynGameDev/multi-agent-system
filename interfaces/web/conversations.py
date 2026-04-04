@@ -7,7 +7,10 @@ from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
 from tempfile import NamedTemporaryFile
+from typing import Any
 from uuid import uuid4
+
+from langchain_core.messages import AIMessage, HumanMessage
 
 from interfaces.web.markdown import render_markdown_html
 
@@ -25,6 +28,25 @@ def derive_conversation_title(text: str, *, fallback: str = "New chat", limit: i
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[: limit - 1].rstrip() + "…"
+
+
+def transcript_to_langchain_messages(messages: list[dict[str, Any]] | list["TranscriptMessage"]) -> list[HumanMessage | AIMessage]:
+    converted: list[HumanMessage | AIMessage] = []
+    for message in messages:
+        role = ""
+        markdown = ""
+        if isinstance(message, TranscriptMessage):
+            role = message.role
+            markdown = message.markdown
+        elif isinstance(message, dict):
+            role = str(message.get("role", "")).strip()
+            markdown = str(message.get("markdown", ""))
+
+        if role == "user":
+            converted.append(HumanMessage(content=markdown))
+        elif role == "assistant":
+            converted.append(AIMessage(content=markdown))
+    return converted
 
 
 @dataclass

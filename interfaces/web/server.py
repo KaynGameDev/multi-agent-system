@@ -10,11 +10,16 @@ from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
 
+from app.checkpoints import GraphCheckpointStore
 from app.config import Settings
 from app.identity import build_user_identity_context
 from app.messages import extract_final_text
 from app.paths import resolve_project_path
-from interfaces.web.conversations import ConversationNotFoundError, WebConversationStore
+from interfaces.web.conversations import (
+    ConversationNotFoundError,
+    WebConversationStore,
+    transcript_to_langchain_messages,
+)
 from tools.document_conversion import ConversionSessionStore
 
 logger = logging.getLogger(__name__)
@@ -44,6 +49,7 @@ class WebServer:
         settings: Settings,
         conversation_store: WebConversationStore | None = None,
         conversion_store: ConversionSessionStore | None = None,
+        checkpoint_store: GraphCheckpointStore | None = None,
     ) -> None:
         self.agent_graph = agent_graph
         self.settings = settings
@@ -51,6 +57,7 @@ class WebServer:
             self._resolve_path(settings.conversion_work_dir) / "web_conversations.json"
         )
         self.conversion_store = conversion_store or ConversionSessionStore(self._resolve_path(settings.conversion_work_dir))
+        self.checkpoint_store = checkpoint_store
         self.static_dir = Path(__file__).resolve().parent / "static"
         self.app = self._build_app()
         self._server: uvicorn.Server | None = None
@@ -106,9 +113,18 @@ class WebServer:
                 raise HTTPException(status_code=404, detail="Conversation not found.") from exc
 
             user_message = payload.message.strip()
-            self.conversation_store.append_message(conversation_id, role="user", markdown=user_message)
+            conversation = self.conversation_store.append_message(
+                conversation_id,
+                role="user",
+                markdown=user_message,
+            )
             thread_id = f"web:{conversation_id}"
             active_session = self.conversion_store.get_active_session_by_thread(thread_id)
+            seed_messages = self._build_seed_messages(
+                thread_id=thread_id,
+                conversation=conversation,
+                latest_user_message=user_message,
+            )
 
             user_context = build_user_identity_context(
                 slack_display_name=payload.display_name,
@@ -116,7 +132,7 @@ class WebServer:
                 email=payload.email,
             )
             initial_state = {
-                "messages": [HumanMessage(content=user_message)],
+                "messages": seed_messages,
                 "interface_name": "web",
                 "thread_id": thread_id,
                 "user_id": payload.email.strip() or payload.display_name.strip() or thread_id,
@@ -176,3 +192,39 @@ class WebServer:
 
     def _resolve_path(self, configured_value: str) -> Path:
         return resolve_project_path(configured_value, self.settings.conversion_work_dir)
+
+    def _build_seed_messages(
+        self,
+        *,
+        thread_id: str,
+        conversation: dict,
+        latest_user_message: str,
+    ) -> list:
+        transcript_messages = conversation.get("messages", [])
+        has_prior_transcript = isinstance(transcript_messages, list) and len(transcript_messages) > 1
+        if self.checkpoint_store is None:
+            if has_prior_transcript:
+                return transcript_to_langchain_messages(transcript_messages)
+            return [HumanMessage(content=latest_user_message)]
+
+        try:
+            if self.checkpoint_store.has_checkpoint(thread_id):
+                return [HumanMessage(content=latest_user_message)]
+        except Exception:
+            logger.warning("Failed to read checkpoint thread=%s; rebuilding from transcript.", thread_id, exc_info=True)
+            self._reset_checkpoint_thread(thread_id)
+            if has_prior_transcript:
+                return transcript_to_langchain_messages(transcript_messages)
+            return [HumanMessage(content=latest_user_message)]
+
+        if has_prior_transcript:
+            return transcript_to_langchain_messages(transcript_messages)
+        return [HumanMessage(content=latest_user_message)]
+
+    def _reset_checkpoint_thread(self, thread_id: str) -> None:
+        if self.checkpoint_store is None:
+            return
+        try:
+            self.checkpoint_store.delete_thread(thread_id)
+        except Exception:
+            logger.warning("Failed to reset checkpoint thread=%s", thread_id, exc_info=True)

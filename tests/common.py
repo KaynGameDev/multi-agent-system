@@ -53,6 +53,7 @@ def make_settings(runtime_dir: Path) -> Settings:
         knowledge_google_sheets_catalog_path="knowledge/AI/Rules/google_sheets_catalog.json",
         knowledge_google_sheets_cache_ttl_seconds=120,
         conversion_work_dir=str(runtime_dir),
+        langgraph_checkpoint_db_path="",
         gemini_http_trust_env=False,
     )
 

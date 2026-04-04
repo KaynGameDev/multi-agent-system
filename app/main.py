@@ -8,8 +8,8 @@ from threading import Thread
 
 from dotenv import load_dotenv
 from langchain_google_genai import ChatGoogleGenerativeAI
-from langgraph.checkpoint.memory import InMemorySaver
 
+from app.checkpoints import build_checkpoint_store
 from app.config import is_agent_runtime_enabled, is_slack_enabled, load_settings, validate_bootstrap_settings
 from app.graph import build_agent_graph, build_web_agent_registrations
 from interfaces.slack.listener import SlackListener
@@ -21,6 +21,20 @@ logger = logging.getLogger(__name__)
 class _BelowErrorFilter(logging.Filter):
     def filter(self, record: logging.LogRecord) -> bool:
         return record.levelno < logging.ERROR
+
+
+class _RuntimeResourceCloser:
+    def __init__(self, *resources: object) -> None:
+        self._resources = resources
+
+    def start(self) -> None:
+        return None
+
+    def stop(self) -> None:
+        for resource in reversed(self._resources):
+            close = getattr(resource, "close", None)
+            if callable(close):
+                close()
 
 
 def configure_logging() -> None:
@@ -63,15 +77,20 @@ def bootstrap_system() -> list[object]:
             temperature=settings.gemini_temperature,
             client_args={"trust_env": settings.gemini_http_trust_env},
         )
+        checkpoint_store = build_checkpoint_store(settings)
+        try:
+            agent_graph = build_agent_graph(llm, checkpointer=checkpoint_store.saver, settings=settings)
+            web_graph = build_agent_graph(
+                llm,
+                checkpointer=checkpoint_store.saver,
+                settings=settings,
+                agent_registrations=build_web_agent_registrations(settings=settings),
+            )
+        except Exception:
+            checkpoint_store.close()
+            raise
 
-        checkpointer = InMemorySaver()
-        agent_graph = build_agent_graph(llm, checkpointer=checkpointer, settings=settings)
-        web_graph = build_agent_graph(
-            llm,
-            checkpointer=checkpointer,
-            settings=settings,
-            agent_registrations=build_web_agent_registrations(settings=settings),
-        )
+        listeners.append(_RuntimeResourceCloser(checkpoint_store))
 
         if is_slack_enabled(settings):
             listeners.append(
@@ -83,7 +102,13 @@ def bootstrap_system() -> list[object]:
         elif not settings.slack_enabled and (settings.slack_bot_token or settings.slack_app_token):
             print("💤 Slack listener disabled via SLACK_ENABLED=false")
         if settings.web_enabled:
-            listeners.append(WebServer(agent_graph=web_graph, settings=settings))
+            listeners.append(
+                WebServer(
+                    agent_graph=web_graph,
+                    settings=settings,
+                    checkpoint_store=checkpoint_store,
+                )
+            )
             print(f"🌐 Web chat: {format_web_chat_url(settings.web_host, settings.web_port)}")
 
     print("⚙ Compiled Jade Agent graph.")

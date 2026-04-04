@@ -60,6 +60,7 @@ class Settings:
     knowledge_google_sheets_catalog_path: str = DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH
     knowledge_google_sheets_cache_ttl_seconds: int = DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CACHE_TTL_SECONDS
     conversion_work_dir: str = DEFAULT_CONVERSION_WORK_DIR
+    langgraph_checkpoint_db_path: str = ""
     gemini_http_trust_env: bool = False
 
 
@@ -124,6 +125,7 @@ def load_settings(force_reload: bool = False) -> Settings:
             os.getenv("CONVERSION_WORK_DIR", DEFAULT_CONVERSION_WORK_DIR).strip()
             or DEFAULT_CONVERSION_WORK_DIR
         ),
+        langgraph_checkpoint_db_path=os.getenv("LANGGRAPH_CHECKPOINT_DB_PATH", "").strip(),
         gemini_http_trust_env=parse_bool_env("GEMINI_HTTP_TRUST_ENV", False),
     )
     return _cached_settings
