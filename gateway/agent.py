@@ -10,6 +10,7 @@ from langchain_core.messages import ToolMessage
 
 from app.agent_registry import AgentRegistration
 from app.messages import extract_latest_human_text
+from app.pending_actions import get_pending_action, is_pending_action_active
 from app.pending_interactions import get_pending_interaction, is_pending_interaction_active
 from app.skills import SkillDefinition, SkillRegistry, normalize_skill_id
 from app.state import AgentState
@@ -401,6 +402,22 @@ class GatewayNode:
                 reason_prefix="Selected from explicit inline skill compatibility",
             )
             return selected, diagnostics, warnings
+
+        pending_action = get_pending_action(state)
+        if is_pending_action_active(pending_action):
+            owner_agent = self._normalize_agent_name(str(pending_action.get("requested_by_agent", "")).strip())
+            if owner_agent in self.registrations_by_name:
+                diagnostics.append(
+                    {
+                        "kind": "pending_action",
+                        "selected_agent": owner_agent,
+                        "reason": f"Active pending action is owned by `{owner_agent}`.",
+                    }
+                )
+                return owner_agent, diagnostics, warnings
+            warnings.append(
+                f"Pending action owner `{owner_agent}` is not active; falling back to gateway policy."
+            )
 
         pending_interaction = get_pending_interaction(state)
         if is_pending_interaction_active(pending_interaction):

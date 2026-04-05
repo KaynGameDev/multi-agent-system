@@ -6,11 +6,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from langchain_core.messages import HumanMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.config import load_settings
 from app.graph import build_default_agent_registrations
 from app.knowledge_paths import build_knowledge_markdown_relative_path
+from app.pending_actions import build_pending_action, interpret_pending_action_reply
 from tools.knowledge_base import resolve_knowledge_markdown_path, write_knowledge_markdown_document
 
 
@@ -128,6 +129,49 @@ class KnowledgeBaseBuilderToolTests(unittest.TestCase):
 
         self.assertFalse(result["ok"])
         self.assertTrue(result["requires_confirmation"])
+
+    def test_builder_write_accepts_valid_execution_contract(self) -> None:
+        relative_path = "Docs/10_GameLines/BuYuDaLuanDou/LineOverview/ContractApproved.md"
+        blocked = write_knowledge_markdown_document.invoke(
+            {"relative_path": relative_path, "content": "# Contract\n\nApproved.\n"}
+        )
+        self.assertFalse(blocked["ok"])
+        self.assertTrue(blocked["requires_confirmation"])
+
+        pending_action = build_pending_action(
+            session_id="thread-1",
+            action_type="write_knowledge_markdown",
+            requested_by_agent="knowledge_base_builder_agent",
+            summary=f"Write knowledge-base draft to `{relative_path}`.",
+            target_scope={"files": [relative_path]},
+        )
+        execution_contract = interpret_pending_action_reply(pending_action, "continue")
+
+        written = write_knowledge_markdown_document.func(
+            relative_path=relative_path,
+            content="# Contract\n\nApproved.\n",
+            state={
+                "pending_action": pending_action,
+                "execution_contract": execution_contract,
+                "messages": [
+                    AIMessage(
+                        content="",
+                        tool_calls=[
+                            {
+                                "name": "write_knowledge_markdown_document",
+                                "args": {"relative_path": relative_path, "content": "# Contract\n\nApproved.\n"},
+                                "id": "call_write",
+                            }
+                        ],
+                    ),
+                    ToolMessage(content=json.dumps(blocked, ensure_ascii=False), tool_call_id="call_write"),
+                    HumanMessage(content="continue"),
+                ],
+            },
+        )
+
+        self.assertTrue(written["ok"])
+        self.assertTrue(Path(written["absolute_path"]).exists())
 
     def test_builder_agent_gets_write_tools_but_reader_does_not(self) -> None:
         registrations = {registration.name: registration for registration in build_default_agent_registrations()}

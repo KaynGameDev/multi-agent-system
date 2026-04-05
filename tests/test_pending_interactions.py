@@ -39,26 +39,6 @@ class FallbackLLM:
         return AIMessage(content=self.content)
 
 
-class BuilderRetryLLM:
-    def bind_tools(self, _tools):
-        return self
-
-    def invoke(self, _messages):
-        return AIMessage(
-            content="",
-            tool_calls=[
-                {
-                    "name": "write_knowledge_markdown_document",
-                    "args": {
-                        "relative_path": "Docs/10_GameLines/BuYuDaLuanDou/LineOverview/Test.md",
-                        "content": "# Test\n",
-                    },
-                    "id": "call_retry_write",
-                }
-            ],
-        )
-
-
 class PendingInteractionTests(unittest.TestCase):
     def test_knowledge_agent_list_follow_up_uses_pending_interaction(self) -> None:
         payload = {
@@ -289,7 +269,20 @@ class PendingInteractionTests(unittest.TestCase):
         self.assertEqual(result["messages"][-1].content, "task fallback")
         self.assertNotIn("pending_interaction", result)
 
-    def test_builder_confirmation_pending_interaction_retries_write_on_confirmation(self) -> None:
+    def test_builder_pending_action_retries_write_on_natural_confirmation(self) -> None:
+        write_request = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "write_knowledge_markdown_document",
+                    "args": {
+                        "relative_path": "Docs/10_GameLines/BuYuDaLuanDou/LineOverview/Test.md",
+                        "content": "# Test\n",
+                    },
+                    "id": "call_write",
+                }
+            ],
+        )
         blocked_payload = {
             "ok": False,
             "knowledge_mutation": "write_markdown",
@@ -298,28 +291,50 @@ class PendingInteractionTests(unittest.TestCase):
             "absolute_path": "/tmp/Test.md",
             "target_exists": False,
         }
-        node = KnowledgeBaseBuilderAgentNode(BuilderRetryLLM(), [], agent_name="knowledge_base_builder_agent")
+        node = KnowledgeBaseBuilderAgentNode(NoopLLM(), [], agent_name="knowledge_base_builder_agent")
 
-        first_result = node({"messages": [ToolMessage(content=json.dumps(blocked_payload), tool_call_id="call_write")]})
-        self.assertIn("pending_interaction", first_result)
+        first_result = node(
+            {
+                "messages": [
+                    write_request,
+                    ToolMessage(content=json.dumps(blocked_payload), tool_call_id="call_write"),
+                ]
+            }
+        )
+        self.assertIn("pending_action", first_result)
 
-        for reply in ("approve", "confirm", "批准", "确认"):
+        for reply in ("approve", "confirm", "批准", "确认", "continue", "go ahead", "ok"):
             with self.subTest(reply=reply):
                 second_result = node(
                     {
                         "messages": [
+                            write_request,
                             ToolMessage(content=json.dumps(blocked_payload), tool_call_id="call_write"),
                             *first_result["messages"],
                             HumanMessage(content=reply),
                         ],
-                        "pending_interaction": first_result["pending_interaction"],
+                        "pending_action": first_result["pending_action"],
                     }
                 )
 
                 last_message = second_result["messages"][-1]
                 self.assertEqual(last_message.tool_calls[0]["name"], "write_knowledge_markdown_document")
+                self.assertEqual(second_result["execution_contract"]["decision"], "approve")
 
-    def test_builder_confirmation_pending_interaction_cancels(self) -> None:
+    def test_builder_pending_action_can_render_diff_before_execution(self) -> None:
+        write_request = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "write_knowledge_markdown_document",
+                    "args": {
+                        "relative_path": "Docs/10_GameLines/BuYuDaLuanDou/LineOverview/Test.md",
+                        "content": "# Test\n\nNew content.\n",
+                    },
+                    "id": "call_write",
+                }
+            ],
+        )
         blocked_payload = {
             "ok": False,
             "knowledge_mutation": "write_markdown",
@@ -328,22 +343,79 @@ class PendingInteractionTests(unittest.TestCase):
             "absolute_path": "/tmp/Test.md",
             "target_exists": False,
         }
-        node = KnowledgeBaseBuilderAgentNode(BuilderRetryLLM(), [], agent_name="knowledge_base_builder_agent")
-        first_result = node({"messages": [ToolMessage(content=json.dumps(blocked_payload), tool_call_id="call_write")]})
+        node = KnowledgeBaseBuilderAgentNode(NoopLLM(), [], agent_name="knowledge_base_builder_agent")
+
+        first_result = node(
+            {
+                "messages": [
+                    write_request,
+                    ToolMessage(content=json.dumps(blocked_payload), tool_call_id="call_write"),
+                ]
+            }
+        )
 
         second_result = node(
             {
                 "messages": [
+                    write_request,
+                    ToolMessage(content=json.dumps(blocked_payload), tool_call_id="call_write"),
+                    *first_result["messages"],
+                    HumanMessage(content="show me the diff first"),
+                ],
+                "pending_action": first_result["pending_action"],
+            }
+        )
+
+        self.assertIn("```diff", second_result["messages"][-1].content)
+        self.assertEqual(second_result["pending_action"]["status"], "modified")
+        self.assertIsNone(second_result["execution_contract"])
+
+    def test_builder_pending_action_cancels(self) -> None:
+        write_request = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "write_knowledge_markdown_document",
+                    "args": {
+                        "relative_path": "Docs/10_GameLines/BuYuDaLuanDou/LineOverview/Test.md",
+                        "content": "# Test\n",
+                    },
+                    "id": "call_write",
+                }
+            ],
+        )
+        blocked_payload = {
+            "ok": False,
+            "knowledge_mutation": "write_markdown",
+            "requires_confirmation": True,
+            "relative_path": "Docs/10_GameLines/BuYuDaLuanDou/LineOverview/Test.md",
+            "absolute_path": "/tmp/Test.md",
+            "target_exists": False,
+        }
+        node = KnowledgeBaseBuilderAgentNode(NoopLLM(), [], agent_name="knowledge_base_builder_agent")
+        first_result = node(
+            {
+                "messages": [
+                    write_request,
+                    ToolMessage(content=json.dumps(blocked_payload), tool_call_id="call_write"),
+                ]
+            }
+        )
+
+        second_result = node(
+            {
+                "messages": [
+                    write_request,
                     ToolMessage(content=json.dumps(blocked_payload), tool_call_id="call_write"),
                     *first_result["messages"],
                     HumanMessage(content="取消"),
                 ],
-                "pending_interaction": first_result["pending_interaction"],
+                "pending_action": first_result["pending_action"],
             }
         )
 
         self.assertIn("取消", second_result["messages"][-1].content)
-        self.assertIsNone(second_result["pending_interaction"])
+        self.assertIsNone(second_result["pending_action"])
 
     def test_default_registration_tool_ids_match_runtime_tools(self) -> None:
         registrations = {

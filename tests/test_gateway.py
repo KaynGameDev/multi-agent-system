@@ -407,6 +407,59 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(result["route"], "project_task_agent")
         self.assertIn("pending interaction", result["route_reason"].lower())
 
+    def test_pending_action_short_circuits_to_owner_agent(self) -> None:
+        registrations = (
+            build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
+            build_registration("knowledge_base_builder_agent", namespace="knowledge_base_builder", selection_order=20),
+        )
+        orchestrator = self.build_orchestrator(registrations)
+
+        result = orchestrator(
+            {
+                "messages": [HumanMessage(content="go ahead")],
+                "pending_action": {
+                    "id": "pending_write",
+                    "session_id": "thread-1",
+                    "type": "write_knowledge_markdown",
+                    "requested_by_agent": "knowledge_base_builder_agent",
+                    "summary": "Write KB draft",
+                    "risk_level": "medium",
+                    "requires_explicit_approval": True,
+                    "created_at": "2026-04-05T00:00:00Z",
+                    "status": "awaiting_confirmation",
+                },
+            }
+        )
+
+        self.assertEqual(result["route"], "knowledge_base_builder_agent")
+        self.assertIn("pending action", result["route_reason"].lower())
+
+    def test_pending_action_with_missing_owner_records_warning_and_falls_back(self) -> None:
+        registrations = (
+            build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
+        )
+        orchestrator = self.build_orchestrator(registrations)
+
+        result = orchestrator(
+            {
+                "messages": [HumanMessage(content="continue")],
+                "pending_action": {
+                    "id": "pending_write",
+                    "session_id": "thread-1",
+                    "type": "write_knowledge_markdown",
+                    "requested_by_agent": "missing_agent",
+                    "summary": "Write KB draft",
+                    "risk_level": "medium",
+                    "requires_explicit_approval": True,
+                    "created_at": "2026-04-05T00:00:00Z",
+                    "status": "awaiting_confirmation",
+                },
+            }
+        )
+
+        self.assertEqual(result["route"], "general_chat_agent")
+        self.assertTrue(any("Pending action owner `missing_agent`" in item for item in result["selection_warnings"]))
+
     def test_no_specialist_match_falls_back_to_general_assistant(self) -> None:
         registrations = (
             build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),

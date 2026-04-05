@@ -15,6 +15,7 @@ from openpyxl import load_workbook
 from app.config import DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH, load_settings
 from app.messages import extract_latest_human_text
 from app.knowledge_paths import build_knowledge_markdown_relative_path
+from app.pending_actions import action_allows_execution, get_execution_contract, get_pending_action
 from app.paths import resolve_project_path
 from tools.google_workspace_services import get_google_sheets_service
 
@@ -1009,11 +1010,24 @@ def latest_user_explicitly_confirms_knowledge_mutation(state: dict | None) -> bo
     return any(re.search(pattern, latest_user_text, re.IGNORECASE) for pattern in KNOWLEDGE_MUTATION_CONFIRMATION_PATTERNS)
 
 
-def knowledge_mutation_is_approved(state: dict | None) -> bool:
+def knowledge_mutation_is_approved(state: dict | None, *, relative_path: str = "") -> bool:
     latest_payload = get_latest_knowledge_mutation_payload(state)
     if not latest_payload or latest_payload.get("requires_confirmation") is not True:
+        return has_valid_knowledge_mutation_contract(state, relative_path=relative_path)
+    return has_valid_knowledge_mutation_contract(state, relative_path=relative_path) or latest_user_explicitly_confirms_knowledge_mutation(state)
+
+
+def has_valid_knowledge_mutation_contract(state: dict | None, *, relative_path: str = "") -> bool:
+    if not isinstance(state, dict):
         return False
-    return latest_user_explicitly_confirms_knowledge_mutation(state)
+    pending_action = get_pending_action(state)
+    execution_contract = get_execution_contract(state)
+    return action_allows_execution(
+        pending_action,
+        execution_contract,
+        action_type="write_knowledge_markdown",
+        file_path=relative_path,
+    )
 
 
 def resolve_knowledge_markdown_target(relative_path: str) -> tuple[Path, Path]:
@@ -1224,7 +1238,7 @@ def write_knowledge_markdown_document(
             "relative_path": relative_path,
         }
 
-    if not knowledge_mutation_is_approved(state):
+    if not knowledge_mutation_is_approved(state, relative_path=relative_path):
         return {
             "ok": False,
             **context,
