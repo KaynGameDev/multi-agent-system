@@ -11,7 +11,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from app.config import load_settings
 from app.graph import build_default_agent_registrations
 from app.knowledge_paths import build_knowledge_markdown_relative_path
-from app.pending_actions import build_pending_action, interpret_pending_action_reply
+from app.pending_actions import build_pending_action, resolve_pending_action_reply
 from tools.knowledge_base import resolve_knowledge_markdown_path, write_knowledge_markdown_document
 
 
@@ -88,10 +88,21 @@ class KnowledgeBaseBuilderToolTests(unittest.TestCase):
         self.assertTrue(blocked["requires_confirmation"])
         self.assertEqual(blocked["knowledge_mutation"], "write_markdown")
 
+        pending_action = build_pending_action(
+            session_id="thread-1",
+            action_type="write_knowledge_markdown",
+            requested_by_agent="knowledge_base_builder_agent",
+            summary=f"Write knowledge-base draft to `{resolved['relative_path']}`.",
+            target_scope={"files": [resolved["relative_path"]]},
+        )
+        execution_contract = resolve_pending_action_reply(pending_action, "approve")["contract"]
+
         written = write_knowledge_markdown_document.func(
             relative_path=resolved["relative_path"],
             content="# 射击塔防组概览\n\n测试内容。\n",
             state={
+                "pending_action": pending_action,
+                "execution_contract": execution_contract,
                 "messages": [
                     HumanMessage(content="请写入知识库"),
                     ToolMessage(content=json.dumps(blocked, ensure_ascii=False), tool_call_id="call_write"),
@@ -110,6 +121,8 @@ class KnowledgeBaseBuilderToolTests(unittest.TestCase):
             relative_path=resolved["relative_path"],
             content="# 新版本\n",
             state={
+                "pending_action": pending_action,
+                "execution_contract": execution_contract,
                 "messages": [
                     HumanMessage(content="请覆盖更新"),
                     ToolMessage(content=json.dumps(blocked, ensure_ascii=False), tool_call_id="call_write"),
@@ -145,7 +158,7 @@ class KnowledgeBaseBuilderToolTests(unittest.TestCase):
             summary=f"Write knowledge-base draft to `{relative_path}`.",
             target_scope={"files": [relative_path]},
         )
-        execution_contract = interpret_pending_action_reply(pending_action, "continue")
+        execution_contract = resolve_pending_action_reply(pending_action, "continue")["contract"]
 
         written = write_knowledge_markdown_document.func(
             relative_path=relative_path,

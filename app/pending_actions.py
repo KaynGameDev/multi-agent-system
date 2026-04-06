@@ -11,13 +11,18 @@ PendingActionStatus = Literal[
     "awaiting_confirmation",
     "approved",
     "rejected",
-    "modified",
+    "request_revision",
+    "ask_clarification",
     "expired",
 ]
-ExecutionDecision = Literal["approve", "reject", "modify", "unclear"]
-RuntimeAction = Literal["execute", "cancel", "request_revision", "ask_clarification"]
+ExecutionDecision = Literal["approve", "reject", "modify", "select", "unclear"]
+RuntimeAction = Literal["execute", "cancel", "request_revision", "ask_clarification", "select"]
 
-ACTIVE_PENDING_ACTION_STATUSES = {"awaiting_confirmation", "modified"}
+ACTIVE_PENDING_ACTION_STATUSES = {"awaiting_confirmation", "request_revision", "ask_clarification"}
+LEGACY_PENDING_ACTION_STATUS_ALIASES = {
+    "modified": "request_revision",
+    "cancelled": "rejected",
+}
 APPROVAL_KEYWORDS = {
     "ok",
     "okay",
@@ -112,6 +117,13 @@ class PendingActionTargetScope(TypedDict, total=False):
     skill_name: str
 
 
+class PendingActionSelectionOption(TypedDict, total=False):
+    label: str
+    aliases: list[str]
+    value: str
+    payload: dict[str, Any]
+
+
 class PendingAction(TypedDict, total=False):
     id: str
     session_id: str
@@ -135,6 +147,8 @@ class ExecutionContract(TypedDict, total=False):
     summary: str
     reply_text: str
     target_scope: PendingActionTargetScope
+    selected_option: PendingActionSelectionOption
+    selected_index: int
     requested_outputs: list[str]
     constraints: dict[str, Any]
     should_execute: bool
@@ -146,6 +160,8 @@ class ExecutionContractValidation(TypedDict, total=False):
     next_status: PendingActionStatus
     reason: str
     normalized_scope: PendingActionTargetScope
+    selected_option: PendingActionSelectionOption
+    selected_index: int
 
 
 def build_pending_action(
@@ -177,20 +193,104 @@ def build_pending_action(
 def get_pending_action(state: dict[str, Any]) -> PendingAction | None:
     action = state.get("pending_action")
     if isinstance(action, dict) and str(action.get("status", "")).strip():
-        return action
+        normalized_action = dict(action)
+        normalized_status = normalize_pending_action_status(str(normalized_action.get("status", "")).strip())
+        if normalized_status:
+            normalized_action["status"] = normalized_status
+        return normalized_action
     return None
 
 
 def is_pending_action_active(action: PendingAction | None) -> bool:
     if not action:
         return False
-    return str(action.get("status", "")).strip().lower() in ACTIVE_PENDING_ACTION_STATUSES
+    return normalize_pending_action_status(str(action.get("status", "")).strip()) in ACTIVE_PENDING_ACTION_STATUSES
 
 
 def get_execution_contract(state: dict[str, Any]) -> ExecutionContract | None:
     contract = state.get("execution_contract")
     if isinstance(contract, dict) and str(contract.get("decision", "")).strip():
         return contract
+    return None
+
+
+def resolve_pending_action_reply(action: PendingAction, user_text: str) -> dict[str, Any]:
+    contract = interpret_pending_action_reply(action, user_text)
+    validation = validate_execution_contract(action, contract)
+    return {
+        "contract": contract,
+        "validation": validation,
+    }
+
+
+def normalize_pending_action_status(status: str) -> str:
+    normalized = str(status or "").strip().lower()
+    if not normalized:
+        return ""
+    return LEGACY_PENDING_ACTION_STATUS_ALIASES.get(normalized, normalized)
+
+
+def get_pending_action_metadata(action: PendingAction | None) -> dict[str, Any]:
+    if not action:
+        return {}
+    metadata = action.get("metadata")
+    if isinstance(metadata, dict):
+        return metadata
+    return {}
+
+
+def get_pending_action_selection_options(action: PendingAction | None) -> list[PendingActionSelectionOption]:
+    metadata = get_pending_action_metadata(action)
+    raw_options = metadata.get("selection_options")
+    if not isinstance(raw_options, list):
+        return []
+
+    options: list[PendingActionSelectionOption] = []
+    for option in raw_options:
+        if isinstance(option, dict):
+            options.append(option)
+    return options
+
+
+def get_pending_action_selection_phase(action: PendingAction | None) -> str:
+    metadata = get_pending_action_metadata(action)
+    return str(metadata.get("selection_phase", "")).strip().lower()
+
+
+def extract_selection_index(normalized_text: str) -> int | None:
+    if normalized_text.isdigit():
+        return max(int(normalized_text) - 1, 0)
+
+    patterns = (
+        r"^第\s*(\d+)\s*(?:个|篇|份|条|项)?$",
+        r"^(?:option|doc|document|task)\s*(\d+)$",
+        r"^(\d+)[\).]$",
+    )
+    for pattern in patterns:
+        match = re.match(pattern, normalized_text)
+        if match:
+            return max(int(match.group(1)) - 1, 0)
+    return None
+
+
+def match_pending_action_selection_option(
+    options: list[PendingActionSelectionOption],
+    normalized_text: str,
+) -> dict[str, Any] | None:
+    selected_index = extract_selection_index(normalized_text)
+    if selected_index is not None and 0 <= selected_index < len(options):
+        option = options[selected_index]
+        return {"option": option, "index": selected_index}
+
+    for index, option in enumerate(options):
+        labels = [option.get("label", ""), option.get("value", ""), *option.get("aliases", [])]
+        normalized_labels = {
+            normalize_pending_action_text(label)
+            for label in labels
+            if normalize_pending_action_text(label)
+        }
+        if normalized_text in normalized_labels:
+            return {"option": option, "index": index}
     return None
 
 
@@ -204,13 +304,44 @@ def interpret_pending_action_reply(action: PendingAction, user_text: str) -> Exe
     approval_score = score_keyword_hits(tokens, normalized_text, APPROVAL_KEYWORDS)
     rejection_score = score_keyword_hits(tokens, normalized_text, REJECTION_KEYWORDS)
     defer_requested = contains_any(normalized_text, DEFER_KEYWORDS)
+    selection_options = get_pending_action_selection_options(action)
 
     decision: ExecutionDecision = "unclear"
     summary = "The reply did not clearly approve, reject, or modify the pending action."
     should_execute = False
     constraints: dict[str, Any] = {}
 
-    if rejection_score > approval_score and rejection_score > 0 and not requested_outputs:
+    if selection_options:
+        selection_match = match_pending_action_selection_option(selection_options, normalized_text)
+        if selection_match is None and len(selection_options) == 1 and approval_score > 0 and not defer_requested:
+            selection_match = {"option": selection_options[0], "index": 0}
+        if selection_match is not None:
+            selected_option = selection_match["option"]
+            selected_index = int(selection_match["index"])
+            decision = "select"
+            summary = "The user selected one of the pending options."
+            should_execute = True
+            return ExecutionContract(
+                pending_action_id=str(action.get("id", "")).strip(),
+                session_id=str(action.get("session_id", "")).strip(),
+                action_type=str(action.get("type", "")).strip(),
+                requested_by_agent=str(action.get("requested_by_agent", "")).strip(),
+                decision=decision,
+                summary=summary,
+                reply_text=user_text.strip(),
+                target_scope=target_scope,
+                selected_option=selected_option,
+                selected_index=selected_index,
+                requested_outputs=requested_outputs,
+                constraints=constraints,
+                should_execute=should_execute,
+            )
+        if rejection_score > approval_score and rejection_score > 0 and not requested_outputs:
+            decision = "reject"
+            summary = "The user rejected the pending action."
+        else:
+            summary = "The reply did not clearly select one of the pending options."
+    elif rejection_score > approval_score and rejection_score > 0 and not requested_outputs:
         decision = "reject"
         summary = "The user rejected the pending action."
     elif requested_outputs or has_scope_modifier or (target_scope and approval_score > 0) or (approval_score > 0 and has_modifier_language):
@@ -272,11 +403,33 @@ def validate_execution_contract(
             normalized_scope={},
         )
 
+    if decision == "select":
+        selected_option = contract.get("selected_option")
+        if not isinstance(selected_option, dict):
+            return ExecutionContractValidation(
+                valid=False,
+                runtime_action="ask_clarification",
+                next_status="ask_clarification",
+                reason="The reply did not identify a selectable option.",
+                normalized_scope={},
+            )
+        selected_index = contract.get("selected_index")
+        normalized_index = int(selected_index) if isinstance(selected_index, int) else 0
+        return ExecutionContractValidation(
+            valid=True,
+            runtime_action="select",
+            next_status="awaiting_confirmation",
+            reason="The user selected a pending option.",
+            normalized_scope={},
+            selected_option=selected_option,
+            selected_index=normalized_index,
+        )
+
     if decision == "unclear":
         return ExecutionContractValidation(
             valid=False,
             runtime_action="ask_clarification",
-            next_status=str(action.get("status", "awaiting_confirmation")).strip() or "awaiting_confirmation",
+            next_status="ask_clarification",
             reason="The reply was too ambiguous to execute deterministically.",
             normalized_scope={},
         )
@@ -289,7 +442,7 @@ def validate_execution_contract(
         return ExecutionContractValidation(
             valid=False,
             runtime_action="ask_clarification",
-            next_status="awaiting_confirmation",
+            next_status="ask_clarification",
             reason=" ".join(scope_errors),
             normalized_scope=normalized_scope,
         )
@@ -301,7 +454,7 @@ def validate_execution_contract(
             return ExecutionContractValidation(
                 valid=False,
                 runtime_action="ask_clarification",
-                next_status="awaiting_confirmation",
+                next_status="ask_clarification",
                 reason="The requested modification did not map to a supported deterministic scope.",
                 normalized_scope=normalized_scope,
             )
@@ -309,7 +462,7 @@ def validate_execution_contract(
             return ExecutionContractValidation(
                 valid=True,
                 runtime_action="request_revision",
-                next_status="modified",
+                next_status="request_revision",
                 reason="The user requested additional preview material before execution.",
                 normalized_scope=normalized_scope,
             )
@@ -324,7 +477,7 @@ def validate_execution_contract(
         return ExecutionContractValidation(
             valid=True,
             runtime_action="request_revision",
-            next_status="modified",
+            next_status="request_revision",
             reason="The user requested a modified action that still needs agent handling.",
             normalized_scope=normalized_scope,
         )
@@ -346,7 +499,8 @@ def update_pending_action(
     metadata_updates: dict[str, Any] | None = None,
 ) -> PendingAction:
     updated: PendingAction = dict(action)
-    updated["status"] = status
+    normalized_status = normalize_pending_action_status(str(status).strip())
+    updated["status"] = normalized_status or str(status).strip()
     if target_scope:
         updated["target_scope"] = dict(target_scope)
     if metadata_updates:

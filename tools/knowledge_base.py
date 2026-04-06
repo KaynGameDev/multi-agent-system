@@ -13,7 +13,6 @@ from langgraph.prebuilt import InjectedState
 from openpyxl import load_workbook
 
 from app.config import DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH, load_settings
-from app.messages import extract_latest_human_text
 from app.knowledge_paths import build_knowledge_markdown_relative_path
 from app.pending_actions import action_allows_execution, get_execution_contract, get_pending_action
 from app.paths import resolve_project_path
@@ -66,16 +65,6 @@ class KnowledgeIndexCacheEntry:
 
 
 _google_sheet_index_cache: dict[str, KnowledgeIndexCacheEntry] = {}
-KNOWLEDGE_MUTATION_CONFIRMATION_PATTERNS = (
-    r"^\s*approve(?:d)?\s*$",
-    r"^\s*confirm(?:ed)?\s*$",
-    r"^\s*yes[, ]+(?:approve|confirm|proceed)\s*$",
-    r"^\s*proceed with (?:the )?(?:write|save|update)\s*$",
-    r"^\s*批准\s*$",
-    r"^\s*确认\s*$",
-    r"^\s*确认(?:写入|保存|更新)\s*$",
-    r"^\s*同意(?:写入|保存|更新)\s*$",
-)
 
 
 def get_knowledge_base_root() -> Path:
@@ -991,30 +980,8 @@ def parse_tool_payload(message) -> dict[str, object] | None:
     return payload
 
 
-def get_latest_knowledge_mutation_payload(state: dict | None) -> dict[str, object] | None:
-    if not isinstance(state, dict):
-        return None
-    for message in reversed(state.get("messages") or []):
-        payload = parse_tool_payload(message)
-        if not isinstance(payload, dict):
-            continue
-        if str(payload.get("knowledge_mutation", "")).strip():
-            return payload
-    return None
-
-
-def latest_user_explicitly_confirms_knowledge_mutation(state: dict | None) -> bool:
-    latest_user_text = extract_latest_human_text(state or {})
-    if not latest_user_text.strip():
-        return False
-    return any(re.search(pattern, latest_user_text, re.IGNORECASE) for pattern in KNOWLEDGE_MUTATION_CONFIRMATION_PATTERNS)
-
-
 def knowledge_mutation_is_approved(state: dict | None, *, relative_path: str = "") -> bool:
-    latest_payload = get_latest_knowledge_mutation_payload(state)
-    if not latest_payload or latest_payload.get("requires_confirmation") is not True:
-        return has_valid_knowledge_mutation_contract(state, relative_path=relative_path)
-    return has_valid_knowledge_mutation_contract(state, relative_path=relative_path) or latest_user_explicitly_confirms_knowledge_mutation(state)
+    return has_valid_knowledge_mutation_contract(state, relative_path=relative_path)
 
 
 def has_valid_knowledge_mutation_contract(state: dict | None, *, relative_path: str = "") -> bool:
@@ -1245,13 +1212,12 @@ def write_knowledge_markdown_document(
             "knowledge_mutation": "write_markdown",
             "requires_confirmation": True,
             "error": (
-                "Knowledge base mutations require an explicit follow-up confirmation after preview. "
-                "Ask the user to reply `approve`/`confirm` or `批准`/`确认`, then retry."
+                "Knowledge base mutations require an approved pending action. "
+                "Ask the user to complete the shared confirmation flow, then retry."
             ),
             "relative_path": relative_path,
             "absolute_path": str(absolute_path),
             "target_exists": absolute_path.exists(),
-            "confirmation_commands": ["approve", "confirm", "批准", "确认"],
         }
 
     existed = absolute_path.exists()

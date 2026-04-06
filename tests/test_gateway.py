@@ -379,7 +379,38 @@ class GatewayTests(unittest.TestCase):
 
         self.assertEqual(result["route"], "knowledge_agent")
 
-    def test_pending_interaction_short_circuits_to_owner_agent(self) -> None:
+    def test_pending_action_short_circuits_to_owner_agent(self) -> None:
+        registrations = (
+            build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
+            build_registration("knowledge_agent", namespace="knowledge", selection_order=30, matcher=knowledge_matcher),
+            build_registration("project_task_agent", namespace="project_task", selection_order=20),
+        )
+        orchestrator = self.build_orchestrator(registrations)
+
+        result = orchestrator(
+            {
+                "messages": [HumanMessage(content="details")],
+                "pending_action": {
+                    "id": "pending_select",
+                    "session_id": "thread-1",
+                    "type": "select_project_task",
+                    "requested_by_agent": "project_task_agent",
+                    "summary": "Select a task to inspect.",
+                    "status": "awaiting_confirmation",
+                    "created_at": "2026-04-05T00:00:00Z",
+                    "metadata": {
+                        "source_tool_id": "project.read_tasks",
+                        "prompt_context": "Reply with a task number.",
+                        "selection_options": [],
+                    },
+                },
+            }
+        )
+
+        self.assertEqual(result["route"], "project_task_agent")
+        self.assertIn("pending action", result["route_reason"].lower())
+
+    def test_legacy_pending_interaction_is_ignored_by_gateway(self) -> None:
         registrations = (
             build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
             build_registration("knowledge_agent", namespace="knowledge", selection_order=30, matcher=knowledge_matcher),
@@ -404,8 +435,8 @@ class GatewayTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(result["route"], "project_task_agent")
-        self.assertIn("pending interaction", result["route_reason"].lower())
+        self.assertEqual(result["route"], "general_chat_agent")
+        self.assertNotIn("pending interaction", result["route_reason"].lower())
 
     def test_pending_action_short_circuits_to_owner_agent(self) -> None:
         registrations = (

@@ -11,10 +11,9 @@ from app.language import detect_response_language
 from app.pending_actions import (
     build_pending_action,
     get_pending_action,
-    interpret_pending_action_reply,
     is_pending_action_active,
+    resolve_pending_action_reply,
     update_pending_action,
-    validate_execution_contract,
 )
 from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
 from app.skills import SkillRegistry
@@ -217,8 +216,9 @@ def build_pending_action_response(state: AgentState, pending_action: dict[str, A
         return None
 
     preferred_language = detect_response_language(latest_user_text)
-    contract = interpret_pending_action_reply(pending_action, latest_user_text)
-    validation = validate_execution_contract(pending_action, contract)
+    resolution = resolve_pending_action_reply(pending_action, latest_user_text)
+    contract = resolution["contract"]
+    validation = resolution["validation"]
 
     if validation.get("runtime_action") == "cancel":
         return {
@@ -227,28 +227,30 @@ def build_pending_action_response(state: AgentState, pending_action: dict[str, A
             "execution_contract": None,
         }
 
+    normalized_scope = validation.get("normalized_scope") or {}
+    next_status = str(validation.get("next_status", "ask_clarification")).strip() or "ask_clarification"
+    updated_action = update_pending_action(
+        pending_action,
+        status=next_status,
+        target_scope=normalized_scope or None,
+        metadata_updates={"last_contract": dict(contract)},
+    )
+
     if not validation.get("valid"):
         return {
             "messages": [
                 AIMessage(
                     content=build_pending_action_clarification(
-                        pending_action,
+                        updated_action,
                         validation,
                         preferred_language=preferred_language,
                     )
                 )
             ],
-            "pending_action": pending_action,
+            "pending_action": updated_action,
             "execution_contract": None,
         }
 
-    normalized_scope = validation.get("normalized_scope") or {}
-    updated_action = update_pending_action(
-        pending_action,
-        status=validation.get("next_status", "awaiting_confirmation"),
-        target_scope=normalized_scope or None,
-        metadata_updates={"last_contract": dict(contract)},
-    )
     runtime_action = validation.get("runtime_action")
 
     if runtime_action == "request_revision":

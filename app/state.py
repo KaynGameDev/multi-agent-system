@@ -8,7 +8,6 @@ from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
 from app.pending_actions import ExecutionContract, PendingAction
-from app.pending_interactions import PendingInteraction
 
 RouteName = str
 
@@ -17,7 +16,6 @@ class AgentState(TypedDict, total=False):
     messages: Annotated[list[AnyMessage], add_messages]
     route: RouteName
     route_reason: str
-    pending_interaction: PendingInteraction | None
     pending_action: PendingAction | None
     execution_contract: ExecutionContract | None
     interface_name: str

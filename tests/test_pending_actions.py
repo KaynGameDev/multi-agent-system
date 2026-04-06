@@ -26,7 +26,7 @@ class PendingActionTests(unittest.TestCase):
         self.assertTrue(validation["valid"])
         self.assertEqual(validation["runtime_action"], "execute")
 
-    def test_scope_limited_reply_becomes_modified_execute_contract(self) -> None:
+    def test_scope_limited_reply_becomes_narrowed_execute_contract(self) -> None:
         action = build_pending_action(
             session_id="thread-1",
             action_type="apply_edit",
@@ -41,9 +41,36 @@ class PendingActionTests(unittest.TestCase):
         self.assertEqual(contract["decision"], "modify")
         self.assertTrue(validation["valid"])
         self.assertEqual(validation["runtime_action"], "execute")
+        self.assertEqual(validation["next_status"], "approved")
         self.assertEqual(validation["normalized_scope"]["modules"], ["backend"])
 
-    def test_diff_request_becomes_modified_non_execute_contract(self) -> None:
+    def test_selection_reply_becomes_select_contract(self) -> None:
+        action = build_pending_action(
+            session_id="thread-1",
+            action_type="select_knowledge_document",
+            requested_by_agent="knowledge_agent",
+            summary="Select a document to open.",
+            metadata={
+                "selection_options": [
+                    {
+                        "label": "Setup Guide",
+                        "aliases": ["1", "setup guide"],
+                        "value": "Setup Guide",
+                        "payload": {"document_name": "Setup Guide"},
+                    }
+                ]
+            },
+        )
+
+        contract = interpret_pending_action_reply(action, "1")
+        validation = validate_execution_contract(action, contract)
+
+        self.assertEqual(contract["decision"], "select")
+        self.assertTrue(validation["valid"])
+        self.assertEqual(validation["runtime_action"], "select")
+        self.assertEqual(validation["selected_option"]["payload"]["document_name"], "Setup Guide")
+
+    def test_diff_request_becomes_request_revision_contract(self) -> None:
         action = build_pending_action(
             session_id="thread-1",
             action_type="apply_edit",
@@ -59,6 +86,7 @@ class PendingActionTests(unittest.TestCase):
         self.assertIn("diff", contract["requested_outputs"])
         self.assertTrue(validation["valid"])
         self.assertEqual(validation["runtime_action"], "request_revision")
+        self.assertEqual(validation["next_status"], "request_revision")
 
     def test_unsupported_scope_modification_stays_non_executable(self) -> None:
         action = build_pending_action(
@@ -75,6 +103,7 @@ class PendingActionTests(unittest.TestCase):
         self.assertEqual(contract["decision"], "modify")
         self.assertFalse(validation["valid"])
         self.assertEqual(validation["runtime_action"], "ask_clarification")
+        self.assertEqual(validation["next_status"], "ask_clarification")
 
 
 if __name__ == "__main__":

@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import logging
-import re
 import time
 from pathlib import Path
 from typing import Any
@@ -20,6 +19,13 @@ from agents.document_conversion.rendering import (
     render_conversion_response,
 )
 from app.language import detect_response_language
+from app.pending_actions import (
+    build_pending_action,
+    get_pending_action,
+    is_pending_action_active,
+    resolve_pending_action_reply,
+    update_pending_action,
+)
 from app.state import AgentState
 from tools.document_conversion import (
     DEFAULT_CONVERSION_WORK_DIR,
@@ -41,6 +47,7 @@ from tools.document_conversion import (
     stage_conversion_package,
     ConversionSessionRecord,
     ConversionSessionStore,
+    build_conversion_package_relative_path,
 )
 from tools.conversion_google_sources import GoogleDocumentReference, extract_google_document_references
 from tools.conversion_retrieval import build_retrieved_source_bundle
@@ -48,26 +55,6 @@ from tools.conversion_retrieval import build_retrieved_source_bundle
 logger = logging.getLogger(__name__)
 EXTRACT_DRAFT_MAX_ATTEMPTS = 3
 EXTRACT_DRAFT_RETRY_BASE_DELAY_SECONDS = 0.75
-
-APPROVAL_PATTERNS = (
-    r"^\s*approve\s*$",
-    r"^\s*approved\s*$",
-    r"^\s*publish\s*$",
-    r"^\s*go ahead\s*$",
-    r"^\s*looks good\s*$",
-    r"^\s*批准\s*$",
-    r"^\s*通过\s*$",
-    r"^\s*发布\s*$",
-)
-CANCEL_PATTERNS = (
-    r"^\s*cancel\s*$",
-    r"^\s*stop\s*$",
-    r"^\s*discard\s*$",
-    r"^\s*取消\s*$",
-    r"^\s*停止\s*$",
-    r"^\s*放弃\s*$",
-    r"^\s*算了\s*$",
-)
 
 
 class ConversionTerminologyItem(BaseModel):
@@ -156,6 +143,8 @@ class DocumentConversionAgentNode:
                 "conversion_status": result["session"].status if result["session"] else "",
                 "missing_required_fields": result["session"].missing_required_fields if result["session"] else [],
                 "approval_state": result["session"].approval_state if result["session"] else "",
+                "pending_action": result.get("pending_action"),
+                "execution_contract": result.get("execution_contract"),
             }
             return updates
         except Exception as exc:
@@ -213,6 +202,17 @@ class DocumentConversionAgentNode:
                 "session": None,
             }
         preferred_language = resolve_preferred_language(state, session)
+
+        pending_action = get_pending_action(state)
+        if pending_action and pending_action.get("requested_by_agent") == self.agent_name and is_pending_action_active(pending_action):
+            pending_action_result = self._build_pending_action_response(
+                state,
+                session=session,
+                pending_action=pending_action,
+                preferred_language=preferred_language,
+            )
+            if pending_action_result is not None:
+                return pending_action_result
 
         logger.debug(
             "Processing conversion session session=%s thread=%s channel=%s user=%s status=%s uploads=%s",
@@ -279,56 +279,8 @@ class DocumentConversionAgentNode:
                 "session": session,
             }
 
-        if is_cancel_intent(latest_text):
-            session = self.store.update_session(
-                session.session_id,
-                status="cancelled",
-                approval_state="cancelled",
-                missing_required_fields=[],
-            )
-            return {
-                "content": render_conversion_response(
-                    self.llm,
-                    response_kind="cancelled",
-                    preferred_language=preferred_language,
-                ),
-                "session": session,
-            }
-
-        if latest_text and latest_text != UPLOAD_ONLY_FALLBACK_TEXT and not is_approval_intent(latest_text):
+        if latest_text and latest_text != UPLOAD_ONLY_FALLBACK_TEXT:
             session = append_answer_to_session(self.store, session, latest_text)
-
-        if is_approval_intent(latest_text):
-            if session.status != "ready_for_approval" or not session.draft_payload:
-                missing = ", ".join(session.missing_required_fields) or (
-                    "草稿尚未暂存" if preferred_language == "zh" else "the draft has not been staged yet"
-                )
-                return {
-                    "content": render_conversion_response(
-                        self.llm,
-                        response_kind="not_ready_for_publish",
-                        preferred_language=preferred_language,
-                        missing=missing,
-                    ),
-                    "session": session,
-                }
-
-            relative_package_path = publish_conversion_package(
-                self.store,
-                session,
-                knowledge_root=self.knowledge_root,
-            )
-            session = self.store.get_session(session.session_id) or session
-            return {
-                "content": render_conversion_response(
-                    self.llm,
-                    response_kind="published",
-                    preferred_language=preferred_language,
-                    relative_package_path=relative_package_path,
-                    source_count=len(self.store.list_sources(session.session_id)),
-                ),
-                "session": session,
-            }
 
         sources = self.store.list_sources(session.session_id)
         if not sources and skipped:
@@ -487,6 +439,11 @@ class DocumentConversionAgentNode:
             stage_result.populated_modules,
             stage_result.missing_optional_modules,
         )
+        pending_action = build_conversion_pending_action(
+            state=state,
+            session=session,
+            source_count=len(sources),
+        )
         return {
             "content": render_conversion_response(
                 self.llm,
@@ -501,6 +458,120 @@ class DocumentConversionAgentNode:
                 download_failures=source_access_failures,
             ),
             "session": session,
+            "pending_action": pending_action,
+            "execution_contract": None,
+        }
+
+    def _build_pending_action_response(
+        self,
+        state: AgentState,
+        *,
+        session: ConversionSessionRecord,
+        pending_action: dict[str, Any],
+        preferred_language: str,
+    ) -> dict[str, Any] | None:
+        latest_text = get_latest_user_text(state)
+        resolution = resolve_pending_action_reply(pending_action, latest_text)
+        contract = resolution["contract"]
+        validation = resolution["validation"]
+
+        if validation.get("runtime_action") == "cancel":
+            session = self.store.update_session(
+                session.session_id,
+                status="cancelled",
+                approval_state="cancelled",
+                missing_required_fields=[],
+            )
+            return {
+                "content": render_conversion_response(
+                    self.llm,
+                    response_kind="cancelled",
+                    preferred_language=preferred_language,
+                ),
+                "session": session,
+                "pending_action": None,
+                "execution_contract": None,
+            }
+
+        normalized_scope = validation.get("normalized_scope") or {}
+        next_status = str(validation.get("next_status", "ask_clarification")).strip() or "ask_clarification"
+        updated_action = update_pending_action(
+            pending_action,
+            status=next_status,
+            target_scope=normalized_scope or None,
+            metadata_updates={"last_contract": dict(contract)},
+        )
+
+        if not validation.get("valid"):
+            return {
+                "content": build_conversion_pending_action_clarification(
+                    pending_action=updated_action,
+                    validation=validation,
+                    preferred_language=preferred_language,
+                ),
+                "session": session,
+                "pending_action": updated_action,
+                "execution_contract": None,
+            }
+
+        runtime_action = str(validation.get("runtime_action", "")).strip()
+        if runtime_action == "request_revision":
+            return {
+                "content": build_conversion_pending_action_revision_response(
+                    pending_action=updated_action,
+                    validation=validation,
+                    preferred_language=preferred_language,
+                ),
+                "session": session,
+                "pending_action": updated_action,
+                "execution_contract": None,
+            }
+
+        if runtime_action != "execute":
+            return {
+                "content": build_conversion_pending_action_clarification(
+                    pending_action=updated_action,
+                    validation=validation,
+                    preferred_language=preferred_language,
+                ),
+                "session": session,
+                "pending_action": updated_action,
+                "execution_contract": None,
+            }
+
+        if session.status != "ready_for_approval" or not session.draft_payload:
+            missing = ", ".join(session.missing_required_fields) or (
+                "草稿尚未暂存" if preferred_language == "zh" else "the draft has not been staged yet"
+            )
+            return {
+                "content": render_conversion_response(
+                    self.llm,
+                    response_kind="not_ready_for_publish",
+                    preferred_language=preferred_language,
+                    missing=missing,
+                ),
+                "session": session,
+                "pending_action": updated_action,
+                "execution_contract": None,
+            }
+
+        relative_package_path = publish_conversion_package(
+            self.store,
+            session,
+            knowledge_root=self.knowledge_root,
+        )
+        session = self.store.get_session(session.session_id) or session
+        return {
+            "content": render_conversion_response(
+                self.llm,
+                response_kind="published",
+                preferred_language=preferred_language,
+                relative_package_path=relative_package_path,
+                source_count=len(self.store.list_sources(session.session_id)),
+            ),
+            "session": session,
+            "pending_action": None,
+            "execution_contract": contract,
         }
 
     def _resolve_path(self, configured_value: str, default_value: str) -> Path:
@@ -601,6 +672,88 @@ class DocumentConversionAgentNode:
         if last_error is not None:
             raise last_error
         raise RuntimeError("Conversion extractor failed without returning a payload.")
+
+
+def build_conversion_pending_action(
+    *,
+    state: AgentState,
+    session: ConversionSessionRecord,
+    source_count: int,
+) -> dict[str, Any] | None:
+    relative_package_path = build_conversion_package_relative_path(
+        session.game_slug,
+        session.market_slug,
+        session.feature_slug,
+    )
+    summary = f"Publish staged conversion package for `{relative_package_path}`."
+    metadata = {
+        "conversion_session_id": session.session_id,
+        "staged_package_path": session.staged_package_path,
+        "relative_package_path": relative_package_path,
+        "source_count": source_count,
+        "game_slug": session.game_slug,
+        "market_slug": session.market_slug,
+        "feature_slug": session.feature_slug,
+    }
+    return build_pending_action(
+        session_id=str(session.session_id or state.get("thread_id", "")).strip(),
+        action_type="publish_conversion_package",
+        requested_by_agent="document_conversion_agent",
+        summary=summary,
+        target_scope={"files": [session.staged_package_path]} if session.staged_package_path else {},
+        risk_level="high",
+        requires_explicit_approval=True,
+        metadata=metadata,
+    )
+
+
+def build_conversion_pending_action_clarification(
+    *,
+    pending_action: dict[str, Any],
+    validation: dict[str, Any],
+    preferred_language: str,
+) -> str:
+    summary = str(pending_action.get("summary", "")).strip()
+    reason = str(validation.get("reason", "")).strip()
+    if preferred_language == "zh":
+        parts = [f"我还不能确定是否发布这个转换结果：{summary}"]
+        if reason:
+            parts.append(f"原因：{reason}")
+        parts.append("请回复 `approve` 继续发布，或回复 `cancel` 取消。")
+        return "\n\n".join(parts).strip()
+
+    parts = [f"I still can't determine whether to publish this conversion result: {summary}"]
+    if reason:
+        parts.append(f"Reason: {reason}")
+    parts.append("Reply `approve` to publish, or `cancel` to stop.")
+    return "\n\n".join(parts).strip()
+
+
+def build_conversion_pending_action_revision_response(
+    *,
+    pending_action: dict[str, Any],
+    validation: dict[str, Any],
+    preferred_language: str,
+) -> str:
+    metadata = pending_action.get("metadata") if isinstance(pending_action.get("metadata"), dict) else {}
+    staged_package_path = str(metadata.get("staged_package_path", "")).strip()
+    relative_package_path = str(metadata.get("relative_package_path", "")).strip()
+    summary = str(pending_action.get("summary", "")).strip()
+    reason = str(validation.get("reason", "")).strip()
+    package_label = relative_package_path or staged_package_path or summary
+
+    if preferred_language == "zh":
+        parts = [f"这个转换结果已经暂存，尚未发布：{package_label}"]
+        if reason:
+            parts.append(f"原因：{reason}")
+        parts.append("如果可以继续发布，请回复 `approve`；如果要停止，请回复 `cancel`。")
+        return "\n\n".join(parts).strip()
+
+    parts = [f"This conversion result is staged but not published yet: {package_label}"]
+    if reason:
+        parts.append(f"Reason: {reason}")
+    parts.append("Reply `approve` to publish, or `cancel` to stop.")
+    return "\n\n".join(parts).strip()
 
 
 def build_conversion_extractor_prompt(
@@ -719,8 +872,6 @@ def resolve_preferred_language(
         text = stringify_message_content(message.content)
         if not text or text == UPLOAD_ONLY_FALLBACK_TEXT:
             continue
-        if is_approval_intent(text) or is_cancel_intent(text):
-            continue
         return detect_response_language(text)
 
     if session is not None:
@@ -728,21 +879,9 @@ def resolve_preferred_language(
             cleaned = str(text).strip()
             if not cleaned or cleaned == UPLOAD_ONLY_FALLBACK_TEXT:
                 continue
-            if is_approval_intent(cleaned) or is_cancel_intent(cleaned):
-                continue
             return detect_response_language(cleaned)
 
     latest_text = get_latest_user_text(state)
     if latest_text:
         return detect_response_language(latest_text)
     return "en"
-
-
-def is_approval_intent(text: str) -> bool:
-    normalized = text.strip().lower()
-    return bool(normalized) and any(re.match(pattern, normalized) for pattern in APPROVAL_PATTERNS)
-
-
-def is_cancel_intent(text: str) -> bool:
-    normalized = text.strip().lower()
-    return bool(normalized) and any(re.match(pattern, normalized) for pattern in CANCEL_PATTERNS)

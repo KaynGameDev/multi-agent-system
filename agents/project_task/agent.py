@@ -7,11 +7,14 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from app.language import detect_response_language
-from app.pending_interactions import (
-    PendingInteractionOption,
-    build_selection_interaction,
-    get_pending_interaction,
-    match_pending_interaction_reply,
+from app.pending_actions import (
+    PendingActionSelectionOption,
+    build_pending_action,
+    get_pending_action,
+    get_pending_action_metadata,
+    is_pending_action_active,
+    resolve_pending_action_reply,
+    update_pending_action,
 )
 from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
 from app.skills import SkillRegistry
@@ -56,9 +59,9 @@ class ProjectTaskAgentNode:
         result: dict[str, Any] = {"messages": [response]}
         latest_payload = get_latest_task_tool_payload(state)
         if latest_payload is not None:
-            interaction = build_task_pending_interaction(latest_payload)
-            if interaction is not None:
-                result["pending_interaction"] = interaction
+            pending_action = build_task_pending_action(state, latest_payload)
+            if pending_action is not None:
+                result["pending_action"] = pending_action
         return result
 
 
@@ -157,11 +160,11 @@ TASK_FIELD_LABELS_ZH = {
 def build_task_list_response(state: AgentState, *, agent_name: str) -> dict[str, Any] | None:
     latest_user_text = get_latest_user_text(state)
     preferred_language = detect_response_language(latest_user_text)
-    interaction = get_pending_interaction(state)
-    if interaction and interaction.get("owner_agent") == agent_name:
-        follow_up_result = build_task_interaction_response(
-            interaction=interaction,
-            latest_user_text=latest_user_text,
+    pending_action = get_pending_action(state)
+    if pending_action and pending_action.get("requested_by_agent") == agent_name and is_pending_action_active(pending_action):
+        follow_up_result = build_task_pending_action_response(
+            state,
+            pending_action=pending_action,
             preferred_language=preferred_language,
         )
         if follow_up_result is not None:
@@ -214,47 +217,13 @@ def get_task_tool_payload(message) -> dict | None:
     return None
 
 
-def build_task_interaction_response(
-    *,
-    interaction: dict[str, Any],
-    latest_user_text: str,
-    preferred_language: str,
-) -> dict[str, Any] | None:
-    outcome = match_pending_interaction_reply(interaction, latest_user_text)
-    if outcome is None:
-        return None
-
-    if outcome["action"] == "cancel":
-        return {
-            "messages": [AIMessage(content="已取消待处理的任务跟进。" if preferred_language == "zh" else "Cancelled the pending task follow-up.")],
-            "pending_interaction": None,
-        }
-
-    if outcome["action"] != "select":
-        return None
-
-    option = outcome["option"]
-    task = option.get("payload", {}).get("task")
-    if not isinstance(task, dict):
-        return None
-
-    header = str(interaction.get("payload", {}).get("header", "")).strip()
-    rendered = render_task_payload(
-        {"tasks": [task], "filters": {}, "match_count": 1},
-        preferred_language=preferred_language,
-        header_override=header,
-    )
-    if rendered is None:
-        return None
-    return {
-        "messages": [AIMessage(content=rendered)],
-        "pending_interaction": None,
-    }
-
-
-def build_task_pending_interaction(payload: dict) -> dict[str, Any] | None:
+def build_task_pending_action(state: AgentState, payload: dict) -> dict[str, Any] | None:
     tasks = payload.get("tasks") if isinstance(payload.get("tasks"), list) else []
     if not tasks:
+        return None
+
+    thread_id = str(state.get("thread_id", "")).strip()
+    if not thread_id:
         return None
 
     preferred_language = "zh" if any(task_contains_chinese(task) for task in tasks if isinstance(task, dict)) else "en"
@@ -274,13 +243,154 @@ def build_task_pending_interaction(payload: dict) -> dict[str, Any] | None:
         if preferred_language == "zh"
         else "Reply with the task number or exact task title for details, or reply `cancel` to stop."
     )
-    return build_selection_interaction(
-        owner_agent="project_task_agent",
-        source_tool_id=source_tool_id,
-        prompt_context=prompt_context,
-        options=options,
-        payload={"header": header},
+    return build_pending_action(
+        session_id=thread_id,
+        action_type="select_project_task",
+        requested_by_agent="project_task_agent",
+        summary="Select a task to inspect from the project tracker results.",
+        risk_level="low",
+        requires_explicit_approval=False,
+        metadata={
+            "source_tool_id": source_tool_id,
+            "prompt_context": prompt_context,
+            "selection_options": options,
+            "payload": {"header": header},
+        },
     )
+
+
+def build_task_pending_action_response(
+    state: AgentState,
+    *,
+    pending_action: dict[str, Any],
+    preferred_language: str,
+) -> dict[str, Any] | None:
+    latest_user_text = get_latest_user_text(state)
+    resolution = resolve_pending_action_reply(pending_action, latest_user_text)
+    contract = resolution["contract"]
+    validation = resolution["validation"]
+
+    if validation.get("runtime_action") == "cancel":
+        return {
+            "messages": [AIMessage(content="已取消待处理的任务跟进。" if preferred_language == "zh" else "Cancelled the pending task follow-up.")],
+            "pending_action": None,
+        }
+
+    normalized_scope = validation.get("normalized_scope") or {}
+    updated_action = update_pending_action(
+        pending_action,
+        status=str(validation.get("next_status", "ask_clarification")).strip() or "ask_clarification",
+        target_scope=normalized_scope or None,
+        metadata_updates={"last_contract": dict(contract)},
+    )
+
+    if not validation.get("valid"):
+        return {
+            "messages": [
+                AIMessage(
+                    content=build_task_clarification_text(
+                        pending_action=updated_action,
+                        validation=validation,
+                        preferred_language=preferred_language,
+                    )
+                )
+            ],
+            "pending_action": updated_action,
+        }
+
+    if validation.get("runtime_action") != "select":
+        return {
+            "messages": [
+                AIMessage(
+                    content=build_task_clarification_text(
+                        pending_action=updated_action,
+                        validation=validation,
+                        preferred_language=preferred_language,
+                    )
+                )
+            ],
+            "pending_action": updated_action,
+        }
+
+    selected_option = validation.get("selected_option") if isinstance(validation.get("selected_option"), dict) else None
+    if selected_option is None:
+        return {
+            "messages": [
+                AIMessage(
+                    content=build_task_clarification_text(
+                        pending_action=updated_action,
+                        validation=validation,
+                        preferred_language=preferred_language,
+                    )
+                )
+            ],
+            "pending_action": updated_action,
+        }
+
+    task = selected_option.get("payload", {}).get("task")
+    if not isinstance(task, dict):
+        return {
+            "messages": [
+                AIMessage(
+                    content=build_task_clarification_text(
+                        pending_action=updated_action,
+                        validation=validation,
+                        preferred_language=preferred_language,
+                    )
+                )
+            ],
+            "pending_action": updated_action,
+        }
+
+    metadata = get_pending_action_metadata(pending_action)
+    header = str(metadata.get("payload", {}).get("header", "")).strip() if isinstance(metadata.get("payload"), dict) else ""
+    rendered = render_task_payload(
+        {"tasks": [task], "filters": {}, "match_count": 1},
+        preferred_language=preferred_language,
+        header_override=header,
+    )
+    if rendered is None:
+        return {
+            "messages": [
+                AIMessage(
+                    content=build_task_clarification_text(
+                        pending_action=updated_action,
+                        validation=validation,
+                        preferred_language=preferred_language,
+                    )
+                )
+            ],
+            "pending_action": updated_action,
+        }
+    return {
+        "messages": [AIMessage(content=rendered)],
+        "pending_action": None,
+    }
+
+
+def build_task_clarification_text(
+    *,
+    pending_action: dict[str, Any],
+    validation: dict[str, Any],
+    preferred_language: str,
+) -> str:
+    summary = str(pending_action.get("summary", "")).strip()
+    reason = str(validation.get("reason", "")).strip()
+    prompt_context = str(get_pending_action_metadata(pending_action).get("prompt_context", "")).strip()
+    if preferred_language == "zh":
+        parts = [f"我还不能确定下一步：{summary}"]
+        if reason:
+            parts.append(f"原因：{reason}")
+        if prompt_context:
+            parts.append(prompt_context)
+        return "\n\n".join(parts).strip()
+
+    parts = [f"I still can't determine the next step: {summary}"]
+    if reason:
+        parts.append(f"Reason: {reason}")
+    if prompt_context:
+        parts.append(prompt_context)
+    return "\n\n".join(parts).strip()
 
 
 def build_task_list_header(payload: dict, *, preferred_language: str = "en") -> str:
@@ -369,7 +479,7 @@ def format_task_block(index: int, task: dict, *, preferred_language: str = "en")
     return lines
 
 
-def build_task_option(task: dict[str, Any], *, index: int, include_referential_aliases: bool) -> PendingInteractionOption:
+def build_task_option(task: dict[str, Any], *, index: int, include_referential_aliases: bool) -> PendingActionSelectionOption:
     title = first_non_empty(task.get("content"), "Untitled task")
     aliases = [str(index), title]
     project = first_non_empty(task.get("project"))
@@ -377,7 +487,7 @@ def build_task_option(task: dict[str, Any], *, index: int, include_referential_a
         aliases.append(f"{project} {title}")
     if include_referential_aliases:
         aliases.extend(["that one", "this one", "details", "detail", "那个", "这个", "详情"])
-    return PendingInteractionOption(
+    return PendingActionSelectionOption(
         label=title,
         aliases=list(dict.fromkeys(alias for alias in aliases if alias)),
         value=title,

@@ -11,7 +11,6 @@ from langchain_core.messages import ToolMessage
 from app.agent_registry import AgentRegistration
 from app.messages import extract_latest_human_text
 from app.pending_actions import get_pending_action, is_pending_action_active
-from app.pending_interactions import get_pending_interaction, is_pending_interaction_active
 from app.skills import SkillDefinition, SkillRegistry, normalize_skill_id
 from app.state import AgentState
 from app.tool_registry import ToolMetadata, get_tool_metadata
@@ -418,19 +417,6 @@ class GatewayNode:
             warnings.append(
                 f"Pending action owner `{owner_agent}` is not active; falling back to gateway policy."
             )
-
-        pending_interaction = get_pending_interaction(state)
-        if is_pending_interaction_active(pending_interaction):
-            owner_agent = self._normalize_agent_name(str(pending_interaction.get("owner_agent", "")).strip())
-            if owner_agent in self.registrations_by_name:
-                diagnostics.append(
-                    {
-                        "kind": "pending_interaction",
-                        "selected_agent": owner_agent,
-                        "reason": f"Active pending interaction is owned by `{owner_agent}`.",
-                    }
-                )
-                return owner_agent, diagnostics, warnings
 
         tool_intent_selection = select_agent_from_tool_intent(self.agent_registrations, state, latest_user_text)
         if tool_intent_selection is not None:
