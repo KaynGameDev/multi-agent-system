@@ -6,6 +6,14 @@ from typing import Any
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from agents.knowledge.rendering import first_non_empty, is_search_payload
+from app.contracts import (
+    AssistantResponse,
+    build_assistant_response,
+    build_tool_invocation_envelope,
+    normalize_tool_invocation_envelope,
+    normalize_tool_result_envelope,
+    tool_invocation_to_tool_call,
+)
 from app.language import detect_response_language
 from app.pending_actions import (
     PendingActionSelectionOption,
@@ -18,6 +26,7 @@ from app.pending_actions import (
     update_pending_action,
 )
 from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
+from app.skill_runtime import build_skill_prompt_context
 from app.skills import SkillRegistry
 from app.tool_registry import (
     TOOL_KNOWLEDGE_LIST_DOCUMENTS,
@@ -63,9 +72,28 @@ class KnowledgeAgentNode:
             *state["messages"],
         ]
         response = self.llm.invoke(messages)
-        result: dict[str, Any] = {"messages": [response]}
+        assistant_text = stringify_message_content(getattr(response, "content", ""))
+        tool_invocation = None
+        tool_calls = getattr(response, "tool_calls", []) or []
+        if tool_calls and isinstance(tool_calls[0], dict):
+            tool_invocation = normalize_tool_invocation_envelope(
+                tool_calls[0],
+                source="knowledge_agent",
+                reason="The model requested a follow-up knowledge tool call.",
+            )
+        result: dict[str, Any] = {
+            "messages": [response],
+            "assistant_response": build_assistant_response(
+                kind="text" if assistant_text else ("invoke_tool" if tool_invocation else "text"),
+                content=assistant_text,
+                tool_invocation=tool_invocation,
+            ),
+        }
+        if tool_invocation is not None:
+            result["tool_invocation"] = tool_invocation
         latest_payload = get_latest_tool_payload(state)
         if latest_payload is not None:
+            result["tool_result"] = normalize_tool_result_envelope(latest_payload, tool_name="knowledge_documents")
             pending_action = build_knowledge_pending_action(state, latest_payload)
             if pending_action is not None:
                 result["pending_action"] = pending_action
@@ -83,14 +111,10 @@ def build_knowledge_prompt(
         PROMPT_PATH,
         required_sections=("role", "responsibilities", "tool_usage", "boundaries", "output"),
     )
-    skill_prompt = (
-        skill_registry.build_prompt_layers(
-            state.get("resolved_skill_ids", []),
-            agent_name=agent_name,
-            context_paths=state.get("context_paths", []),
-        )
-        if skill_registry is not None and agent_name
-        else ""
+    skill_prompt = build_skill_prompt_context(
+        state,
+        skill_registry=skill_registry,
+        agent_name=agent_name,
     )
     tool_prompt = build_agent_tool_prompt(tool_ids)
     return join_prompt_layers(
@@ -159,9 +183,11 @@ def get_tool_payload(message) -> dict | None:
         return None
     if not isinstance(payload, dict):
         return None
-    if not is_knowledge_payload(payload):
+    envelope = normalize_tool_result_envelope(payload, tool_name="knowledge_documents")
+    inner_payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
+    if not is_knowledge_payload(inner_payload):
         return None
-    return payload
+    return inner_payload
 
 
 def is_list_like_payload(payload: dict) -> bool:
@@ -199,9 +225,17 @@ def render_knowledge_update(state: AgentState, payload: dict, *, preferred_langu
     content = rendered
     if prompt_context:
         content = f"{rendered}\n\n{prompt_context}"
+    tool_result = normalize_tool_result_envelope(payload, tool_name="knowledge_documents")
     result: dict[str, Any] = {
         "messages": [AIMessage(content=content)],
         "pending_action": pending_action,
+        "tool_result": tool_result,
+        "assistant_response": build_assistant_response(
+            kind="text",
+            content=content,
+            pending_action=pending_action,
+            tool_result=tool_result,
+        ),
     }
     return result
 
@@ -286,13 +320,20 @@ def build_knowledge_pending_action_response(
     if selection_phase == "render_after_tool_result":
         latest_payload = get_latest_tool_payload(state)
         if latest_payload is None:
+            content = translate_knowledge_text("I couldn't find the latest document payload to reopen.", preferred_language)
+            reopened_action = update_pending_action(
+                pending_action,
+                status="ask_clarification",
+                metadata_updates={"selection_phase": "ask_clarification"},
+            )
             return {
-                "messages": [AIMessage(content=translate_knowledge_text("I couldn't find the latest document payload to reopen.", preferred_language))],
-                "pending_action": update_pending_action(
-                    pending_action,
-                    status="ask_clarification",
-                    metadata_updates={"selection_phase": "ask_clarification"},
+                "messages": [AIMessage(content=content)],
+                "assistant_response": build_assistant_response(
+                    kind="text",
+                    content=content,
+                    pending_action=reopened_action,
                 ),
+                "pending_action": reopened_action,
             }
         return render_knowledge_update(state, latest_payload, preferred_language=preferred_language)
 
@@ -301,8 +342,10 @@ def build_knowledge_pending_action_response(
     validation = resolution["validation"]
 
     if validation.get("runtime_action") == "cancel":
+        content = translate_knowledge_text("Cancelled the pending document follow-up.", preferred_language)
         return {
-            "messages": [AIMessage(content=translate_knowledge_text("Cancelled the pending document follow-up.", preferred_language))],
+            "messages": [AIMessage(content=content)],
+            "assistant_response": build_assistant_response(kind="text", content=content),
             "pending_action": None,
         }
 
@@ -315,16 +358,18 @@ def build_knowledge_pending_action_response(
     )
 
     if not validation.get("valid"):
+        content = build_knowledge_clarification_text(
+            pending_action=updated_action,
+            validation=validation,
+            preferred_language=preferred_language,
+        )
         return {
-            "messages": [
-                AIMessage(
-                    content=build_knowledge_clarification_text(
-                        pending_action=updated_action,
-                        validation=validation,
-                        preferred_language=preferred_language,
-                    )
-                )
-            ],
+            "messages": [AIMessage(content=content)],
+            "assistant_response": build_assistant_response(
+                kind="await_confirmation",
+                content=content,
+                pending_action=updated_action,
+            ),
             "pending_action": updated_action,
         }
 
@@ -332,16 +377,18 @@ def build_knowledge_pending_action_response(
     if runtime_action == "select":
         selected_option = validation.get("selected_option") if isinstance(validation.get("selected_option"), dict) else None
         if selected_option is None:
+            content = build_knowledge_clarification_text(
+                pending_action=updated_action,
+                validation=validation,
+                preferred_language=preferred_language,
+            )
             return {
-                "messages": [
-                    AIMessage(
-                        content=build_knowledge_clarification_text(
-                            pending_action=updated_action,
-                            validation=validation,
-                            preferred_language=preferred_language,
-                        )
-                    )
-                ],
+                "messages": [AIMessage(content=content)],
+                "assistant_response": build_assistant_response(
+                    kind="await_confirmation",
+                    content=content,
+                    pending_action=updated_action,
+                ),
                 "pending_action": updated_action,
             }
 
@@ -349,45 +396,61 @@ def build_knowledge_pending_action_response(
         if source_tool_id == TOOL_KNOWLEDGE_READ_DOCUMENT:
             payload = get_latest_knowledge_payload(state)
             if payload is None:
+                content = translate_knowledge_text("I couldn't find the latest document payload to reopen.", preferred_language)
+                reopened_action = update_pending_action(
+                    updated_action,
+                    status="ask_clarification",
+                    metadata_updates={"selection_phase": "ask_clarification"},
+                )
                 return {
-                    "messages": [AIMessage(content=translate_knowledge_text("I couldn't find the latest document payload to reopen.", preferred_language))],
-                    "pending_action": update_pending_action(
-                        updated_action,
-                        status="ask_clarification",
-                        metadata_updates={"selection_phase": "ask_clarification"},
+                    "messages": [AIMessage(content=content)],
+                    "assistant_response": build_assistant_response(
+                        kind="text",
+                        content=content,
+                        pending_action=reopened_action,
                     ),
+                    "pending_action": reopened_action,
                 }
             return render_knowledge_update(state, payload, preferred_language=preferred_language)
 
         document_name = str(selected_option.get("value") or selected_option.get("payload", {}).get("document_name", "")).strip()
         if not document_name:
+            content = build_knowledge_clarification_text(
+                pending_action=updated_action,
+                validation=validation,
+                preferred_language=preferred_language,
+            )
             return {
-                "messages": [
-                    AIMessage(
-                        content=build_knowledge_clarification_text(
-                            pending_action=updated_action,
-                            validation=validation,
-                            preferred_language=preferred_language,
-                        )
-                    )
-                ],
+                "messages": [AIMessage(content=content)],
+                "assistant_response": build_assistant_response(
+                    kind="await_confirmation",
+                    content=content,
+                    pending_action=updated_action,
+                ),
                 "pending_action": updated_action,
             }
 
         tool_call_id = f"call_read_knowledge_follow_up_{len(state.get('messages', []))}"
+        tool_invocation = build_tool_invocation_envelope(
+            "read_knowledge_document",
+            {"document_name": document_name},
+            source="knowledge_agent",
+            reason="The user selected a knowledge document to open.",
+            tool_call_id=tool_call_id,
+        )
         return {
             "messages": [
                 AIMessage(
                     content="",
-                    tool_calls=[
-                        {
-                            "name": "read_knowledge_document",
-                            "args": {"document_name": document_name},
-                            "id": tool_call_id,
-                        }
-                    ],
+                    tool_calls=[tool_invocation_to_tool_call(tool_invocation)],
                 )
             ],
+            "assistant_response": build_assistant_response(
+                kind="invoke_tool",
+                content="",
+                pending_action=updated_action,
+                tool_invocation=tool_invocation,
+            ),
             "pending_action": update_pending_action(
                 updated_action,
                 status="awaiting_confirmation",
@@ -398,18 +461,21 @@ def build_knowledge_pending_action_response(
                     "last_contract": dict(contract),
                 },
             ),
+            "tool_invocation": tool_invocation,
         }
 
+    content = build_knowledge_clarification_text(
+        pending_action=updated_action,
+        validation=validation,
+        preferred_language=preferred_language,
+    )
     return {
-        "messages": [
-            AIMessage(
-                content=build_knowledge_clarification_text(
-                    pending_action=updated_action,
-                    validation=validation,
-                    preferred_language=preferred_language,
-                )
-            )
-        ],
+        "messages": [AIMessage(content=content)],
+        "assistant_response": build_assistant_response(
+            kind="await_confirmation",
+            content=content,
+            pending_action=updated_action,
+        ),
         "pending_action": updated_action,
     }
 

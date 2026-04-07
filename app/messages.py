@@ -2,6 +2,8 @@ from __future__ import annotations
 
 from langchain_core.messages import HumanMessage
 
+from app.contracts import extract_assistant_response_text
+
 
 def stringify_message_content(content) -> str:
     if isinstance(content, str):
@@ -22,6 +24,11 @@ def stringify_message_content(content) -> str:
 
 
 def extract_final_text(final_state: dict) -> str:
+    assistant_response = final_state.get("assistant_response")
+    assistant_text = extract_assistant_response_text(assistant_response)
+    if assistant_text:
+        return assistant_text
+
     messages = final_state.get("messages") or []
     if not messages:
         return "I couldn't generate a response."

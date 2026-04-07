@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import logging
-import re
 import json
+import re
 from dataclasses import dataclass, field
 from typing import Any
 
 from langchain_core.messages import ToolMessage
 
 from app.agent_registry import AgentRegistration
+from app.contracts import build_routing_decision, normalize_tool_result_envelope
 from app.messages import extract_latest_human_text
 from app.pending_actions import get_pending_action, is_pending_action_active
+from app.skill_runtime import build_skill_runtime_state
 from app.skills import SkillDefinition, SkillRegistry, normalize_skill_id
 from app.state import AgentState
 from app.tool_registry import ToolMetadata, get_tool_metadata
@@ -250,6 +252,13 @@ class AgentMatchResult:
     reasons: tuple[str, ...] = field(default_factory=tuple)
 
 
+@dataclass(frozen=True)
+class SelectedSkillRuntime:
+    definition: SkillDefinition
+    source: str
+    reason: str
+
+
 class GatewayNode:
     def __init__(
         self,
@@ -299,16 +308,43 @@ class GatewayNode:
             warnings=warnings,
         )
 
-        resolved_skill_ids, selected_skill_diagnostics, warnings = self._select_skills_for_agent(
+        selected_skills, selected_skill_diagnostics, warnings = self._select_skills_for_agent(
             selected_agent,
             latest_user_text,
             context_paths=context_paths,
             explicit_skill_definitions=tuple(explicit_skill_definitions),
             warnings=warnings,
         )
+        resolved_skill_ids = tuple(item.definition.skill_id for item in selected_skills)
         skill_diagnostics.extend(selected_skill_diagnostics)
+        skill_invocation_contracts = tuple(
+            self.skill_registry.build_skill_invocation_contract_from_definition(
+                item.definition,
+                fallback_skill_id=item.definition.skill_id,
+                target_agent=selected_agent,
+                source=item.source,
+                reason=item.reason,
+                context_paths=context_paths,
+            )
+            for item in selected_skills
+        )
+        skill_runtime_state = build_skill_runtime_state(
+            skill_invocation_contracts,
+            agent_name=selected_agent,
+        )
 
         route_reason = build_route_reason(agent_diagnostics, selected_agent)
+        routing_decision = build_routing_decision(
+            selected_agent,
+            reason=route_reason,
+            warnings=warnings,
+            diagnostics=agent_diagnostics,
+            selected_agent=selected_agent,
+            requested_agent=requested_agent,
+            requested_skill_ids=list(requested_skill_ids),
+            resolved_skill_ids=list(resolved_skill_ids),
+            skill_invocation_contracts=list(skill_invocation_contracts),
+        )
         logger.info(
             "Gateway selected route=%s requested_agent=%s requested_skills=%s resolved_skills=%s warnings=%s",
             selected_agent,
@@ -327,6 +363,10 @@ class GatewayNode:
             "skill_resolution_diagnostics": skill_diagnostics,
             "agent_selection_diagnostics": agent_diagnostics,
             "selection_warnings": warnings,
+            "skill_invocation_contracts": list(skill_invocation_contracts),
+            "active_skill_invocation_contracts": skill_runtime_state["active_skill_invocation_contracts"],
+            "skill_execution_diagnostics": skill_runtime_state["skill_execution_diagnostics"],
+            "routing_decision": routing_decision,
         }
 
     def _select_agent(
@@ -483,9 +523,9 @@ class GatewayNode:
         context_paths: tuple[str, ...],
         explicit_skill_definitions: tuple[SkillDefinition, ...],
         warnings: list[str],
-    ) -> tuple[tuple[str, ...], list[dict[str, Any]], list[str]]:
+    ) -> tuple[tuple[SelectedSkillRuntime, ...], list[dict[str, Any]], list[str]]:
         diagnostics: list[dict[str, Any]] = []
-        resolved_skill_ids: list[str] = []
+        selected_skills: list[SelectedSkillRuntime] = []
         selected_ids: set[str] = set()
 
         for definition in explicit_skill_definitions:
@@ -513,10 +553,16 @@ class GatewayNode:
                 continue
             if definition.skill_id in selected_ids:
                 continue
-            resolved_skill_ids.append(definition.skill_id)
+            selected_skills.append(
+                SelectedSkillRuntime(
+                    definition=definition,
+                    source="gateway.explicit_skill_request",
+                    reason=f"Explicit skill `{definition.skill_id}` was requested and applies to `{agent_name}`.",
+                )
+            )
             selected_ids.add(definition.skill_id)
 
-        scored_auto_matches: list[tuple[int, SkillDefinition, dict[str, Any]]] = []
+        scored_auto_matches: list[tuple[int, SkillDefinition, str]] = []
         for skill_id in self.skill_registry.list_skill_ids():
             resolution = self.skill_registry.resolve_skill(skill_id, context_paths=context_paths)
             diagnostics.extend(resolution.diagnostics)
@@ -553,16 +599,22 @@ class GatewayNode:
             )
             if score <= 0:
                 continue
-            scored_auto_matches.append((score, definition, {"reason": reason}))
+            scored_auto_matches.append((score, definition, reason))
 
-        for _, definition, _metadata in sorted(
+        for _, definition, reason in sorted(
             scored_auto_matches,
             key=lambda item: (-item[0], item[1].skill_id),
         )[:3]:
-            resolved_skill_ids.append(definition.skill_id)
+            selected_skills.append(
+                SelectedSkillRuntime(
+                    definition=definition,
+                    source="gateway.auto_skill_match",
+                    reason=reason,
+                )
+            )
             selected_ids.add(definition.skill_id)
 
-        return tuple(resolved_skill_ids), diagnostics, warnings
+        return tuple(selected_skills), diagnostics, warnings
 
     def _resolve_general_assistant_name(self) -> str:
         for registration in self.agent_registrations:
@@ -779,11 +831,15 @@ def get_latest_knowledge_mutation_payload(state: dict[str, Any]) -> dict[str, An
         if not isinstance(content, str):
             continue
         try:
-            payload = json.loads(content)
-        except json.JSONDecodeError:
+            payload = normalize_tool_result_envelope(
+                json.loads(content),
+                tool_name="knowledge_base",
+            )
+        except Exception:
             continue
-        if isinstance(payload, dict) and str(payload.get("knowledge_mutation", "")).strip():
-            return payload
+        inner_payload = payload.get("payload") if isinstance(payload, dict) else None
+        if isinstance(inner_payload, dict) and str(inner_payload.get("knowledge_mutation", "")).strip():
+            return inner_payload
     return None
 
 

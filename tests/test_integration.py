@@ -27,9 +27,19 @@ class LoopAgentNode:
     def __call__(self, state):
         latest_message = state["messages"][-1]
         if isinstance(latest_message, ToolMessage):
+            active_skill_ids = [
+                str(item.get("skill_id", "")).strip()
+                for item in state.get("active_skill_invocation_contracts", [])
+                if isinstance(item, dict)
+            ]
             return {
                 "messages": [
-                    AIMessage(content=f"Resolved skills: {', '.join(state.get('resolved_skill_ids', []))}")
+                    AIMessage(
+                        content=(
+                            f"Resolved skills: {', '.join(state.get('resolved_skill_ids', []))}; "
+                            f"active contracts: {', '.join(active_skill_ids)}"
+                        )
+                    )
                 ]
             }
         return {
@@ -120,6 +130,9 @@ class DeterministicIntegrationTests(unittest.TestCase):
 
         self.assertEqual(final_state["route"], "alpha_agent")
         self.assertEqual(final_state["resolved_skill_ids"], ["loop-skill"])
+        self.assertEqual(final_state["skill_invocation_contracts"][0]["skill_id"], "loop-skill")
+        self.assertEqual(final_state["active_skill_invocation_contracts"][0]["target_agent"], "alpha_agent")
+        self.assertEqual(final_state["skill_execution_diagnostics"][0]["executed_by_agent"], "alpha_agent")
         self.assertIn("loop-skill", getattr(final_state["messages"][-1], "content", ""))
 
     def test_web_api_returns_diagnostics_and_transport_does_not_force_route(self) -> None:

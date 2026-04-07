@@ -74,6 +74,10 @@ class GatewayTests(unittest.TestCase):
 
         self.assertEqual(result["route"], "beta_agent")
         self.assertEqual(result["resolved_skill_ids"], ["route-beta"])
+        self.assertEqual(result["skill_invocation_contracts"][0]["mode"], "fork")
+        self.assertEqual(result["skill_invocation_contracts"][0]["target_agent"], "beta_agent")
+        self.assertEqual(result["active_skill_invocation_contracts"][0]["skill_id"], "route-beta")
+        self.assertEqual(result["skill_execution_diagnostics"][0]["executed_by_agent"], "beta_agent")
 
     def test_forked_skill_without_delegate_agent_falls_back_to_general_assistant(self) -> None:
         write_skill(

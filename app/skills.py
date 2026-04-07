@@ -8,8 +8,12 @@ from pathlib import Path
 from typing import Any
 
 from app.agent_registry import AgentRegistration
+from app.contracts import (
+    SkillInvocationContract,
+    build_skill_invocation_contract as build_runtime_skill_invocation_contract,
+    normalize_skill_invocation_mode,
+)
 from app.paths import PROJECT_ROOT, resolve_project_path
-from app.prompt_loader import join_prompt_layers
 
 logger = logging.getLogger(__name__)
 
@@ -186,31 +190,89 @@ class SkillRegistry:
     def list_skill_ids(self) -> tuple[str, ...]:
         return tuple(sorted(self._definitions_by_id))
 
-    def build_prompt_layers(
+    def build_skill_invocation_contract(
+        self,
+        skill_id: str,
+        *,
+        target_agent: str,
+        source: str = "",
+        reason: str = "",
+        arguments: dict[str, Any] | None = None,
+        context_paths: list[str] | tuple[str, ...] | None = None,
+    ) -> SkillInvocationContract:
+        resolution = self.resolve_skill(skill_id, context_paths=context_paths)
+        effective_definition = resolution.effective_definition
+        return self.build_skill_invocation_contract_from_definition(
+            effective_definition,
+            fallback_skill_id=resolution.skill_id or normalize_skill_id(skill_id),
+            target_agent=target_agent,
+            source=source,
+            reason=reason,
+            arguments=arguments,
+            context_paths=context_paths,
+            diagnostics=resolution.diagnostics,
+        )
+
+    def build_skill_invocation_contract_from_definition(
+        self,
+        definition: SkillDefinition | None,
+        *,
+        fallback_skill_id: str,
+        target_agent: str,
+        source: str = "",
+        reason: str = "",
+        arguments: dict[str, Any] | None = None,
+        context_paths: list[str] | tuple[str, ...] | None = None,
+        diagnostics: list[dict[str, Any]] | tuple[dict[str, Any], ...] | None = None,
+    ) -> SkillInvocationContract:
+        if definition is None:
+            return build_runtime_skill_invocation_contract(
+                skill_id=normalize_skill_id(fallback_skill_id),
+                mode="inline",
+                target_agent=target_agent,
+                arguments=arguments or {},
+                source=source,
+                reason=reason,
+                context_paths=list(context_paths or ()),
+                diagnostics=list(diagnostics or ()),
+            )
+
+        return build_runtime_skill_invocation_contract(
+            skill_id=definition.skill_id,
+            name=definition.name,
+            description=definition.description,
+            source_path=str(definition.source_path),
+            mode=normalize_skill_invocation_mode(definition.execution_mode),
+            target_agent=target_agent,
+            arguments=arguments or {},
+            source=source,
+            reason=reason,
+            context_paths=list(context_paths or ()),
+            available_to_agents=list(definition.available_to_agents),
+            execution_mode=definition.execution_mode,
+            diagnostics=list(diagnostics or ()),
+        )
+
+    def build_skill_invocation_contracts(
         self,
         skill_ids: list[str] | tuple[str, ...],
         *,
-        agent_name: str,
+        target_agent: str,
+        source: str = "",
+        reason: str = "",
         context_paths: list[str] | tuple[str, ...] | None = None,
-    ) -> str:
-        layers: list[str] = []
-        seen_skill_ids: set[str] = set()
-        for raw_skill_id in skill_ids:
-            normalized_id = normalize_skill_id(raw_skill_id)
-            if not normalized_id or normalized_id in seen_skill_ids:
-                continue
-            seen_skill_ids.add(normalized_id)
-            resolution = self.resolve_skill(normalized_id, context_paths=context_paths)
-            definition = resolution.effective_definition
-            if definition is None:
-                continue
-            if agent_name not in definition.available_to_agents:
-                continue
-            body = self.load_skill_body(definition)
-            if not body:
-                continue
-            layers.append(body)
-        return join_prompt_layers(*layers)
+    ) -> tuple[SkillInvocationContract, ...]:
+        return tuple(
+            self.build_skill_invocation_contract(
+                skill_id,
+                target_agent=target_agent,
+                source=source,
+                reason=reason,
+                context_paths=context_paths,
+            )
+            for skill_id in skill_ids
+            if str(skill_id).strip()
+        )
 
     def load_skill_body(self, definition: SkillDefinition) -> str:
         cached = self._body_cache.get(definition.source_path)

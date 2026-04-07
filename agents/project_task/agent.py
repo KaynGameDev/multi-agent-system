@@ -6,6 +6,13 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
+from app.contracts import (
+    AssistantResponse,
+    build_assistant_response,
+    build_tool_invocation_envelope,
+    normalize_tool_result_envelope,
+    tool_invocation_to_tool_call,
+)
 from app.language import detect_response_language
 from app.pending_actions import (
     PendingActionSelectionOption,
@@ -17,6 +24,7 @@ from app.pending_actions import (
     update_pending_action,
 )
 from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
+from app.skill_runtime import build_skill_prompt_context
 from app.skills import SkillRegistry
 from app.state import AgentState
 from app.tool_registry import TOOL_PROJECT_READ_TASKS, TOOL_PROJECT_SHEET_OVERVIEW, build_agent_tool_prompt
@@ -56,9 +64,30 @@ class ProjectTaskAgentNode:
             *state["messages"],
         ]
         response = self.llm.invoke(messages)
-        result: dict[str, Any] = {"messages": [response]}
+        assistant_text = stringify_message_content(getattr(response, "content", ""))
+        tool_invocation = None
+        tool_calls = getattr(response, "tool_calls", []) or []
+        if tool_calls and isinstance(tool_calls[0], dict):
+            tool_invocation = build_tool_invocation_envelope(
+                str(tool_calls[0].get("name", "")).strip(),
+                dict(tool_calls[0].get("args") or {}),
+                tool_call_id=str(tool_calls[0].get("id", "")).strip(),
+                source="project_task_agent",
+                reason="The model requested a follow-up project task tool call.",
+            )
+        result: dict[str, Any] = {
+            "messages": [response],
+            "assistant_response": build_assistant_response(
+                kind="text" if assistant_text else ("invoke_tool" if tool_invocation else "text"),
+                content=assistant_text,
+                tool_invocation=tool_invocation,
+            ),
+        }
+        if tool_invocation is not None:
+            result["tool_invocation"] = tool_invocation
         latest_payload = get_latest_task_tool_payload(state)
         if latest_payload is not None:
+            result["tool_result"] = normalize_tool_result_envelope(latest_payload, tool_name="project_task")
             pending_action = build_task_pending_action(state, latest_payload)
             if pending_action is not None:
                 result["pending_action"] = pending_action
@@ -116,10 +145,10 @@ def build_project_task_prompt(
     lines.append(sections["tool_guidance"])
     if skill_registry is not None and agent_name:
         lines.append(
-            skill_registry.build_prompt_layers(
-                state.get("resolved_skill_ids", []),
+            build_skill_prompt_context(
+                state,
+                skill_registry=skill_registry,
                 agent_name=agent_name,
-                context_paths=state.get("context_paths", []),
             )
         )
     if user_sheet_name:
@@ -213,7 +242,10 @@ def get_task_tool_payload(message) -> dict | None:
     except json.JSONDecodeError:
         return None
     if isinstance(payload, dict) and isinstance(payload.get("tasks"), list):
-        return payload
+        envelope = normalize_tool_result_envelope(payload, tool_name="project_task")
+        inner_payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
+        if isinstance(inner_payload.get("tasks"), list):
+            return inner_payload
     return None
 
 
@@ -271,8 +303,10 @@ def build_task_pending_action_response(
     validation = resolution["validation"]
 
     if validation.get("runtime_action") == "cancel":
+        content = "已取消待处理的任务跟进。" if preferred_language == "zh" else "Cancelled the pending task follow-up."
         return {
-            "messages": [AIMessage(content="已取消待处理的任务跟进。" if preferred_language == "zh" else "Cancelled the pending task follow-up.")],
+            "messages": [AIMessage(content=content)],
+            "assistant_response": build_assistant_response(kind="text", content=content),
             "pending_action": None,
         }
 
@@ -285,60 +319,68 @@ def build_task_pending_action_response(
     )
 
     if not validation.get("valid"):
+        content = build_task_clarification_text(
+            pending_action=updated_action,
+            validation=validation,
+            preferred_language=preferred_language,
+        )
         return {
-            "messages": [
-                AIMessage(
-                    content=build_task_clarification_text(
-                        pending_action=updated_action,
-                        validation=validation,
-                        preferred_language=preferred_language,
-                    )
-                )
-            ],
+            "messages": [AIMessage(content=content)],
+            "assistant_response": build_assistant_response(
+                kind="await_confirmation",
+                content=content,
+                pending_action=updated_action,
+            ),
             "pending_action": updated_action,
         }
 
     if validation.get("runtime_action") != "select":
+        content = build_task_clarification_text(
+            pending_action=updated_action,
+            validation=validation,
+            preferred_language=preferred_language,
+        )
         return {
-            "messages": [
-                AIMessage(
-                    content=build_task_clarification_text(
-                        pending_action=updated_action,
-                        validation=validation,
-                        preferred_language=preferred_language,
-                    )
-                )
-            ],
+            "messages": [AIMessage(content=content)],
+            "assistant_response": build_assistant_response(
+                kind="await_confirmation",
+                content=content,
+                pending_action=updated_action,
+            ),
             "pending_action": updated_action,
         }
 
     selected_option = validation.get("selected_option") if isinstance(validation.get("selected_option"), dict) else None
     if selected_option is None:
+        content = build_task_clarification_text(
+            pending_action=updated_action,
+            validation=validation,
+            preferred_language=preferred_language,
+        )
         return {
-            "messages": [
-                AIMessage(
-                    content=build_task_clarification_text(
-                        pending_action=updated_action,
-                        validation=validation,
-                        preferred_language=preferred_language,
-                    )
-                )
-            ],
+            "messages": [AIMessage(content=content)],
+            "assistant_response": build_assistant_response(
+                kind="await_confirmation",
+                content=content,
+                pending_action=updated_action,
+            ),
             "pending_action": updated_action,
         }
 
     task = selected_option.get("payload", {}).get("task")
     if not isinstance(task, dict):
+        content = build_task_clarification_text(
+            pending_action=updated_action,
+            validation=validation,
+            preferred_language=preferred_language,
+        )
         return {
-            "messages": [
-                AIMessage(
-                    content=build_task_clarification_text(
-                        pending_action=updated_action,
-                        validation=validation,
-                        preferred_language=preferred_language,
-                    )
-                )
-            ],
+            "messages": [AIMessage(content=content)],
+            "assistant_response": build_assistant_response(
+                kind="await_confirmation",
+                content=content,
+                pending_action=updated_action,
+            ),
             "pending_action": updated_action,
         }
 
@@ -350,20 +392,27 @@ def build_task_pending_action_response(
         header_override=header,
     )
     if rendered is None:
+        content = build_task_clarification_text(
+            pending_action=updated_action,
+            validation=validation,
+            preferred_language=preferred_language,
+        )
         return {
-            "messages": [
-                AIMessage(
-                    content=build_task_clarification_text(
-                        pending_action=updated_action,
-                        validation=validation,
-                        preferred_language=preferred_language,
-                    )
-                )
-            ],
+            "messages": [AIMessage(content=content)],
+            "assistant_response": build_assistant_response(
+                kind="await_confirmation",
+                content=content,
+                pending_action=updated_action,
+            ),
             "pending_action": updated_action,
         }
     return {
         "messages": [AIMessage(content=rendered)],
+        "assistant_response": build_assistant_response(
+            kind="text",
+            content=rendered,
+            pending_action=updated_action,
+        ),
         "pending_action": None,
     }
 

@@ -5,18 +5,16 @@ from datetime import datetime, timezone
 from typing import Any
 from uuid import uuid4
 
-from typing_extensions import Literal, TypedDict
-
-PendingActionStatus = Literal[
-    "awaiting_confirmation",
-    "approved",
-    "rejected",
-    "request_revision",
-    "ask_clarification",
-    "expired",
-]
-ExecutionDecision = Literal["approve", "reject", "modify", "select", "unclear"]
-RuntimeAction = Literal["execute", "cancel", "request_revision", "ask_clarification", "select"]
+from app.contracts import (
+    ExecutionContract,
+    ExecutionContractValidation,
+    ExecutionDecision,
+    PendingAction,
+    PendingActionSelectionOption,
+    PendingActionStatus,
+    PendingActionTargetScope,
+    RuntimeAction,
+)
 
 ACTIVE_PENDING_ACTION_STATUSES = {"awaiting_confirmation", "request_revision", "ask_clarification"}
 LEGACY_PENDING_ACTION_STATUS_ALIASES = {
@@ -109,59 +107,6 @@ OUTPUT_KEYWORDS = {
     "详情": "details",
 }
 DEFER_KEYWORDS = {"first", "before", "prior", "先", "先看", "先给"}
-
-
-class PendingActionTargetScope(TypedDict, total=False):
-    files: list[str]
-    modules: list[str]
-    skill_name: str
-
-
-class PendingActionSelectionOption(TypedDict, total=False):
-    label: str
-    aliases: list[str]
-    value: str
-    payload: dict[str, Any]
-
-
-class PendingAction(TypedDict, total=False):
-    id: str
-    session_id: str
-    type: str
-    requested_by_agent: str
-    summary: str
-    target_scope: PendingActionTargetScope
-    risk_level: str
-    requires_explicit_approval: bool
-    created_at: str
-    status: PendingActionStatus
-    metadata: dict[str, Any]
-
-
-class ExecutionContract(TypedDict, total=False):
-    pending_action_id: str
-    session_id: str
-    action_type: str
-    requested_by_agent: str
-    decision: ExecutionDecision
-    summary: str
-    reply_text: str
-    target_scope: PendingActionTargetScope
-    selected_option: PendingActionSelectionOption
-    selected_index: int
-    requested_outputs: list[str]
-    constraints: dict[str, Any]
-    should_execute: bool
-
-
-class ExecutionContractValidation(TypedDict, total=False):
-    valid: bool
-    runtime_action: RuntimeAction
-    next_status: PendingActionStatus
-    reason: str
-    normalized_scope: PendingActionTargetScope
-    selected_option: PendingActionSelectionOption
-    selected_index: int
 
 
 def build_pending_action(

@@ -7,7 +7,15 @@ from langchain_core.messages import AnyMessage
 from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
-from app.pending_actions import ExecutionContract, PendingAction
+from app.contracts import (
+    AssistantResponse,
+    ExecutionContract,
+    PendingAction,
+    RoutingDecision,
+    SkillInvocationContract,
+    ToolInvocationEnvelope,
+    ToolResultEnvelope,
+)
 
 RouteName = str
 
@@ -18,6 +26,13 @@ class AgentState(TypedDict, total=False):
     route_reason: str
     pending_action: PendingAction | None
     execution_contract: ExecutionContract | None
+    assistant_response: AssistantResponse | None
+    routing_decision: RoutingDecision | None
+    skill_invocation_contracts: list[SkillInvocationContract]
+    active_skill_invocation_contracts: list[SkillInvocationContract]
+    skill_execution_diagnostics: list[dict[str, Any]]
+    tool_invocation: ToolInvocationEnvelope | None
+    tool_result: ToolResultEnvelope | None
     interface_name: str
     requested_agent: str
     requested_skill_ids: list[str]

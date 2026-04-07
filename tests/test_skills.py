@@ -142,7 +142,7 @@ class SkillRegistryTests(unittest.TestCase):
             ("knowledge_base_builder_agent",),
         )
 
-    def test_prompt_builder_injects_selected_skill_body(self) -> None:
+    def test_prompt_builder_consumes_runtime_skill_contract_context(self) -> None:
         registrations = (
             build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
         )
@@ -157,19 +157,28 @@ class SkillRegistryTests(unittest.TestCase):
             body="# Greeting Enhancer\n\nAlways greet the user warmly and concisely.",
         )
         registry = SkillRegistry(registrations, project_root=self.root)
+        contract = registry.build_skill_invocation_contract(
+            "greeting-enhancer",
+            target_agent="general_chat_agent",
+            source="gateway.explicit_skill_request",
+            reason="Explicit skill `greeting-enhancer` was requested and applies to `general_chat_agent`.",
+        )
 
         prompt = build_general_chat_prompt(
             {
                 "interface_name": "web",
-                "resolved_skill_ids": ["greeting-enhancer"],
-                "context_paths": [],
+                "skill_invocation_contracts": [contract],
             },
             skill_registry=registry,
             agent_name="general_chat_agent",
         )
 
+        self.assertIn("Active Skill Runtime", prompt)
+        self.assertIn("gateway.explicit_skill_request", prompt)
+        self.assertIn("Execution mode: `inline`", prompt)
         self.assertIn("Greeting Enhancer", prompt)
         self.assertIn("Always greet the user warmly and concisely.", prompt)
+        self.assertIn("Legacy SKILL.md Compatibility Context", prompt)
 
     def test_builder_skill_frontmatter_is_parsed(self) -> None:
         registrations = (
@@ -197,7 +206,7 @@ class SkillRegistryTests(unittest.TestCase):
             ("knowledge_base_builder_agent",),
         )
 
-    def test_builder_prompt_loads_and_injects_skill_layers(self) -> None:
+    def test_builder_prompt_uses_runtime_skill_contracts(self) -> None:
         registrations = (
             build_registration("knowledge_base_builder_agent", namespace="knowledge_base_builder"),
         )
@@ -211,17 +220,24 @@ class SkillRegistryTests(unittest.TestCase):
             body="# Feature Spec 抽取\n\n必须包含决策记录与变更记录。",
         )
         registry = SkillRegistry(registrations, project_root=self.root)
+        contract = registry.build_skill_invocation_contract(
+            "elicit-featurespec",
+            target_agent="knowledge_base_builder_agent",
+            source="gateway.auto_skill_match",
+            reason="Token overlap matched: feature, spec.",
+        )
 
         prompt = build_knowledge_base_builder_prompt(
             {
-                "resolved_skill_ids": ["elicit-featurespec"],
-                "context_paths": [],
+                "skill_invocation_contracts": [contract],
             },
             skill_registry=registry,
             agent_name="knowledge_base_builder_agent",
         )
 
         self.assertIn("知识库构建 Agent", prompt)
+        self.assertIn("Active Skill Runtime", prompt)
+        self.assertIn("gateway.auto_skill_match", prompt)
         self.assertIn("必须包含决策记录与变更记录。", prompt)
         self.assertIn("knowledge/Docs/10_GameLines/", prompt)
         self.assertIn("不要再输出“我没有写文件权限", prompt)

@@ -2,7 +2,9 @@ from __future__ import annotations
 
 from langchain_core.messages import SystemMessage
 
+from app.contracts import build_assistant_response
 from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
+from app.skill_runtime import build_skill_prompt_context
 from app.skills import SkillRegistry
 from app.state import AgentState
 
@@ -27,7 +29,14 @@ class GeneralChatAgentNode:
             *state["messages"],
         ]
         response = self.llm.invoke(messages)
-        return {"messages": [response]}
+        assistant_text = str(getattr(response, "content", "") or "").strip()
+        return {
+            "messages": [response],
+            "assistant_response": build_assistant_response(
+                kind="text" if assistant_text else "invoke_tool",
+                content=assistant_text,
+            ),
+        }
 
 
 def build_general_chat_prompt(
@@ -53,14 +62,10 @@ def build_general_chat_prompt(
         format_prompt = sections["slack_output"]
     elif interface_name == "web":
         format_prompt = sections["web_output"]
-    skill_prompt = (
-        skill_registry.build_prompt_layers(
-            state.get("resolved_skill_ids", []),
-            agent_name=agent_name,
-            context_paths=state.get("context_paths", []),
-        )
-        if skill_registry is not None and agent_name
-        else ""
+    skill_prompt = build_skill_prompt_context(
+        state,
+        skill_registry=skill_registry,
+        agent_name=agent_name,
     )
     return join_prompt_layers(
         load_shared_instruction_text(),

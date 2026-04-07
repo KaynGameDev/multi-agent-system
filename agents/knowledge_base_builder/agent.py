@@ -7,6 +7,14 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
+from app.contracts import (
+    AssistantResponse,
+    build_assistant_response,
+    build_tool_invocation_envelope,
+    normalize_tool_invocation_envelope,
+    normalize_tool_result_envelope,
+    tool_invocation_to_tool_call,
+)
 from app.language import detect_response_language
 from app.pending_actions import (
     build_pending_action,
@@ -16,6 +24,7 @@ from app.pending_actions import (
     update_pending_action,
 )
 from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
+from app.skill_runtime import build_skill_prompt_context
 from app.skills import SkillRegistry
 from app.state import AgentState
 from app.tool_registry import TOOL_KNOWLEDGE_WRITE_MARKDOWN, build_agent_tool_prompt
@@ -65,7 +74,28 @@ class KnowledgeBaseBuilderAgentNode:
             *state["messages"],
         ]
         response = self.llm.invoke(messages)
-        return {"messages": [response]}
+        assistant_text = str(getattr(response, "content", "") or "").strip()
+        tool_invocation = None
+        tool_calls = getattr(response, "tool_calls", []) or []
+        if tool_calls and isinstance(tool_calls[0], dict):
+            tool_invocation = build_tool_invocation_envelope(
+                str(tool_calls[0].get("name", "")).strip(),
+                dict(tool_calls[0].get("args") or {}),
+                tool_call_id=str(tool_calls[0].get("id", "")).strip(),
+                source="knowledge_base_builder_agent",
+                reason="The model requested a follow-up knowledge-base tool call.",
+            )
+        result: dict[str, Any] = {
+            "messages": [response],
+            "assistant_response": build_assistant_response(
+                kind="text" if assistant_text else ("invoke_tool" if tool_invocation else "text"),
+                content=assistant_text,
+                tool_invocation=tool_invocation,
+            ),
+        }
+        if tool_invocation is not None:
+            result["tool_invocation"] = tool_invocation
+        return result
 
 
 def build_knowledge_base_builder_prompt(
@@ -79,14 +109,10 @@ def build_knowledge_base_builder_prompt(
         PROMPT_PATH,
         required_sections=("role", "responsibilities", "tool_usage", "boundaries", "output"),
     )
-    skill_prompt = (
-        skill_registry.build_prompt_layers(
-            state.get("resolved_skill_ids", []),
-            agent_name=agent_name,
-            context_paths=state.get("context_paths", []),
-        )
-        if skill_registry is not None and agent_name
-        else ""
+    skill_prompt = build_skill_prompt_context(
+        state,
+        skill_registry=skill_registry,
+        agent_name=agent_name,
     )
     tool_prompt = build_agent_tool_prompt(tool_ids)
     return join_prompt_layers(
@@ -107,23 +133,32 @@ def build_knowledge_base_builder_response(state: AgentState) -> dict[str, Any] |
         return None
 
     latest_message = messages[-1]
-    payload = get_builder_tool_payload(latest_message)
-    if payload is None:
+    tool_result = get_builder_tool_result(latest_message)
+    if tool_result is None:
         return None
+    payload = tool_result.get("payload") if isinstance(tool_result.get("payload"), dict) else {}
 
-    if payload.get("knowledge_mutation") == "write_markdown":
+    if str(payload.get("knowledge_mutation", "")).strip() == "write_markdown":
         rendered = render_write_knowledge_payload(state, payload)
-        pending_action = build_builder_pending_action(state, latest_message, payload)
+        pending_action = build_builder_pending_action(state, latest_message, tool_result, payload)
+        assistant_kind = "await_confirmation" if payload.get("requires_confirmation") is True else "tool_result"
         return {
             "messages": [AIMessage(content=rendered)],
+            "assistant_response": build_assistant_response(
+                kind=assistant_kind,
+                content=rendered,
+                pending_action=pending_action,
+                tool_result=tool_result,
+            ),
             "pending_action": pending_action,
+            "tool_result": tool_result,
             "execution_contract": None,
         }
 
     return None
 
 
-def get_builder_tool_payload(message) -> dict | None:
+def get_builder_tool_result(message) -> dict[str, Any] | None:
     if not isinstance(message, ToolMessage):
         return None
     content = getattr(message, "content", "")
@@ -135,7 +170,7 @@ def get_builder_tool_payload(message) -> dict | None:
         return None
     if not isinstance(payload, dict):
         return None
-    return payload
+    return normalize_tool_result_envelope(payload, tool_name="write_knowledge_markdown_document")
 
 
 def render_write_knowledge_payload(state: AgentState, payload: dict) -> str:
@@ -178,7 +213,12 @@ def render_write_knowledge_payload(state: AgentState, payload: dict) -> str:
     return "The knowledge-base write did not complete."
 
 
-def build_builder_pending_action(state: AgentState, message, payload: dict) -> dict[str, Any] | None:
+def build_builder_pending_action(
+    state: AgentState,
+    message,
+    tool_result: dict[str, Any],
+    payload: dict,
+) -> dict[str, Any] | None:
     if payload.get("knowledge_mutation") != "write_markdown":
         return None
     if payload.get("requires_confirmation") is not True:
@@ -190,6 +230,12 @@ def build_builder_pending_action(state: AgentState, message, payload: dict) -> d
     if tool_request is None:
         return None
 
+    tool_invocation = normalize_tool_invocation_envelope(
+        tool_request,
+        source="knowledge_base_builder_agent",
+        reason="The pending knowledge-base write requires explicit confirmation.",
+    )
+
     metadata = {
         "source_tool_id": TOOL_KNOWLEDGE_WRITE_MARKDOWN,
         "relative_path": relative_path,
@@ -197,6 +243,9 @@ def build_builder_pending_action(state: AgentState, message, payload: dict) -> d
         "target_exists": target_exists,
         "tool_name": str(tool_request.get("name", "")).strip(),
         "tool_args": dict(tool_request.get("args") or {}),
+        "tool_call_id": str(tool_request.get("id", "")).strip(),
+        "tool_invocation": tool_invocation,
+        "tool_result": dict(tool_result),
     }
     return build_pending_action(
         session_id=str(state.get("thread_id", "")).strip(),
@@ -221,8 +270,15 @@ def build_pending_action_response(state: AgentState, pending_action: dict[str, A
     validation = resolution["validation"]
 
     if validation.get("runtime_action") == "cancel":
+        content = translate_builder_text("Cancelled the pending knowledge-base write.", preferred_language)
         return {
-            "messages": [AIMessage(content=translate_builder_text("Cancelled the pending knowledge-base write.", preferred_language))],
+            "messages": [AIMessage(content=content)],
+            "assistant_response": build_assistant_response(
+                kind="text",
+                content=content,
+                pending_action=None,
+                execution_contract=None,
+            ),
             "pending_action": None,
             "execution_contract": None,
         }
@@ -237,16 +293,18 @@ def build_pending_action_response(state: AgentState, pending_action: dict[str, A
     )
 
     if not validation.get("valid"):
+        content = build_pending_action_clarification(
+            updated_action,
+            validation,
+            preferred_language=preferred_language,
+        )
         return {
-            "messages": [
-                AIMessage(
-                    content=build_pending_action_clarification(
-                        updated_action,
-                        validation,
-                        preferred_language=preferred_language,
-                    )
-                )
-            ],
+            "messages": [AIMessage(content=content)],
+            "assistant_response": build_assistant_response(
+                kind="await_confirmation",
+                content=content,
+                pending_action=updated_action,
+            ),
             "pending_action": updated_action,
             "execution_contract": None,
         }
@@ -254,67 +312,105 @@ def build_pending_action_response(state: AgentState, pending_action: dict[str, A
     runtime_action = validation.get("runtime_action")
 
     if runtime_action == "request_revision":
+        content = build_pending_action_revision_response(
+            updated_action,
+            contract,
+            preferred_language=preferred_language,
+        )
         return {
-            "messages": [
-                AIMessage(
-                    content=build_pending_action_revision_response(
-                        updated_action,
-                        contract,
-                        preferred_language=preferred_language,
-                    )
-                )
-            ],
+            "messages": [AIMessage(content=content)],
+            "assistant_response": build_assistant_response(
+                kind="await_confirmation",
+                content=content,
+                pending_action=updated_action,
+                execution_contract=None,
+            ),
             "pending_action": updated_action,
             "execution_contract": None,
         }
 
     if runtime_action != "execute":
+        content = build_pending_action_clarification(
+            updated_action,
+            validation,
+            preferred_language=preferred_language,
+        )
         return {
-            "messages": [
-                AIMessage(
-                    content=build_pending_action_clarification(
-                        updated_action,
-                        validation,
-                        preferred_language=preferred_language,
-                    )
-                )
-            ],
+            "messages": [AIMessage(content=content)],
+            "assistant_response": build_assistant_response(
+                kind="await_confirmation",
+                content=content,
+                pending_action=updated_action,
+            ),
             "pending_action": updated_action,
             "execution_contract": None,
         }
 
     retry_message = build_builder_retry_tool_call(state, updated_action)
     if retry_message is None:
+        content = translate_builder_text("I could not reconstruct the pending write request to execute it safely.", preferred_language)
         return {
-            "messages": [AIMessage(content=translate_builder_text("I could not reconstruct the pending write request to execute it safely.", preferred_language))],
+            "messages": [AIMessage(content=content)],
+            "assistant_response": build_assistant_response(
+                kind="text",
+                content=content,
+                pending_action=updated_action,
+                execution_contract=None,
+            ),
             "pending_action": updated_action,
             "execution_contract": None,
         }
 
+    tool_invocation = get_builder_tool_invocation(updated_action)
     return {
         "messages": [retry_message],
+        "assistant_response": build_assistant_response(
+            kind="invoke_tool",
+            content="",
+            pending_action=updated_action,
+            execution_contract=contract,
+            tool_invocation=tool_invocation,
+        ),
         "pending_action": updated_action,
         "execution_contract": contract,
+        "tool_invocation": tool_invocation,
     }
 
 
 def build_builder_retry_tool_call(state: AgentState, pending_action: dict[str, Any]) -> AIMessage | None:
+    tool_invocation = get_builder_tool_invocation(pending_action)
+    if tool_invocation is None:
+        return None
+    tool_call = tool_invocation_to_tool_call(tool_invocation)
+    if not tool_call.get("name"):
+        return None
+    tool_call["id"] = str(tool_call.get("id", "")).strip() or f"call_retry_write_{len(state.get('messages', []))}"
+    return AIMessage(
+        content="",
+        tool_calls=[tool_call],
+    )
+
+
+def get_builder_tool_invocation(pending_action: dict[str, Any]) -> dict[str, Any] | None:
     metadata = pending_action.get("metadata") if isinstance(pending_action.get("metadata"), dict) else {}
+    tool_invocation = metadata.get("tool_invocation")
+    if isinstance(tool_invocation, dict):
+        return normalize_tool_invocation_envelope(
+            tool_invocation,
+            source="knowledge_base_builder_agent",
+            reason="The pending knowledge-base write requires explicit confirmation.",
+        )
+
     tool_name = str(metadata.get("tool_name", "")).strip()
     tool_args = metadata.get("tool_args")
     if not tool_name or not isinstance(tool_args, dict):
         return None
-
-    tool_call_id = f"call_retry_write_{len(state.get('messages', []))}"
-    return AIMessage(
-        content="",
-        tool_calls=[
-            {
-                "name": tool_name,
-                "args": dict(tool_args),
-                "id": tool_call_id,
-            }
-        ],
+    return build_tool_invocation_envelope(
+        tool_name,
+        dict(tool_args),
+        source="knowledge_base_builder_agent",
+        reason="The pending knowledge-base write requires explicit confirmation.",
+        tool_call_id=str(metadata.get("tool_call_id", "")).strip(),
     )
 
 

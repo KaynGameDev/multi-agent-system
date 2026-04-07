@@ -9,8 +9,10 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from pydantic import BaseModel, Field
 
 from app.config import DEFAULT_KNOWLEDGE_BASE_DIR, load_settings
+from app.contracts import build_assistant_response
 from app.paths import resolve_project_path
 from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
+from app.skill_runtime import build_skill_prompt_context
 from app.skills import SkillRegistry
 from agents.document_conversion.rendering import (
     build_targeted_questions,
@@ -145,6 +147,9 @@ class DocumentConversionAgentNode:
                 "approval_state": result["session"].approval_state if result["session"] else "",
                 "pending_action": result.get("pending_action"),
                 "execution_contract": result.get("execution_contract"),
+                "assistant_response": result.get("assistant_response"),
+                "tool_invocation": result.get("tool_invocation"),
+                "tool_result": result.get("tool_result"),
             }
             return updates
         except Exception as exc:
@@ -193,12 +198,14 @@ class DocumentConversionAgentNode:
         )
 
         if session is None:
+            content = render_conversion_response(
+                self.llm,
+                response_kind="missing_session",
+                preferred_language=preferred_language,
+            )
             return {
-                "content": render_conversion_response(
-                    self.llm,
-                    response_kind="missing_session",
-                    preferred_language=preferred_language,
-                ),
+                "content": content,
+                "assistant_response": build_assistant_response(kind="text", content=content),
                 "session": None,
             }
         preferred_language = resolve_preferred_language(state, session)
@@ -269,13 +276,15 @@ class DocumentConversionAgentNode:
                 status="needs_info",
                 missing_required_fields=["provenance"],
             )
+            content = render_conversion_response(
+                self.llm,
+                response_kind="download_failure",
+                preferred_language=preferred_language,
+                download_failures=source_access_failures,
+            )
             return {
-                "content": render_conversion_response(
-                    self.llm,
-                    response_kind="download_failure",
-                    preferred_language=preferred_language,
-                    download_failures=source_access_failures,
-                ),
+                "content": content,
+                "assistant_response": build_assistant_response(kind="text", content=content),
                 "session": session,
             }
 
@@ -290,13 +299,15 @@ class DocumentConversionAgentNode:
                 status="needs_info",
                 missing_required_fields=["provenance"],
             )
+            content = render_conversion_response(
+                self.llm,
+                response_kind="unsupported_files",
+                preferred_language=preferred_language,
+                skipped_text=skipped_text,
+            )
             return {
-                "content": render_conversion_response(
-                    self.llm,
-                    response_kind="unsupported_files",
-                    preferred_language=preferred_language,
-                    skipped_text=skipped_text,
-                ),
+                "content": content,
+                "assistant_response": build_assistant_response(kind="await_confirmation", content=content),
                 "session": session,
             }
 
@@ -306,12 +317,14 @@ class DocumentConversionAgentNode:
                 status="needs_info",
                 missing_required_fields=["provenance"],
             )
+            content = render_conversion_response(
+                self.llm,
+                response_kind="missing_source",
+                preferred_language=preferred_language,
+            )
             return {
-                "content": render_conversion_response(
-                    self.llm,
-                    response_kind="missing_source",
-                    preferred_language=preferred_language,
-                ),
+                "content": content,
+                "assistant_response": build_assistant_response(kind="await_confirmation", content=content),
                 "session": session,
             }
 
@@ -368,14 +381,16 @@ class DocumentConversionAgentNode:
                 missing_required_fields=[],
                 approval_state="pending",
             )
+            content = render_conversion_response(
+                self.llm,
+                response_kind="conflict",
+                preferred_language=preferred_language,
+                conflicts=conflicts,
+                skipped_files=skipped,
+            )
             return {
-                "content": render_conversion_response(
-                    self.llm,
-                    response_kind="conflict",
-                    preferred_language=preferred_language,
-                    conflicts=conflicts,
-                    skipped_files=skipped,
-                ),
+                "content": content,
+                "assistant_response": build_assistant_response(kind="await_confirmation", content=content),
                 "session": session,
             }
 
@@ -402,15 +417,17 @@ class DocumentConversionAgentNode:
                 next_status,
                 missing_required_fields,
             )
+            content = render_conversion_response(
+                self.llm,
+                response_kind="needs_info",
+                preferred_language=preferred_language,
+                session=session,
+                questions=questions,
+                skipped_files=skipped,
+            )
             return {
-                "content": render_conversion_response(
-                    self.llm,
-                    response_kind="needs_info",
-                    preferred_language=preferred_language,
-                    session=session,
-                    questions=questions,
-                    skipped_files=skipped,
-                ),
+                "content": content,
+                "assistant_response": build_assistant_response(kind="await_confirmation", content=content),
                 "session": session,
             }
 
@@ -444,18 +461,24 @@ class DocumentConversionAgentNode:
             session=session,
             source_count=len(sources),
         )
+        content = render_conversion_response(
+            self.llm,
+            response_kind="ready_for_approval",
+            preferred_language=preferred_language,
+            session=session,
+            sources=sources,
+            draft_payload=draft_payload,
+            populated_modules=stage_result.populated_modules,
+            missing_optional_modules=stage_result.missing_optional_modules,
+            skipped_files=skipped,
+            download_failures=source_access_failures,
+        )
         return {
-            "content": render_conversion_response(
-                self.llm,
-                response_kind="ready_for_approval",
-                preferred_language=preferred_language,
-                session=session,
-                sources=sources,
-                draft_payload=draft_payload,
-                populated_modules=stage_result.populated_modules,
-                missing_optional_modules=stage_result.missing_optional_modules,
-                skipped_files=skipped,
-                download_failures=source_access_failures,
+            "content": content,
+            "assistant_response": build_assistant_response(
+                kind="await_confirmation",
+                content=content,
+                pending_action=pending_action,
             ),
             "session": session,
             "pending_action": pending_action,
@@ -482,12 +505,14 @@ class DocumentConversionAgentNode:
                 approval_state="cancelled",
                 missing_required_fields=[],
             )
+            content = render_conversion_response(
+                self.llm,
+                response_kind="cancelled",
+                preferred_language=preferred_language,
+            )
             return {
-                "content": render_conversion_response(
-                    self.llm,
-                    response_kind="cancelled",
-                    preferred_language=preferred_language,
-                ),
+                "content": content,
+                "assistant_response": build_assistant_response(kind="text", content=content),
                 "session": session,
                 "pending_action": None,
                 "execution_contract": None,
@@ -503,11 +528,17 @@ class DocumentConversionAgentNode:
         )
 
         if not validation.get("valid"):
+            content = build_conversion_pending_action_clarification(
+                pending_action=updated_action,
+                validation=validation,
+                preferred_language=preferred_language,
+            )
             return {
-                "content": build_conversion_pending_action_clarification(
+                "content": content,
+                "assistant_response": build_assistant_response(
+                    kind="await_confirmation",
+                    content=content,
                     pending_action=updated_action,
-                    validation=validation,
-                    preferred_language=preferred_language,
                 ),
                 "session": session,
                 "pending_action": updated_action,
@@ -516,11 +547,17 @@ class DocumentConversionAgentNode:
 
         runtime_action = str(validation.get("runtime_action", "")).strip()
         if runtime_action == "request_revision":
+            content = build_conversion_pending_action_revision_response(
+                pending_action=updated_action,
+                validation=validation,
+                preferred_language=preferred_language,
+            )
             return {
-                "content": build_conversion_pending_action_revision_response(
+                "content": content,
+                "assistant_response": build_assistant_response(
+                    kind="await_confirmation",
+                    content=content,
                     pending_action=updated_action,
-                    validation=validation,
-                    preferred_language=preferred_language,
                 ),
                 "session": session,
                 "pending_action": updated_action,
@@ -528,11 +565,17 @@ class DocumentConversionAgentNode:
             }
 
         if runtime_action != "execute":
+            content = build_conversion_pending_action_clarification(
+                pending_action=updated_action,
+                validation=validation,
+                preferred_language=preferred_language,
+            )
             return {
-                "content": build_conversion_pending_action_clarification(
+                "content": content,
+                "assistant_response": build_assistant_response(
+                    kind="await_confirmation",
+                    content=content,
                     pending_action=updated_action,
-                    validation=validation,
-                    preferred_language=preferred_language,
                 ),
                 "session": session,
                 "pending_action": updated_action,
@@ -543,12 +586,19 @@ class DocumentConversionAgentNode:
             missing = ", ".join(session.missing_required_fields) or (
                 "草稿尚未暂存" if preferred_language == "zh" else "the draft has not been staged yet"
             )
+            content = render_conversion_response(
+                self.llm,
+                response_kind="not_ready_for_publish",
+                preferred_language=preferred_language,
+                missing=missing,
+            )
             return {
-                "content": render_conversion_response(
-                    self.llm,
-                    response_kind="not_ready_for_publish",
-                    preferred_language=preferred_language,
-                    missing=missing,
+                "content": content,
+                "assistant_response": build_assistant_response(
+                    kind="await_confirmation",
+                    content=content,
+                    pending_action=updated_action,
+                    execution_contract=contract,
                 ),
                 "session": session,
                 "pending_action": updated_action,
@@ -561,13 +611,19 @@ class DocumentConversionAgentNode:
             knowledge_root=self.knowledge_root,
         )
         session = self.store.get_session(session.session_id) or session
+        content = render_conversion_response(
+            self.llm,
+            response_kind="published",
+            preferred_language=preferred_language,
+            relative_package_path=relative_package_path,
+            source_count=len(self.store.list_sources(session.session_id)),
+        )
         return {
-            "content": render_conversion_response(
-                self.llm,
-                response_kind="published",
-                preferred_language=preferred_language,
-                relative_package_path=relative_package_path,
-                source_count=len(self.store.list_sources(session.session_id)),
+            "content": content,
+            "assistant_response": build_assistant_response(
+                kind="execute",
+                content=content,
+                execution_contract=contract,
             ),
             "session": session,
             "pending_action": None,
@@ -770,16 +826,10 @@ def build_conversion_extractor_prompt(
             "extractor_boundaries",
         ),
     )
-    resolved_skill_ids = state.get("resolved_skill_ids", []) if isinstance(state, dict) else []
-    context_paths = state.get("context_paths", []) if isinstance(state, dict) else []
-    skill_prompt = (
-        skill_registry.build_prompt_layers(
-            resolved_skill_ids,
-            agent_name=agent_name,
-            context_paths=context_paths,
-        )
-        if skill_registry is not None and agent_name
-        else ""
+    skill_prompt = build_skill_prompt_context(
+        state,
+        skill_registry=skill_registry,
+        agent_name=agent_name,
     )
     return join_prompt_layers(
         load_shared_instruction_text(),
