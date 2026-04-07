@@ -96,6 +96,11 @@ class DocumentConversionConfirmationTests(unittest.TestCase):
         self.assertEqual(result["session"].approval_state, "approved")
         self.assertIsNone(result["pending_action"])
         self.assertEqual(result["execution_contract"]["decision"], "approve")
+        self.assertEqual(result["tool_invocation"]["tool_name"], "conversion_publish_package")
+        self.assertEqual(result["tool_result"]["tool_name"], "conversion_publish_package")
+        self.assertEqual(result["tool_result"]["tool_id"], "conversion.publish_package")
+        self.assertEqual(result["tool_result"]["execution_backend"], "internal_workflow")
+        self.assertEqual(result["tool_execution_trace"][0]["result"]["tool_name"], "conversion_publish_package")
 
     def test_document_conversion_pending_action_cancels(self) -> None:
         node, session = self._build_node_and_session()

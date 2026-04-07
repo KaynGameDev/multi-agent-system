@@ -1,16 +1,19 @@
 from __future__ import annotations
 
+import json
 import unittest
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import AIMessage, ToolMessage
 
 from app.contracts import (
+    build_routing_decision,
     build_skill_invocation_contract,
     normalize_tool_result_envelope,
     tool_invocation_to_tool_call,
 )
 from app.messages import extract_final_text
 from app.skill_runtime import build_skill_runtime_state, get_active_skill_invocation_contracts
+from app.tool_runtime import extract_tool_result_from_message
 
 
 class RuntimeContractTests(unittest.TestCase):
@@ -79,6 +82,43 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(tool_call["args"]["document_name"], "SetupGuide")
         self.assertEqual(tool_call["id"], "call_123")
 
+    def test_tool_runtime_adapter_recovers_tool_metadata_from_tool_message(self) -> None:
+        request = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "read_knowledge_document",
+                    "args": {"document_name": "SetupGuide"},
+                    "id": "call_read_setup",
+                }
+            ],
+        )
+        result_message = ToolMessage(
+            content=json.dumps(
+                {
+                    "ok": True,
+                    "document": {"name": "SetupGuide"},
+                    "content": "Setup excerpt",
+                }
+            ),
+            tool_call_id="call_read_setup",
+        )
+
+        envelope = extract_tool_result_from_message(
+            result_message,
+            messages=[request, result_message],
+            source="knowledge_agent",
+            reason="Tool runtime adapter test",
+        )
+
+        self.assertIsNotNone(envelope)
+        assert envelope is not None
+        self.assertEqual(envelope["tool_name"], "read_knowledge_document")
+        self.assertEqual(envelope["tool_id"], "knowledge.read_document")
+        self.assertEqual(envelope["tool_family"], "knowledge_read")
+        self.assertEqual(envelope["arguments"]["document_name"], "SetupGuide")
+        self.assertEqual(envelope["execution_backend"], "langgraph_tool_node")
+
     def test_skill_runtime_state_tracks_active_contracts_for_selected_agent(self) -> None:
         contracts = [
             build_skill_invocation_contract(
@@ -107,6 +147,18 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(active_contracts[0]["skill_id"], "shared-inline")
         self.assertEqual(runtime_state["active_skill_invocation_contracts"][0]["target_agent"], "knowledge_agent")
         self.assertEqual(runtime_state["skill_execution_diagnostics"][0]["mode"], "inline")
+
+    def test_routing_decision_tracks_policy_step(self) -> None:
+        decision = build_routing_decision(
+            "knowledge_base_builder_agent",
+            reason="Tool intent matched the KB writer.",
+            policy_step="tool_intent",
+            warnings=["none"],
+            diagnostics=[{"kind": "selected", "policy_step": "tool_intent"}],
+        )
+
+        self.assertEqual(decision["route"], "knowledge_base_builder_agent")
+        self.assertEqual(decision["policy_step"], "tool_intent")
 
 
 if __name__ == "__main__":

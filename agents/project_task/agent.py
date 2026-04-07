@@ -1,6 +1,4 @@
 from __future__ import annotations
-
-import json
 from datetime import date
 from typing import Any
 
@@ -9,9 +7,6 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from app.contracts import (
     AssistantResponse,
     build_assistant_response,
-    build_tool_invocation_envelope,
-    normalize_tool_result_envelope,
-    tool_invocation_to_tool_call,
 )
 from app.language import detect_response_language
 from app.pending_actions import (
@@ -27,6 +22,11 @@ from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_sha
 from app.skill_runtime import build_skill_prompt_context
 from app.skills import SkillRegistry
 from app.state import AgentState
+from app.tool_runtime import (
+    build_tool_execution_record_for_message,
+    extract_first_tool_invocation,
+    extract_tool_result_from_message,
+)
 from app.tool_registry import TOOL_PROJECT_READ_TASKS, TOOL_PROJECT_SHEET_OVERVIEW, build_agent_tool_prompt
 
 PROMPT_PATH = "agents/project_task/AGENT.md"
@@ -65,16 +65,11 @@ class ProjectTaskAgentNode:
         ]
         response = self.llm.invoke(messages)
         assistant_text = stringify_message_content(getattr(response, "content", ""))
-        tool_invocation = None
-        tool_calls = getattr(response, "tool_calls", []) or []
-        if tool_calls and isinstance(tool_calls[0], dict):
-            tool_invocation = build_tool_invocation_envelope(
-                str(tool_calls[0].get("name", "")).strip(),
-                dict(tool_calls[0].get("args") or {}),
-                tool_call_id=str(tool_calls[0].get("id", "")).strip(),
-                source="project_task_agent",
-                reason="The model requested a follow-up project task tool call.",
-            )
+        tool_invocation = extract_first_tool_invocation(
+            response,
+            source="project_task_agent",
+            reason="The model requested a follow-up project task tool call.",
+        )
         result: dict[str, Any] = {
             "messages": [response],
             "assistant_response": build_assistant_response(
@@ -85,12 +80,24 @@ class ProjectTaskAgentNode:
         }
         if tool_invocation is not None:
             result["tool_invocation"] = tool_invocation
-        latest_payload = get_latest_task_tool_payload(state)
-        if latest_payload is not None:
-            result["tool_result"] = normalize_tool_result_envelope(latest_payload, tool_name="project_task")
-            pending_action = build_task_pending_action(state, latest_payload)
+        latest_tool_result = get_latest_task_tool_result(state)
+        if latest_tool_result is not None:
+            result["tool_result"] = latest_tool_result
+            pending_action = build_task_pending_action(state, latest_tool_result)
             if pending_action is not None:
                 result["pending_action"] = pending_action
+            tool_execution_record = None
+            messages = state.get("messages", [])
+            if messages:
+                tool_execution_record = build_tool_execution_record_for_message(
+                    messages[-1],
+                    messages=messages,
+                    tool_name=str(latest_tool_result.get("tool_name", "")).strip() or "project_task",
+                    source="project_task_agent",
+                    reason="Project task ToolNode returned a result.",
+                )
+            if tool_execution_record is not None:
+                result["tool_execution_trace"] = [tool_execution_record]
         return result
 
 
@@ -224,32 +231,31 @@ def stringify_message_content(content) -> str:
     return " ".join(parts).strip()
 
 
-def get_latest_task_tool_payload(state: AgentState) -> dict | None:
+def get_latest_task_tool_result(state: AgentState) -> dict[str, Any] | None:
     messages = state.get("messages", [])
     if not messages:
         return None
-    return get_task_tool_payload(messages[-1])
+    return get_task_tool_result(messages[-1], messages=messages)
 
 
-def get_task_tool_payload(message) -> dict | None:
-    if not isinstance(message, ToolMessage):
+def get_task_tool_result(message, *, messages: list[Any] | None = None) -> dict[str, Any] | None:
+    result = extract_tool_result_from_message(
+        message,
+        messages=messages,
+        tool_name="project_task",
+        source="project_task_agent",
+        reason="Project task ToolNode returned a result.",
+    )
+    if result is None:
         return None
-    content = getattr(message, "content", "")
-    if not isinstance(content, str):
-        return None
-    try:
-        payload = json.loads(content)
-    except json.JSONDecodeError:
-        return None
-    if isinstance(payload, dict) and isinstance(payload.get("tasks"), list):
-        envelope = normalize_tool_result_envelope(payload, tool_name="project_task")
-        inner_payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
-        if isinstance(inner_payload.get("tasks"), list):
-            return inner_payload
+    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+    if isinstance(payload.get("tasks"), list):
+        return result
     return None
 
 
-def build_task_pending_action(state: AgentState, payload: dict) -> dict[str, Any] | None:
+def build_task_pending_action(state: AgentState, tool_result: dict[str, Any]) -> dict[str, Any] | None:
+    payload = tool_result.get("payload") if isinstance(tool_result.get("payload"), dict) else {}
     tasks = payload.get("tasks") if isinstance(payload.get("tasks"), list) else []
     if not tasks:
         return None
@@ -269,7 +275,7 @@ def build_task_pending_action(state: AgentState, payload: dict) -> dict[str, Any
     if not options:
         return None
 
-    source_tool_id = TOOL_PROJECT_SHEET_OVERVIEW if "total_rows" in payload else TOOL_PROJECT_READ_TASKS
+    source_tool_id = resolve_project_source_tool_id(tool_result, payload)
     prompt_context = (
         "回复任务编号或任务标题可查看详情；回复 `取消` 结束。"
         if preferred_language == "zh"
@@ -289,6 +295,15 @@ def build_task_pending_action(state: AgentState, payload: dict) -> dict[str, Any
             "payload": {"header": header},
         },
     )
+
+
+def resolve_project_source_tool_id(tool_result: dict[str, Any], payload: dict[str, Any]) -> str:
+    tool_id = str(tool_result.get("tool_id", "")).strip()
+    if tool_id:
+        return tool_id
+    if "total_rows" in payload:
+        return TOOL_PROJECT_SHEET_OVERVIEW
+    return TOOL_PROJECT_READ_TASKS
 
 
 def build_task_pending_action_response(

@@ -1,17 +1,12 @@
 from __future__ import annotations
-
-import json
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
 from agents.knowledge.rendering import first_non_empty, is_search_payload
 from app.contracts import (
     AssistantResponse,
     build_assistant_response,
-    build_tool_invocation_envelope,
-    normalize_tool_invocation_envelope,
-    normalize_tool_result_envelope,
     tool_invocation_to_tool_call,
 )
 from app.language import detect_response_language
@@ -28,6 +23,12 @@ from app.pending_actions import (
 from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
 from app.skill_runtime import build_skill_prompt_context
 from app.skills import SkillRegistry
+from app.tool_runtime import (
+    build_runtime_tool_invocation,
+    build_tool_execution_record_for_message,
+    extract_first_tool_invocation,
+    extract_tool_result_from_message,
+)
 from app.tool_registry import (
     TOOL_KNOWLEDGE_LIST_DOCUMENTS,
     TOOL_KNOWLEDGE_READ_DOCUMENT,
@@ -73,14 +74,11 @@ class KnowledgeAgentNode:
         ]
         response = self.llm.invoke(messages)
         assistant_text = stringify_message_content(getattr(response, "content", ""))
-        tool_invocation = None
-        tool_calls = getattr(response, "tool_calls", []) or []
-        if tool_calls and isinstance(tool_calls[0], dict):
-            tool_invocation = normalize_tool_invocation_envelope(
-                tool_calls[0],
-                source="knowledge_agent",
-                reason="The model requested a follow-up knowledge tool call.",
-            )
+        tool_invocation = extract_first_tool_invocation(
+            response,
+            source="knowledge_agent",
+            reason="The model requested a follow-up knowledge tool call.",
+        )
         result: dict[str, Any] = {
             "messages": [response],
             "assistant_response": build_assistant_response(
@@ -91,10 +89,10 @@ class KnowledgeAgentNode:
         }
         if tool_invocation is not None:
             result["tool_invocation"] = tool_invocation
-        latest_payload = get_latest_tool_payload(state)
-        if latest_payload is not None:
-            result["tool_result"] = normalize_tool_result_envelope(latest_payload, tool_name="knowledge_documents")
-            pending_action = build_knowledge_pending_action(state, latest_payload)
+        latest_tool_result = get_latest_tool_result(state)
+        if latest_tool_result is not None:
+            result["tool_result"] = latest_tool_result
+            pending_action = build_knowledge_pending_action(state, latest_tool_result)
             if pending_action is not None:
                 result["pending_action"] = pending_action
         return result
@@ -142,9 +140,9 @@ def build_knowledge_response(state: AgentState, *, agent_name: str) -> dict[str,
         if follow_up_result is not None:
             return follow_up_result
 
-    latest_payload = get_latest_tool_payload(state)
-    if latest_payload is not None:
-        return render_knowledge_update(state, latest_payload, preferred_language=preferred_language)
+    latest_tool_result = get_latest_tool_result(state)
+    if latest_tool_result is not None:
+        return render_knowledge_update(state, latest_tool_result, preferred_language=preferred_language)
     return None
 
 
@@ -171,23 +169,20 @@ def stringify_message_content(content) -> str:
     return " ".join(parts).strip()
 
 
-def get_tool_payload(message) -> dict | None:
-    if not isinstance(message, ToolMessage):
+def get_tool_result(message, *, messages: list[Any] | None = None) -> dict[str, Any] | None:
+    result = extract_tool_result_from_message(
+        message,
+        messages=messages,
+        tool_name="knowledge_documents",
+        source="knowledge_agent",
+        reason="Knowledge ToolNode returned a result.",
+    )
+    if result is None:
         return None
-    content = getattr(message, "content", "")
-    if not isinstance(content, str):
+    payload = result.get("payload") if isinstance(result.get("payload"), dict) else {}
+    if not is_knowledge_payload(payload):
         return None
-    try:
-        payload = json.loads(content)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    envelope = normalize_tool_result_envelope(payload, tool_name="knowledge_documents")
-    inner_payload = envelope.get("payload") if isinstance(envelope.get("payload"), dict) else {}
-    if not is_knowledge_payload(inner_payload):
-        return None
-    return inner_payload
+    return result
 
 
 def is_list_like_payload(payload: dict) -> bool:
@@ -198,34 +193,44 @@ def is_read_like_payload(payload: dict) -> bool:
     return isinstance(payload.get("document"), dict) and "content" in payload
 
 
-def get_latest_tool_payload(state: AgentState) -> dict | None:
+def get_latest_tool_result(state: AgentState) -> dict[str, Any] | None:
     messages = state.get("messages", [])
     if not messages:
         return None
-    return get_tool_payload(messages[-1])
+    return get_tool_result(messages[-1], messages=messages)
 
 
-def get_latest_knowledge_payload(state: AgentState) -> dict | None:
+def get_latest_knowledge_result(state: AgentState) -> dict[str, Any] | None:
     for message in reversed(state.get("messages", [])):
-        payload = get_tool_payload(message)
-        if payload is not None:
-            return payload
+        result = get_tool_result(message, messages=state.get("messages", []))
+        if result is not None:
+            return result
     return None
 
 
-def render_knowledge_update(state: AgentState, payload: dict, *, preferred_language: str) -> dict[str, Any] | None:
+def render_knowledge_update(state: AgentState, tool_result: dict[str, Any], *, preferred_language: str) -> dict[str, Any] | None:
+    payload = tool_result.get("payload") if isinstance(tool_result.get("payload"), dict) else {}
     rendered = render_knowledge_payload(payload, preferred_language=preferred_language)
     if rendered is None:
         return None
 
     prompt_context = ""
-    pending_action = build_knowledge_pending_action(state, payload)
+    pending_action = build_knowledge_pending_action(state, tool_result)
     if pending_action is not None:
         prompt_context = str(get_pending_action_metadata(pending_action).get("prompt_context", "")).strip()
     content = rendered
     if prompt_context:
         content = f"{rendered}\n\n{prompt_context}"
-    tool_result = normalize_tool_result_envelope(payload, tool_name="knowledge_documents")
+    tool_execution_record = None
+    messages = state.get("messages", [])
+    if messages:
+        tool_execution_record = build_tool_execution_record_for_message(
+            messages[-1],
+            messages=messages,
+            tool_name=str(tool_result.get("tool_name", "")).strip() or "knowledge_documents",
+            source="knowledge_agent",
+            reason="Knowledge ToolNode returned a result.",
+        )
     result: dict[str, Any] = {
         "messages": [AIMessage(content=content)],
         "pending_action": pending_action,
@@ -237,10 +242,13 @@ def render_knowledge_update(state: AgentState, payload: dict, *, preferred_langu
             tool_result=tool_result,
         ),
     }
+    if tool_execution_record is not None:
+        result["tool_execution_trace"] = [tool_execution_record]
     return result
 
 
-def build_knowledge_pending_action(state: AgentState, payload: dict) -> dict[str, Any] | None:
+def build_knowledge_pending_action(state: AgentState, tool_result: dict[str, Any]) -> dict[str, Any] | None:
+    payload = tool_result.get("payload") if isinstance(tool_result.get("payload"), dict) else {}
     if payload.get("ok") is False:
         return None
 
@@ -273,7 +281,7 @@ def build_knowledge_pending_action(state: AgentState, payload: dict) -> dict[str
             risk_level="low",
             requires_explicit_approval=False,
             metadata={
-                "source_tool_id": TOOL_KNOWLEDGE_SEARCH_DOCUMENTS if is_search_payload(payload) else TOOL_KNOWLEDGE_LIST_DOCUMENTS,
+                "source_tool_id": resolve_knowledge_source_tool_id(tool_result, payload),
                 "prompt_context": prompt_context,
                 "selection_options": options,
                 "selection_phase": "awaiting_selection",
@@ -299,7 +307,7 @@ def build_knowledge_pending_action(state: AgentState, payload: dict) -> dict[str
             risk_level="low",
             requires_explicit_approval=False,
             metadata={
-                "source_tool_id": TOOL_KNOWLEDGE_READ_DOCUMENT,
+                "source_tool_id": resolve_knowledge_source_tool_id(tool_result, payload),
                 "prompt_context": prompt_context,
                 "selection_options": [option],
                 "selection_phase": "awaiting_selection",
@@ -318,8 +326,8 @@ def build_knowledge_pending_action_response(
     latest_user_text = get_latest_user_text(state)
     selection_phase = get_pending_action_selection_phase(pending_action)
     if selection_phase == "render_after_tool_result":
-        latest_payload = get_latest_tool_payload(state)
-        if latest_payload is None:
+        latest_tool_result = get_latest_tool_result(state)
+        if latest_tool_result is None:
             content = translate_knowledge_text("I couldn't find the latest document payload to reopen.", preferred_language)
             reopened_action = update_pending_action(
                 pending_action,
@@ -335,7 +343,7 @@ def build_knowledge_pending_action_response(
                 ),
                 "pending_action": reopened_action,
             }
-        return render_knowledge_update(state, latest_payload, preferred_language=preferred_language)
+        return render_knowledge_update(state, latest_tool_result, preferred_language=preferred_language)
 
     resolution = resolve_pending_action_reply(pending_action, latest_user_text)
     contract = resolution["contract"]
@@ -394,8 +402,8 @@ def build_knowledge_pending_action_response(
 
         source_tool_id = str(get_pending_action_metadata(pending_action).get("source_tool_id", "")).strip()
         if source_tool_id == TOOL_KNOWLEDGE_READ_DOCUMENT:
-            payload = get_latest_knowledge_payload(state)
-            if payload is None:
+            tool_result = get_latest_knowledge_result(state)
+            if tool_result is None:
                 content = translate_knowledge_text("I couldn't find the latest document payload to reopen.", preferred_language)
                 reopened_action = update_pending_action(
                     updated_action,
@@ -411,7 +419,7 @@ def build_knowledge_pending_action_response(
                     ),
                     "pending_action": reopened_action,
                 }
-            return render_knowledge_update(state, payload, preferred_language=preferred_language)
+            return render_knowledge_update(state, tool_result, preferred_language=preferred_language)
 
         document_name = str(selected_option.get("value") or selected_option.get("payload", {}).get("document_name", "")).strip()
         if not document_name:
@@ -431,7 +439,7 @@ def build_knowledge_pending_action_response(
             }
 
         tool_call_id = f"call_read_knowledge_follow_up_{len(state.get('messages', []))}"
-        tool_invocation = build_tool_invocation_envelope(
+        tool_invocation = build_runtime_tool_invocation(
             "read_knowledge_document",
             {"document_name": document_name},
             source="knowledge_agent",
@@ -478,6 +486,17 @@ def build_knowledge_pending_action_response(
         ),
         "pending_action": updated_action,
     }
+
+
+def resolve_knowledge_source_tool_id(tool_result: dict[str, Any], payload: dict[str, Any]) -> str:
+    tool_id = str(tool_result.get("tool_id", "")).strip()
+    if tool_id:
+        return tool_id
+    if is_read_like_payload(payload):
+        return TOOL_KNOWLEDGE_READ_DOCUMENT
+    if is_search_payload(payload):
+        return TOOL_KNOWLEDGE_SEARCH_DOCUMENTS
+    return TOOL_KNOWLEDGE_LIST_DOCUMENTS
 
 
 def build_document_option(

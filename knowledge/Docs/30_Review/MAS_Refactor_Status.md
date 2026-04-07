@@ -60,3 +60,58 @@ Remains:
 - Gateway routing cleanup.
 - Agent migration and deletion.
 - Docs, tests, and cutoff cleanup.
+
+## Part 4 - Tool Calling Standardization
+
+Removed:
+- More agent-local `ToolMessage` parsing assumptions spread across knowledge, project task, and KB builder.
+- The document-conversion path fully bypassing shared tool invocation/result envelopes for its main internal workflow steps.
+
+Added:
+- Shared tool runtime adapter in `app/tool_runtime.py` for:
+  - normalizing model-emitted tool invocations
+  - reconstructing `ToolNode` results from `ToolMessage` plus prior tool-call context
+  - wrapping internal workflow operations with the same invocation/result envelope model
+- Richer tool envelopes in `app/contracts.py`, including tool metadata, execution backend, and tool execution trace records.
+- Tool metadata entries for internal document-conversion operations in `app/tool_registry.py`.
+- Standardized tool-result consumption in:
+  - `agents/knowledge/agent.py`
+  - `agents/project_task/agent.py`
+  - `agents/knowledge_base_builder/agent.py`
+- Internal tool-envelope wrapping for document conversion ingestion, draft extraction, staging, and publishing in `agents/document_conversion/agent.py`.
+- Runtime tool execution trace state in `app/state.py`.
+- Regression coverage for ToolMessage adaptation and internal publish envelopes in `tests/test_runtime_contracts.py` and `tests/test_document_conversion_confirmation.py`.
+
+Remains:
+- Gateway routing cleanup.
+- Agent migration and deletion.
+- Docs, tests, and cutoff cleanup.
+
+## Part 5 - Gateway Routing Cleanup
+
+Removed:
+- The single-file gateway hotspot carrying normalization, routing precedence, tool-intent parsing, matcher orchestration, and skill-selection helpers all in `gateway/agent.py`.
+- Any remaining live gateway routing dependence on legacy `pending_interaction`.
+
+Added:
+- Focused gateway policy modules:
+  - `gateway/routing_policy.py` for routing-order execution, fallback handling, and policy-step diagnostics
+  - `gateway/skill_policy.py` for explicit skill resolution, skill eligibility, and deterministic auto-skill selection
+  - `gateway/tool_intent.py` for tool-intent metadata detection and routing
+  - `gateway/matchers.py` for agent matcher definitions and matcher execution helpers
+  - `gateway/text_utils.py` for shared normalization and greeting detection
+- Explicit routing policy-step diagnostics via `route_policy_step` state and `routing_decision.policy_step`.
+- Regression coverage in `tests/test_gateway.py` that freezes the audited precedence order across:
+  - requested agent
+  - explicit forked-skill delegates
+  - forked-skill fallback
+  - explicit inline-skill-compatible routing
+  - pending-action owner short-circuit
+  - tool-intent routing
+  - deterministic matcher routing
+  - general fallback
+- Contract support for structured routing policy-step reporting in `app/contracts.py`.
+
+Remains:
+- Agent migration and deletion.
+- Docs, tests, and cutoff cleanup.

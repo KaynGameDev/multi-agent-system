@@ -26,6 +26,7 @@ AssistantResponseKind = Literal[
 ]
 SkillInvocationMode = Literal["inline", "fork"]
 ToolEnvelopeStatus = Literal["requested", "running", "ok", "error", "blocked", "cancelled"]
+ToolExecutionBackend = Literal["langgraph_tool_node", "internal_workflow"]
 
 
 class PendingActionTargetScope(TypedDict, total=False):
@@ -99,6 +100,10 @@ class SkillInvocationContract(TypedDict, total=False):
 
 class ToolInvocationEnvelope(TypedDict, total=False):
     tool_name: str
+    tool_id: str
+    display_name: str
+    tool_family: str
+    execution_backend: ToolExecutionBackend
     arguments: dict[str, Any]
     status: ToolEnvelopeStatus
     payload: dict[str, Any]
@@ -111,6 +116,10 @@ class ToolInvocationEnvelope(TypedDict, total=False):
 
 class ToolResultEnvelope(TypedDict, total=False):
     tool_name: str
+    tool_id: str
+    display_name: str
+    tool_family: str
+    execution_backend: ToolExecutionBackend
     arguments: dict[str, Any]
     status: ToolEnvelopeStatus
     payload: dict[str, Any]
@@ -121,9 +130,15 @@ class ToolResultEnvelope(TypedDict, total=False):
     tool_call_id: str
 
 
+class ToolExecutionRecord(TypedDict, total=False):
+    invocation: ToolInvocationEnvelope
+    result: ToolResultEnvelope
+
+
 class RoutingDecision(TypedDict, total=False):
     route: str
     reason: str
+    policy_step: str
     warnings: list[str]
     diagnostics: list[dict[str, Any]]
     selected_agent: str
@@ -182,6 +197,7 @@ def build_routing_decision(
     route: str,
     *,
     reason: str = "",
+    policy_step: str = "",
     warnings: list[str] | None = None,
     diagnostics: list[dict[str, Any]] | None = None,
     selected_agent: str = "",
@@ -194,6 +210,9 @@ def build_routing_decision(
     cleaned_reason = str(reason or "").strip()
     if cleaned_reason:
         decision["reason"] = cleaned_reason
+    cleaned_policy_step = str(policy_step or "").strip()
+    if cleaned_policy_step:
+        decision["policy_step"] = cleaned_policy_step
     if warnings is not None:
         decision["warnings"] = [str(item) for item in warnings if str(item).strip()]
     if diagnostics is not None:
@@ -268,6 +287,10 @@ def build_tool_invocation_envelope(
     tool_name: str,
     arguments: dict[str, Any] | None = None,
     *,
+    tool_id: str = "",
+    display_name: str = "",
+    tool_family: str = "",
+    execution_backend: str = "",
     status: ToolEnvelopeStatus = "requested",
     payload: dict[str, Any] | None = None,
     error: str = "",
@@ -281,6 +304,18 @@ def build_tool_invocation_envelope(
         "arguments": dict(arguments or {}),
         "status": status,
     }
+    cleaned_tool_id = str(tool_id or "").strip()
+    if cleaned_tool_id:
+        envelope["tool_id"] = cleaned_tool_id
+    cleaned_display_name = str(display_name or "").strip()
+    if cleaned_display_name:
+        envelope["display_name"] = cleaned_display_name
+    cleaned_tool_family = str(tool_family or "").strip()
+    if cleaned_tool_family:
+        envelope["tool_family"] = cleaned_tool_family
+    cleaned_execution_backend = str(execution_backend or "").strip().lower()
+    if cleaned_execution_backend:
+        envelope["execution_backend"] = cleaned_execution_backend  # type: ignore[assignment]
     if payload is not None:
         envelope["payload"] = dict(payload)
     cleaned_error = str(error or "").strip()
@@ -304,6 +339,10 @@ def build_tool_result_envelope(
     tool_name: str,
     arguments: dict[str, Any] | None = None,
     *,
+    tool_id: str = "",
+    display_name: str = "",
+    tool_family: str = "",
+    execution_backend: str = "",
     status: ToolEnvelopeStatus = "ok",
     payload: dict[str, Any] | None = None,
     error: str = "",
@@ -318,6 +357,18 @@ def build_tool_result_envelope(
         "status": status,
         "payload": dict(payload or {}),
     }
+    cleaned_tool_id = str(tool_id or "").strip()
+    if cleaned_tool_id:
+        envelope["tool_id"] = cleaned_tool_id
+    cleaned_display_name = str(display_name or "").strip()
+    if cleaned_display_name:
+        envelope["display_name"] = cleaned_display_name
+    cleaned_tool_family = str(tool_family or "").strip()
+    if cleaned_tool_family:
+        envelope["tool_family"] = cleaned_tool_family
+    cleaned_execution_backend = str(execution_backend or "").strip().lower()
+    if cleaned_execution_backend:
+        envelope["execution_backend"] = cleaned_execution_backend  # type: ignore[assignment]
     cleaned_error = str(error or "").strip()
     if cleaned_error:
         envelope["error"] = cleaned_error
@@ -382,6 +433,7 @@ def normalize_tool_invocation_envelope(
     *,
     tool_name: str = "",
     arguments: dict[str, Any] | None = None,
+    execution_backend: str = "",
     source: str = "",
     reason: str = "",
 ) -> ToolInvocationEnvelope:
@@ -399,6 +451,18 @@ def normalize_tool_invocation_envelope(
             "arguments": dict(envelope.get("arguments") or arguments or {}),
             "status": str(envelope.get("status", "requested")).strip().lower() or "requested",
         }
+        tool_id = str(envelope.get("tool_id", "")).strip()
+        if tool_id:
+            normalized["tool_id"] = tool_id
+        display_name = str(envelope.get("display_name", "")).strip()
+        if display_name:
+            normalized["display_name"] = display_name
+        tool_family = str(envelope.get("tool_family", "")).strip()
+        if tool_family:
+            normalized["tool_family"] = tool_family
+        execution_backend_value = str(envelope.get("execution_backend", execution_backend)).strip().lower()
+        if execution_backend_value:
+            normalized["execution_backend"] = execution_backend_value  # type: ignore[assignment]
         payload = envelope.get("payload")
         if isinstance(payload, dict):
             normalized["payload"] = dict(payload)
@@ -442,6 +506,7 @@ def normalize_tool_invocation_envelope(
     normalized = build_tool_invocation_envelope(
         inferred_tool_name,
         inferred_arguments,
+        execution_backend=execution_backend or str(envelope.get("execution_backend", "")).strip(),
         status=status,  # type: ignore[arg-type]
         payload=dict(envelope),
         error=str(envelope.get("error", "")).strip(),
@@ -458,6 +523,7 @@ def normalize_tool_result_envelope(
     *,
     tool_name: str = "",
     arguments: dict[str, Any] | None = None,
+    execution_backend: str = "",
     source: str = "",
     reason: str = "",
 ) -> ToolResultEnvelope:
@@ -465,6 +531,7 @@ def normalize_tool_result_envelope(
         return build_tool_result_envelope(
             tool_name,
             arguments or {},
+            execution_backend=execution_backend,
             status="error",
             payload={},
             error="Tool result payload was not a dictionary.",
@@ -480,6 +547,18 @@ def normalize_tool_result_envelope(
             "status": str(result.get("status", "ok")).strip().lower() or "ok",
             "payload": dict(payload) if isinstance(payload, dict) else {},
         }
+        tool_id = str(result.get("tool_id", "")).strip()
+        if tool_id:
+            normalized["tool_id"] = tool_id
+        display_name = str(result.get("display_name", "")).strip()
+        if display_name:
+            normalized["display_name"] = display_name
+        tool_family = str(result.get("tool_family", "")).strip()
+        if tool_family:
+            normalized["tool_family"] = tool_family
+        execution_backend_value = str(result.get("execution_backend", execution_backend)).strip().lower()
+        if execution_backend_value:
+            normalized["execution_backend"] = execution_backend_value  # type: ignore[assignment]
         error = str(result.get("error", "")).strip()
         if error:
             normalized["error"] = error
@@ -501,6 +580,7 @@ def normalize_tool_result_envelope(
     return build_tool_result_envelope(
         tool_name or str(result.get("tool_name") or result.get("name") or "").strip(),
         dict(arguments or result.get("arguments") or result.get("args") or {}),
+        execution_backend=execution_backend or str(result.get("execution_backend", "")).strip(),
         status=status,
         payload=dict(result),
         error=str(result.get("error", "")).strip(),
@@ -521,6 +601,19 @@ def tool_invocation_to_tool_call(envelope: ToolInvocationEnvelope | None) -> dic
         "args": dict(normalized.get("arguments") or {}),
         "id": tool_call_id,
     }
+
+
+def build_tool_execution_record(
+    *,
+    invocation: ToolInvocationEnvelope | None = None,
+    result: ToolResultEnvelope | None = None,
+) -> ToolExecutionRecord:
+    record: ToolExecutionRecord = {}
+    if invocation is not None:
+        record["invocation"] = normalize_tool_invocation_envelope(invocation)
+    if result is not None:
+        record["result"] = normalize_tool_result_envelope(result)
+    return record
 
 
 def extract_assistant_response_text(response: Any) -> str:

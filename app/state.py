@@ -13,6 +13,7 @@ from app.contracts import (
     PendingAction,
     RoutingDecision,
     SkillInvocationContract,
+    ToolExecutionRecord,
     ToolInvocationEnvelope,
     ToolResultEnvelope,
 )
@@ -24,6 +25,7 @@ class AgentState(TypedDict, total=False):
     messages: Annotated[list[AnyMessage], add_messages]
     route: RouteName
     route_reason: str
+    route_policy_step: str
     pending_action: PendingAction | None
     execution_contract: ExecutionContract | None
     assistant_response: AssistantResponse | None
@@ -33,6 +35,7 @@ class AgentState(TypedDict, total=False):
     skill_execution_diagnostics: list[dict[str, Any]]
     tool_invocation: ToolInvocationEnvelope | None
     tool_result: ToolResultEnvelope | None
+    tool_execution_trace: list[ToolExecutionRecord]
     interface_name: str
     requested_agent: str
     requested_skill_ids: list[str]

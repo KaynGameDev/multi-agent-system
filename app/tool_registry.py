@@ -25,6 +25,10 @@ TOOL_KNOWLEDGE_RESOLVE_MARKDOWN_PATH = "knowledge.resolve_markdown_path"
 TOOL_KNOWLEDGE_WRITE_MARKDOWN = "knowledge.write_markdown"
 TOOL_PROJECT_READ_TASKS = "project.read_tasks"
 TOOL_PROJECT_SHEET_OVERVIEW = "project.sheet_overview"
+TOOL_CONVERSION_INGEST_SOURCES = "conversion.ingest_sources"
+TOOL_CONVERSION_EXTRACT_DRAFT = "conversion.extract_draft"
+TOOL_CONVERSION_STAGE_PACKAGE = "conversion.stage_package"
+TOOL_CONVERSION_PUBLISH_PACKAGE = "conversion.publish_package"
 
 KNOWLEDGE_TOOL_IDS = (
     TOOL_KNOWLEDGE_LIST_DOCUMENTS,
@@ -239,6 +243,38 @@ _TOOL_REGISTRY = (
             "show me the tracker overview",
             "give me a quick project sheet preview",
         ),
+    ),
+    ToolMetadata(
+        tool_id=TOOL_CONVERSION_INGEST_SOURCES,
+        runtime_tool_name="conversion_ingest_sources",
+        display_name="Conversion Source Ingestion",
+        description="Persist uploaded files and Google document references into the active conversion session.",
+        tool_family="document_conversion_internal",
+        follow_up_hint="status",
+    ),
+    ToolMetadata(
+        tool_id=TOOL_CONVERSION_EXTRACT_DRAFT,
+        runtime_tool_name="conversion_extract_draft",
+        display_name="Conversion Draft Extraction",
+        description="Run the structured extraction step that turns conversion sources into a draft payload.",
+        tool_family="document_conversion_internal",
+        follow_up_hint="status",
+    ),
+    ToolMetadata(
+        tool_id=TOOL_CONVERSION_STAGE_PACKAGE,
+        runtime_tool_name="conversion_stage_package",
+        display_name="Conversion Package Staging",
+        description="Stage a draft conversion package for review before approval-gated publishing.",
+        tool_family="document_conversion_internal",
+        follow_up_hint="confirmation",
+    ),
+    ToolMetadata(
+        tool_id=TOOL_CONVERSION_PUBLISH_PACKAGE,
+        runtime_tool_name="conversion_publish_package",
+        display_name="Conversion Package Publish",
+        description="Publish an approved staged conversion package into the knowledge base.",
+        tool_family="document_conversion_internal",
+        follow_up_hint="confirmation",
     ),
 )
 

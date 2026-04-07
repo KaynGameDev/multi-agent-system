@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import difflib
-import json
 from pathlib import Path
 from typing import Any
 
@@ -10,9 +9,6 @@ from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, Tool
 from app.contracts import (
     AssistantResponse,
     build_assistant_response,
-    build_tool_invocation_envelope,
-    normalize_tool_invocation_envelope,
-    normalize_tool_result_envelope,
     tool_invocation_to_tool_call,
 )
 from app.language import detect_response_language
@@ -27,6 +23,14 @@ from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_sha
 from app.skill_runtime import build_skill_prompt_context
 from app.skills import SkillRegistry
 from app.state import AgentState
+from app.tool_runtime import (
+    build_runtime_tool_invocation,
+    build_tool_execution_record_for_message,
+    extract_first_tool_invocation,
+    extract_tool_result_from_message,
+    find_matching_tool_call_request,
+    normalize_runtime_tool_invocation,
+)
 from app.tool_registry import TOOL_KNOWLEDGE_WRITE_MARKDOWN, build_agent_tool_prompt
 
 PROMPT_PATH = "agents/knowledge_base_builder/AGENT.md"
@@ -75,16 +79,11 @@ class KnowledgeBaseBuilderAgentNode:
         ]
         response = self.llm.invoke(messages)
         assistant_text = str(getattr(response, "content", "") or "").strip()
-        tool_invocation = None
-        tool_calls = getattr(response, "tool_calls", []) or []
-        if tool_calls and isinstance(tool_calls[0], dict):
-            tool_invocation = build_tool_invocation_envelope(
-                str(tool_calls[0].get("name", "")).strip(),
-                dict(tool_calls[0].get("args") or {}),
-                tool_call_id=str(tool_calls[0].get("id", "")).strip(),
-                source="knowledge_base_builder_agent",
-                reason="The model requested a follow-up knowledge-base tool call.",
-            )
+        tool_invocation = extract_first_tool_invocation(
+            response,
+            source="knowledge_base_builder_agent",
+            reason="The model requested a follow-up knowledge-base tool call.",
+        )
         result: dict[str, Any] = {
             "messages": [response],
             "assistant_response": build_assistant_response(
@@ -133,7 +132,7 @@ def build_knowledge_base_builder_response(state: AgentState) -> dict[str, Any] |
         return None
 
     latest_message = messages[-1]
-    tool_result = get_builder_tool_result(latest_message)
+    tool_result = get_builder_tool_result(latest_message, messages=messages)
     if tool_result is None:
         return None
     payload = tool_result.get("payload") if isinstance(tool_result.get("payload"), dict) else {}
@@ -142,7 +141,7 @@ def build_knowledge_base_builder_response(state: AgentState) -> dict[str, Any] |
         rendered = render_write_knowledge_payload(state, payload)
         pending_action = build_builder_pending_action(state, latest_message, tool_result, payload)
         assistant_kind = "await_confirmation" if payload.get("requires_confirmation") is True else "tool_result"
-        return {
+        result: dict[str, Any] = {
             "messages": [AIMessage(content=rendered)],
             "assistant_response": build_assistant_response(
                 kind=assistant_kind,
@@ -154,23 +153,28 @@ def build_knowledge_base_builder_response(state: AgentState) -> dict[str, Any] |
             "tool_result": tool_result,
             "execution_contract": None,
         }
+        tool_execution_record = build_tool_execution_record_for_message(
+            latest_message,
+            messages=messages,
+            tool_name=str(tool_result.get("tool_name", "")).strip() or "write_knowledge_markdown_document",
+            source="knowledge_base_builder_agent",
+            reason="Knowledge-base builder ToolNode returned a result.",
+        )
+        if tool_execution_record is not None:
+            result["tool_execution_trace"] = [tool_execution_record]
+        return result
 
     return None
 
 
-def get_builder_tool_result(message) -> dict[str, Any] | None:
-    if not isinstance(message, ToolMessage):
-        return None
-    content = getattr(message, "content", "")
-    if not isinstance(content, str):
-        return None
-    try:
-        payload = json.loads(content)
-    except json.JSONDecodeError:
-        return None
-    if not isinstance(payload, dict):
-        return None
-    return normalize_tool_result_envelope(payload, tool_name="write_knowledge_markdown_document")
+def get_builder_tool_result(message, *, messages: list[Any] | None = None) -> dict[str, Any] | None:
+    return extract_tool_result_from_message(
+        message,
+        messages=messages,
+        tool_name="write_knowledge_markdown_document",
+        source="knowledge_base_builder_agent",
+        reason="Knowledge-base builder ToolNode returned a result.",
+    )
 
 
 def render_write_knowledge_payload(state: AgentState, payload: dict) -> str:
@@ -226,11 +230,15 @@ def build_builder_pending_action(
 
     relative_path = str(payload.get("relative_path", "")).strip()
     target_exists = payload.get("target_exists") is True
-    tool_request = find_builder_tool_request(state.get("messages", []), getattr(message, "tool_call_id", ""))
+    tool_request = find_matching_tool_call_request(
+        state.get("messages", []),
+        getattr(message, "tool_call_id", ""),
+        tool_name="write_knowledge_markdown_document",
+    )
     if tool_request is None:
         return None
 
-    tool_invocation = normalize_tool_invocation_envelope(
+    tool_invocation = normalize_runtime_tool_invocation(
         tool_request,
         source="knowledge_base_builder_agent",
         reason="The pending knowledge-base write requires explicit confirmation.",
@@ -395,7 +403,7 @@ def get_builder_tool_invocation(pending_action: dict[str, Any]) -> dict[str, Any
     metadata = pending_action.get("metadata") if isinstance(pending_action.get("metadata"), dict) else {}
     tool_invocation = metadata.get("tool_invocation")
     if isinstance(tool_invocation, dict):
-        return normalize_tool_invocation_envelope(
+        return normalize_runtime_tool_invocation(
             tool_invocation,
             source="knowledge_base_builder_agent",
             reason="The pending knowledge-base write requires explicit confirmation.",
@@ -405,7 +413,7 @@ def get_builder_tool_invocation(pending_action: dict[str, Any]) -> dict[str, Any
     tool_args = metadata.get("tool_args")
     if not tool_name or not isinstance(tool_args, dict):
         return None
-    return build_tool_invocation_envelope(
+    return build_runtime_tool_invocation(
         tool_name,
         dict(tool_args),
         source="knowledge_base_builder_agent",
@@ -485,26 +493,6 @@ def render_pending_write_diff(pending_action: dict[str, Any]) -> str:
     )
     rendered = "\n".join(diff_lines) or "(no textual diff available)"
     return f"```diff\n{rendered}\n```"
-
-
-def find_builder_tool_request(messages: list[Any], tool_call_id: str) -> dict[str, Any] | None:
-    normalized_tool_call_id = str(tool_call_id or "").strip()
-    if not normalized_tool_call_id:
-        return None
-
-    for message in reversed(messages):
-        if not isinstance(message, AIMessage):
-            continue
-        for tool_call in getattr(message, "tool_calls", []) or []:
-            if not isinstance(tool_call, dict):
-                continue
-            if str(tool_call.get("id", "")).strip() != normalized_tool_call_id:
-                continue
-            if str(tool_call.get("name", "")).strip() != "write_knowledge_markdown_document":
-                continue
-            return tool_call
-    return None
-
 
 def translate_builder_text(text: str, preferred_language: str) -> str:
     if preferred_language != "zh":

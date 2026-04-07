@@ -9,6 +9,7 @@ from langchain_core.messages import HumanMessage, ToolMessage
 
 from app.graph import build_default_agent_registrations
 from app.skills import SkillRegistry
+from app.tool_registry import KNOWLEDGE_BUILDER_TOOL_IDS
 from gateway.agent import (
     AgentMatchResult,
     GatewayNode,
@@ -105,6 +106,8 @@ class GatewayTests(unittest.TestCase):
         )
 
         self.assertEqual(result["route"], "general_chat_agent")
+        self.assertEqual(result["route_policy_step"], "forked_skill_fallback")
+        self.assertEqual(result["routing_decision"]["policy_step"], "forked_skill_fallback")
 
     def test_missing_general_assistant_uses_first_active_agent_with_warning(self) -> None:
         write_skill(
@@ -133,6 +136,7 @@ class GatewayTests(unittest.TestCase):
 
         self.assertEqual(result["route"], "beta_agent")
         self.assertTrue(any("GeneralAssistant is unavailable" in item for item in result["selection_warnings"]))
+        self.assertEqual(result["route_policy_step"], "forked_skill_fallback")
 
     def test_multi_agent_inline_skill_uses_selection_order_to_break_ties(self) -> None:
         write_skill(
@@ -167,6 +171,207 @@ class GatewayTests(unittest.TestCase):
 
         self.assertEqual(result["route"], "beta_agent")
         self.assertEqual(result["resolved_skill_ids"], ["shared-inline"])
+        self.assertEqual(result["route_policy_step"], "inline_skill_compatibility")
+
+    def test_requested_agent_takes_priority_over_skills_and_pending_action(self) -> None:
+        write_skill(
+            self.root,
+            ".jade/skills/route-alpha",
+            frontmatter={
+                "name": "Route Alpha",
+                "description": "Delegate to alpha.",
+                "execution_mode": "forked",
+                "delegate_agent": "alpha_agent",
+                "available_to_agents": ["beta_agent"],
+            },
+            body="# Route Alpha\n\nDelegate to alpha.",
+        )
+        registrations = (
+            build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
+            build_registration("alpha_agent", namespace="alpha", matcher=keyword_matcher("alpha", 90)),
+            build_registration("beta_agent", namespace="beta", matcher=keyword_matcher("beta", 80)),
+            build_registration("project_task_agent", namespace="project_task", selection_order=10),
+        )
+        orchestrator = self.build_orchestrator(registrations)
+
+        result = orchestrator(
+            {
+                "messages": [HumanMessage(content="alpha please")],
+                "requested_agent": "beta_agent",
+                "requested_skill_ids": ["route-alpha"],
+                "pending_action": {
+                    "id": "pending_select",
+                    "session_id": "thread-1",
+                    "type": "select_project_task",
+                    "requested_by_agent": "project_task_agent",
+                    "summary": "Select a task to inspect.",
+                    "status": "awaiting_confirmation",
+                    "created_at": "2026-04-05T00:00:00Z",
+                },
+            }
+        )
+
+        self.assertEqual(result["route"], "beta_agent")
+        self.assertEqual(result["route_policy_step"], "requested_agent")
+        self.assertEqual(result["routing_decision"]["policy_step"], "requested_agent")
+
+    def test_explicit_forked_skill_delegate_beats_pending_action_owner(self) -> None:
+        write_skill(
+            self.root,
+            ".jade/skills/route-beta",
+            frontmatter={
+                "name": "Route Beta",
+                "description": "Delegate to beta.",
+                "execution_mode": "forked",
+                "delegate_agent": "beta_agent",
+                "available_to_agents": ["alpha_agent"],
+            },
+            body="# Route Beta\n\nDelegate to beta.",
+        )
+        registrations = (
+            build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
+            build_registration("alpha_agent", namespace="alpha", matcher=keyword_matcher("alpha", 90)),
+            build_registration("beta_agent", namespace="beta", matcher=keyword_matcher("beta", 80)),
+            build_registration("project_task_agent", namespace="project_task", selection_order=10),
+        )
+        orchestrator = self.build_orchestrator(registrations)
+
+        result = orchestrator(
+            {
+                "messages": [HumanMessage(content="alpha please")],
+                "requested_skill_ids": ["route-beta"],
+                "pending_action": {
+                    "id": "pending_select",
+                    "session_id": "thread-1",
+                    "type": "select_project_task",
+                    "requested_by_agent": "project_task_agent",
+                    "summary": "Select a task to inspect.",
+                    "status": "awaiting_confirmation",
+                    "created_at": "2026-04-05T00:00:00Z",
+                },
+            }
+        )
+
+        self.assertEqual(result["route"], "beta_agent")
+        self.assertEqual(result["route_policy_step"], "forked_skill_delegate")
+
+    def test_forked_skill_general_fallback_beats_pending_action_owner(self) -> None:
+        write_skill(
+            self.root,
+            ".jade/skills/general-fallback",
+            frontmatter={
+                "name": "General Fallback",
+                "description": "Forked skill without delegate agent.",
+                "execution_mode": "forked",
+                "available_to_agents": ["alpha_agent"],
+            },
+            body="# General Fallback\n\nFallback to general assistant.",
+        )
+        registrations = (
+            build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
+            build_registration("project_task_agent", namespace="project_task", selection_order=10),
+        )
+        orchestrator = self.build_orchestrator(registrations)
+
+        result = orchestrator(
+            {
+                "messages": [HumanMessage(content="continue")],
+                "requested_skill_ids": ["general-fallback"],
+                "pending_action": {
+                    "id": "pending_select",
+                    "session_id": "thread-1",
+                    "type": "select_project_task",
+                    "requested_by_agent": "project_task_agent",
+                    "summary": "Select a task to inspect.",
+                    "status": "awaiting_confirmation",
+                    "created_at": "2026-04-05T00:00:00Z",
+                },
+            }
+        )
+
+        self.assertEqual(result["route"], "general_chat_agent")
+        self.assertEqual(result["route_policy_step"], "forked_skill_fallback")
+
+    def test_inline_skill_compatibility_beats_pending_action_owner(self) -> None:
+        write_skill(
+            self.root,
+            ".jade/skills/shared-inline",
+            frontmatter={
+                "name": "Shared Inline",
+                "description": "Usable by alpha.",
+                "available_to_agents": ["alpha_agent"],
+            },
+            body="# Shared Inline\n\nShared inline behavior.",
+        )
+        registrations = (
+            build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
+            build_registration("alpha_agent", namespace="alpha", selection_order=20),
+            build_registration("project_task_agent", namespace="project_task", selection_order=10),
+        )
+        orchestrator = self.build_orchestrator(registrations)
+
+        result = orchestrator(
+            {
+                "messages": [HumanMessage(content="something unrelated")],
+                "requested_skill_ids": ["shared-inline"],
+                "pending_action": {
+                    "id": "pending_select",
+                    "session_id": "thread-1",
+                    "type": "select_project_task",
+                    "requested_by_agent": "project_task_agent",
+                    "summary": "Select a task to inspect.",
+                    "status": "awaiting_confirmation",
+                    "created_at": "2026-04-05T00:00:00Z",
+                },
+            }
+        )
+
+        self.assertEqual(result["route"], "alpha_agent")
+        self.assertEqual(result["route_policy_step"], "inline_skill_compatibility")
+
+    def test_pending_action_owner_beats_tool_intent_metadata(self) -> None:
+        registrations = build_default_agent_registrations()
+        orchestrator = self.build_orchestrator(registrations)
+
+        result = orchestrator(
+            {
+                "messages": [HumanMessage(content="can you write files?")],
+                "pending_action": {
+                    "id": "pending_select",
+                    "session_id": "thread-1",
+                    "type": "select_project_task",
+                    "requested_by_agent": "project_task_agent",
+                    "summary": "Select a task to inspect.",
+                    "status": "awaiting_confirmation",
+                    "created_at": "2026-04-05T00:00:00Z",
+                },
+            }
+        )
+
+        self.assertEqual(result["route"], "project_task_agent")
+        self.assertEqual(result["route_policy_step"], "pending_action_owner")
+
+    def test_tool_intent_metadata_beats_deterministic_matcher_scores(self) -> None:
+        registrations = (
+            build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
+            build_registration("alpha_agent", namespace="alpha", selection_order=10, matcher=keyword_matcher("alpha", 95)),
+            build_registration(
+                "knowledge_base_builder_agent",
+                namespace="knowledge_base_builder",
+                selection_order=30,
+                tool_ids=KNOWLEDGE_BUILDER_TOOL_IDS,
+            ),
+        )
+        orchestrator = self.build_orchestrator(registrations)
+
+        result = orchestrator(
+            {
+                "messages": [HumanMessage(content="alpha can you write files?")],
+            }
+        )
+
+        self.assertEqual(result["route"], "knowledge_base_builder_agent")
+        self.assertEqual(result["route_policy_step"], "tool_intent")
 
     def test_document_conversion_matcher_routes_deterministically(self) -> None:
         registrations = (
@@ -413,6 +618,7 @@ class GatewayTests(unittest.TestCase):
 
         self.assertEqual(result["route"], "project_task_agent")
         self.assertIn("pending action", result["route_reason"].lower())
+        self.assertEqual(result["route_policy_step"], "pending_action_owner")
 
     def test_legacy_pending_interaction_is_ignored_by_gateway(self) -> None:
         registrations = (
@@ -441,6 +647,7 @@ class GatewayTests(unittest.TestCase):
 
         self.assertEqual(result["route"], "general_chat_agent")
         self.assertNotIn("pending interaction", result["route_reason"].lower())
+        self.assertEqual(result["route_policy_step"], "general_fallback")
 
     def test_pending_action_short_circuits_to_owner_agent(self) -> None:
         registrations = (
@@ -468,6 +675,7 @@ class GatewayTests(unittest.TestCase):
 
         self.assertEqual(result["route"], "knowledge_base_builder_agent")
         self.assertIn("pending action", result["route_reason"].lower())
+        self.assertEqual(result["route_policy_step"], "pending_action_owner")
 
     def test_pending_action_with_missing_owner_records_warning_and_falls_back(self) -> None:
         registrations = (
@@ -494,6 +702,7 @@ class GatewayTests(unittest.TestCase):
 
         self.assertEqual(result["route"], "general_chat_agent")
         self.assertTrue(any("Pending action owner `missing_agent`" in item for item in result["selection_warnings"]))
+        self.assertEqual(result["route_policy_step"], "general_fallback")
 
     def test_no_specialist_match_falls_back_to_general_assistant(self) -> None:
         registrations = (
@@ -506,6 +715,7 @@ class GatewayTests(unittest.TestCase):
 
         self.assertEqual(result["route"], "general_chat_agent")
         self.assertIn("GeneralAssistant fallback", result["route_reason"])
+        self.assertEqual(result["route_policy_step"], "general_fallback")
 
 
 if __name__ == "__main__":
