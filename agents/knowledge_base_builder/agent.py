@@ -4,14 +4,11 @@ import difflib
 from pathlib import Path
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, SystemMessage
 
-from app.contracts import (
-    AssistantResponse,
-    build_assistant_response,
-    tool_invocation_to_tool_call,
-)
+from app.contracts import build_assistant_response
 from app.language import detect_response_language
+from app.messages import extract_latest_human_text
 from app.pending_actions import (
     build_pending_action,
     get_pending_action,
@@ -24,7 +21,7 @@ from app.skill_runtime import build_skill_prompt_context
 from app.skills import SkillRegistry
 from app.state import AgentState
 from app.tool_runtime import (
-    build_runtime_tool_invocation,
+    build_pending_action_retry_tool_call,
     build_tool_execution_record_for_message,
     extract_first_tool_invocation,
     extract_tool_result_from_message,
@@ -180,7 +177,7 @@ def get_builder_tool_result(message, *, messages: list[Any] | None = None) -> di
 def render_write_knowledge_payload(state: AgentState, payload: dict) -> str:
     relative_path = str(payload.get("relative_path", "")).strip()
     error = str(payload.get("error", "")).strip()
-    preferred_language = detect_response_language(get_latest_user_text(state))
+    preferred_language = detect_response_language(extract_latest_human_text(state))
 
     if payload.get("ok") is True:
         if preferred_language == "zh":
@@ -268,7 +265,7 @@ def build_builder_pending_action(
 
 
 def build_pending_action_response(state: AgentState, pending_action: dict[str, Any]) -> dict[str, Any] | None:
-    latest_user_text = get_latest_user_text(state)
+    latest_user_text = extract_latest_human_text(state)
     if not latest_user_text.strip():
         return None
 
@@ -354,8 +351,13 @@ def build_pending_action_response(state: AgentState, pending_action: dict[str, A
             "execution_contract": None,
         }
 
-    retry_message = build_builder_retry_tool_call(state, updated_action)
-    if retry_message is None:
+    retry_payload = build_pending_action_retry_tool_call(
+        updated_action,
+        source="knowledge_base_builder_agent",
+        reason="The pending knowledge-base write requires explicit confirmation.",
+        fallback_tool_call_id=f"call_retry_write_{len(state.get('messages', []))}",
+    )
+    if retry_payload is None:
         content = translate_builder_text("I could not reconstruct the pending write request to execute it safely.", preferred_language)
         return {
             "messages": [AIMessage(content=content)],
@@ -369,7 +371,7 @@ def build_pending_action_response(state: AgentState, pending_action: dict[str, A
             "execution_contract": None,
         }
 
-    tool_invocation = get_builder_tool_invocation(updated_action)
+    retry_message, tool_invocation = retry_payload
     return {
         "messages": [retry_message],
         "assistant_response": build_assistant_response(
@@ -383,43 +385,6 @@ def build_pending_action_response(state: AgentState, pending_action: dict[str, A
         "execution_contract": contract,
         "tool_invocation": tool_invocation,
     }
-
-
-def build_builder_retry_tool_call(state: AgentState, pending_action: dict[str, Any]) -> AIMessage | None:
-    tool_invocation = get_builder_tool_invocation(pending_action)
-    if tool_invocation is None:
-        return None
-    tool_call = tool_invocation_to_tool_call(tool_invocation)
-    if not tool_call.get("name"):
-        return None
-    tool_call["id"] = str(tool_call.get("id", "")).strip() or f"call_retry_write_{len(state.get('messages', []))}"
-    return AIMessage(
-        content="",
-        tool_calls=[tool_call],
-    )
-
-
-def get_builder_tool_invocation(pending_action: dict[str, Any]) -> dict[str, Any] | None:
-    metadata = pending_action.get("metadata") if isinstance(pending_action.get("metadata"), dict) else {}
-    tool_invocation = metadata.get("tool_invocation")
-    if isinstance(tool_invocation, dict):
-        return normalize_runtime_tool_invocation(
-            tool_invocation,
-            source="knowledge_base_builder_agent",
-            reason="The pending knowledge-base write requires explicit confirmation.",
-        )
-
-    tool_name = str(metadata.get("tool_name", "")).strip()
-    tool_args = metadata.get("tool_args")
-    if not tool_name or not isinstance(tool_args, dict):
-        return None
-    return build_runtime_tool_invocation(
-        tool_name,
-        dict(tool_args),
-        source="knowledge_base_builder_agent",
-        reason="The pending knowledge-base write requires explicit confirmation.",
-        tool_call_id=str(metadata.get("tool_call_id", "")).strip(),
-    )
 
 
 def build_pending_action_clarification(
@@ -503,12 +468,3 @@ def translate_builder_text(text: str, preferred_language: str) -> str:
         "I could not reconstruct the pending write request to execute it safely.": "我无法安全地还原这次待执行的知识库写入请求。",
     }
     return translations.get(text, text)
-
-
-def get_latest_user_text(state: AgentState) -> str:
-    messages = state.get("messages", [])
-    for message in reversed(messages):
-        content = getattr(message, "content", "")
-        if isinstance(message, HumanMessage) and isinstance(content, str):
-            return content
-    return ""

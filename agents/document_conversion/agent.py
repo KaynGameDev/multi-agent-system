@@ -10,6 +10,7 @@ from pydantic import BaseModel, Field
 
 from app.config import DEFAULT_KNOWLEDGE_BASE_DIR, load_settings
 from app.contracts import build_assistant_response, build_tool_execution_record
+from app.messages import extract_latest_human_text, stringify_message_content
 from app.paths import resolve_project_path
 from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
 from app.skill_runtime import build_skill_prompt_context
@@ -217,7 +218,7 @@ class DocumentConversionAgentNode:
         channel_id = str(state.get("channel_id", "")).strip()
         user_id = str(state.get("user_id", "")).strip()
         uploaded_files = state.get("uploaded_files")
-        latest_text = get_latest_user_text(state)
+        latest_text = extract_latest_human_text(state)
         google_document_references = extract_google_document_references(latest_text)
         preferred_language = resolve_preferred_language(state)
         session = self._resolve_session(
@@ -570,7 +571,7 @@ class DocumentConversionAgentNode:
         preferred_language: str,
     ) -> dict[str, Any] | None:
         tool_execution_trace: list[dict[str, Any]] = []
-        latest_text = get_latest_user_text(state)
+        latest_text = extract_latest_human_text(state)
         resolution = resolve_pending_action_reply(pending_action, latest_text)
         contract = resolution["contract"]
         validation = resolution["validation"]
@@ -1137,31 +1138,6 @@ def detect_session_conflicts(session: ConversionSessionRecord, draft_payload: di
                 f"{field_name} changed from `{existing_value}` to `{new_value}` within the same conversion session."
             )
     return conflicts
-
-
-def get_latest_user_text(state: AgentState) -> str:
-    for message in reversed(state.get("messages", [])):
-        if isinstance(message, HumanMessage):
-            return stringify_message_content(message.content)
-    return ""
-
-
-def stringify_message_content(content) -> str:
-    if isinstance(content, str):
-        return content.strip()
-    if isinstance(content, list):
-        parts: list[str] = []
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                text = item.get("text") or item.get("content")
-                if isinstance(text, str):
-                    parts.append(text)
-        return " ".join(part.strip() for part in parts if part.strip()).strip()
-    return str(content).strip()
-
-
 def resolve_preferred_language(
     state: AgentState,
     session: ConversionSessionRecord | None = None,
@@ -1181,7 +1157,7 @@ def resolve_preferred_language(
                 continue
             return detect_response_language(cleaned)
 
-    latest_text = get_latest_user_text(state)
+    latest_text = extract_latest_human_text(state)
     if latest_text:
         return detect_response_language(latest_text)
     return "en"

@@ -1,303 +1,404 @@
-Project Name: Jade Games Multi-Agent System (MAS)
+# Jade MAS Architecture
 
-Overview
-We are building a company-level AI Multi-Agent System in Python to power an internal chat assistant. The system is designed using LangGraph and LangChain and integrates with company tools such as Google Sheets to answer operational questions like project tasks, ownership, schedules, and status.
+## Overview
 
-The assistant currently runs as:
-• a Slack bot using Slack Bolt Socket Mode
+Jade is a deterministic multi-agent assistant built on LangGraph. It serves internal company users through Slack and web chat, routes each turn through an explicit gateway policy, and standardizes confirmations, skill execution, tool execution, and final responses through shared runtime contracts.
 
-Primary goals:
-• Provide a scalable multi-agent architecture
-• Integrate company operational data sources (Google Sheets first)
-• Allow the Slack bot to answer questions like:
-  - "What are my tasks?"
-  - "What is Liu Yu working on?"
-  - "Which tasks are due this week?"
-• Maintain a clean separation between data tools, agents, and communication layers
+The supported runtime model is:
 
-Architecture Philosophy
-The architecture intentionally separates responsibilities into layers:
+1. Interfaces collect request context and append messages.
+2. The gateway chooses the worker agent deterministically.
+3. The worker agent either handles a pending action, renders a standardized tool result, or invokes the model.
+4. Tool execution flows through one shared envelope model.
+5. The final user-visible answer is emitted through `assistant_response`.
 
-1. Tools Layer
-Tools access external systems such as Google Sheets.
-Tools should remain:
-• clean
-• reusable
-• presentation-agnostic
-They must not contain Slack formatting or UI logic.
+The runtime no longer relies on legacy waiting models or prompt-only routing semantics.
 
-2. Agent Layer
-Agents reason about tasks and decide when to call tools.
-Agents include:
-• project_task_agent
-• general_chat_agent
-• knowledge_agent
-• knowledge_base_builder_agent
-• document_conversion_agent
+## Core Layers
 
-Agents should be responsible for reasoning but not platform formatting.
+### Interfaces
 
-3. Gateway Layer
-A deterministic gateway decides which worker agent should handle the user request.
+Interfaces are delivery boundaries only.
 
-Routing currently supports:
-• project_task_agent
-• general_chat_agent
-• knowledge_agent
-• knowledge_base_builder_agent
-• document_conversion_agent
+- Slack: `interfaces/slack/listener.py`
+- Web: `interfaces/web/server.py`
 
-The gateway uses policy code instead of LLM classification. It centralizes:
-• deterministic agent selection
-• shared skill precedence
-• fallback routing
-• forked-skill delegation
-• selection diagnostics
+Interface responsibilities:
 
-Defined in:
-gateway/agent.py
+- receive inbound events
+- resolve user and thread metadata
+- append user messages to graph state
+- invoke the graph
+- format the final response for the target channel
 
-4. Graph Layer
-LangGraph orchestrates the workflow.
+Interfaces do not force worker routes. They pass request context to the gateway and return gateway diagnostics to the caller.
+
+### Graph
+
+The orchestration graph is defined in `app/graph.py`.
 
 Current flow:
 
+```text
 START
- → gateway
- → route to worker agent
+  -> gateway
+  -> selected worker agent
+  -> optional ToolNode loop
+  -> END
+```
 
-General chat route:
-gateway → general_chat_agent → END
+Agents with LangGraph tools loop through their `ToolNode` and then return to the same agent. The gateway is not rerun inside the same tool loop.
 
-Knowledge route:
-gateway → knowledge_agent → tools → knowledge_agent → END
+### Gateway
 
-KB builder route:
-gateway → knowledge_base_builder_agent → tools → knowledge_base_builder_agent → END
+The gateway is a deterministic policy layer implemented across:
 
-Project query route:
-gateway → project_task_agent → tools → project_task_agent → END
+- `gateway/agent.py`
+- `gateway/routing_policy.py`
+- `gateway/skill_policy.py`
+- `gateway/tool_intent.py`
+- `gateway/matchers.py`
+- `gateway/text_utils.py`
 
-This allows tool-calling loops.
+The gateway owns:
 
-Resolved skills stay attached to the turn state, and tool callbacks do not rerun gateway selection.
+- agent routing order
+- requested-agent handling
+- skill-based delegation
+- pending-action owner short-circuits
+- tool-intent routing
+- deterministic matcher routing
+- fallback policy
+- routing diagnostics
 
-5. Skill Registry Layer
-Skills resolve through one shared registry.
+### Shared Runtime
 
-Current scopes:
-• agent-local skills under `agents/<agent>/Skills/*/SKILL.md`
-• project-shared skills under `.jade/skills/*/SKILL.md` or `JADE_PROJECT_SKILLS_DIR`
+Shared runtime modules define the supported control model:
 
-Resolution policy:
-• every skill normalizes into one `SkillDefinition`
-• one `skill_id` maps to one effective definition per request
-• same-scope duplicates are configuration conflicts
-• precedence is `path-scoped > agent-local > project-shared`
+- `app/contracts.py`
+- `app/state.py`
+- `app/messages.py`
+- `app/pending_actions.py`
+- `app/skill_runtime.py`
+- `app/tool_runtime.py`
+- `app/skills.py`
+- `app/tool_registry.py`
 
-Execution policy:
-• `inline` skills stay in the current agent context
-• `forked` skills with `delegate_agent` route to that agent
-• `forked` skills without `delegate_agent` route to `GeneralAssistant`
-• if `GeneralAssistant` is missing, the first active agent is used and a warning is recorded
+Agents are expected to differ by prompt, tools, and business purpose, not by private confirmation or tool-result semantics.
 
-6. Interface Layer
-Interface listeners are responsible for:
-• receiving platform events
-• resolving user identity where possible
-• invoking the graph
-• formatting output for the target platform
+## Turn Flow
 
-Background services can also live at this layer when they own delivery concerns such as outbound Slack alerts.
+### 1. Request enters state
 
-Slack formatting is applied only at the Slack boundary.
-Transport layers no longer inject route overrides. They pass raw request context to the gateway.
+Interfaces populate graph state with:
 
-Formatting Strategy
-We use a 3-layer formatting approach:
+- `messages`
+- thread and user metadata
+- uploaded file metadata when present
+- optional `requested_agent`
+- optional `requested_skill_ids`
+- optional `context_paths`
 
-Layer 1: Tools
-Tools output plain structured data.
+### 2. Gateway resolves the route
 
-Layer 2: Agent Prompts
-Agents are instructed to produce Slack-friendly responses.
+The gateway preserves this routing order:
 
-Layer 3: Slack Boundary
-A Slack formatter converts Markdown to Slack mrkdwn.
+1. explicit requested agent
+2. explicit forked-skill delegates
+3. forked-skill fallback to `GeneralAssistant`
+4. explicit inline-skill-compatible agents
+5. active pending-action owner
+6. tool-intent metadata match
+7. deterministic matcher scores
+8. general-assistant fallback
 
-Example conversions:
-**bold** → *bold*
-# Heading → *Heading*
-[text](url) → <url|text>
-- bullet → • bullet
+The gateway records:
 
-This formatter lives in:
-interfaces/slack/formatting.py
+- `route`
+- `route_reason`
+- `route_policy_step`
+- `routing_decision`
+- `skill_resolution_diagnostics`
+- `agent_selection_diagnostics`
+- `selection_warnings`
 
-Identity Resolution
-The system maps Slack users to internal employee identities using an IDENTITY_MAP.
+### 3. Gateway emits active skill contracts
 
-Users may reference people via:
-• Slack display name
-• email
-• Chinese name
-• English name
-• Slack mention
+The gateway resolves explicit and automatic skill matches into `SkillInvocationContract` entries and stores:
 
-The system resolves these to the canonical Google Sheets name.
+- `skill_invocation_contracts`
+- `active_skill_invocation_contracts`
+- `skill_execution_diagnostics`
+- `resolved_skill_ids`
 
-File:
-app/identity.py
+The contract is the source of truth for what skill ran, why it ran, and which agent executes it.
 
-Google Sheets Integration
-The project task data source is a Google Sheet.
+### 4. Worker agent handles the turn
 
-Columns:
-A-Q
+Each worker agent follows the same runtime shape:
 
-Headers include:
-迭代
-人员
-内容
-平台
-项目
-start
-end
-提测日期
-更新日期
-Color
-开发天数
-测试天数
-客户端
-服务器
-测试
-产品
-优先级
+1. if this agent owns an active `pending_action`, resolve the user's reply through the shared pending-action interpreter
+2. else, if the latest message is a standardized tool result, render it deterministically when appropriate
+3. else, build the prompt and invoke the model
 
-The tool supports searching by:
-• assignee
-• project
-• platform
-• priority
-• iteration
-• free text query
+### 5. Tool execution uses one envelope model
 
-Files:
-tools/project_tracker_google_sheets.py
-tools/conversion_google_sources.py
-tools/google_workspace_services.py
+Tool calls are normalized into `ToolInvocationEnvelope`.
 
-Important rule:
-Tools must NOT contain Slack formatting logic.
+Tool results are normalized into `ToolResultEnvelope`.
 
-State Model
-The LangGraph state contains:
+Both LangGraph `ToolNode` results and internal document-conversion workflow steps use the same envelope fields, including:
 
-messages
-route
-route_reason
-requested_agent
-requested_skill_ids
-resolved_skill_ids
-context_paths
-skill_resolution_diagnostics
-agent_selection_diagnostics
-selection_warnings
-user_id
-channel_id
-user_display_name
-user_real_name
-user_email
-user_google_name
-user_sheet_name
-user_job_title
+- tool name
+- tool id
+- display name
+- tool family
+- execution backend
+- arguments
+- status
+- payload
+- diagnostics
+- source
+- reason
+- tool call id
 
-Defined in:
-app/state.py
+The runtime also records `tool_execution_trace` so the final state can explain which tool-like operations ran during the turn.
 
-Graph Definition
-The orchestration graph is defined in:
-app/graph.py
+### 6. Final answer is emitted through `assistant_response`
 
-It wires:
-gateway
-general_chat_agent
-project_task_agent
-knowledge_agent
-knowledge_base_builder_agent
-document_conversion_agent
-tool execution
+The final state may still contain raw messages, but `assistant_response` is the canonical structured output. `app/messages.py` prefers `assistant_response` content over the last raw message when extracting the final answer.
 
-Interface Entry Points
-Slack integration is implemented in:
-interfaces/slack/listener.py
+## Shared Runtime Contracts
 
-Web chat integration is implemented in:
-interfaces/web/server.py
+The contract vocabulary lives in `app/contracts.py`.
 
-Responsibilities:
-• handle incoming platform events
-• resolve user identity when available
-• send messages to the graph
-• apply interface-specific formatting before sending responses
+### Assistant response
 
-Current Agents
-GeneralChatAgent
-Handles greetings and general conversation.
+`AssistantResponse` is the final structured output container. It may carry:
 
-KnowledgeAgent
-Handles internal documentation, architecture, setup, and repository guidance questions.
+- final text content
+- active `pending_action`
+- `execution_contract`
+- selected `skill_invocation`
+- `tool_invocation`
+- `tool_result`
+- `routing_decision`
 
-KnowledgeBaseBuilderAgent
-Handles knowledge elicitation, KB document review, layer placement decisions, Feature Spec skeleton building, and KB V1 execution tracking. It uses read-only knowledge tools for evidence gathering, can resolve canonical KB draft paths, and can write Markdown drafts into the knowledge base when explicitly asked, but every KB file mutation is confirmation-gated and it does not auto-publish or auto-promote legacy materials.
+### Pending action
 
-Current v1 knowledge source:
-• local files under `KNOWLEDGE_BASE_DIR`
-• recommended default folder: `knowledge/`
-• default layout groups AI workspace files under `knowledge/AI/` and curated documentation under `knowledge/Docs/`
-• supported formats include Markdown/text and Excel exports (`.xlsx`, `.xlsm`)
-• curated online Google Sheets listed in `KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH`
+`PendingAction` is the only supported waiting/confirmation model.
 
-Online knowledge-sheet catalog:
-• one JSON entry per spreadsheet
-• each entry defines `spreadsheet_id`
-• optional `title` and `aliases` improve document resolution
-• optional `tabs` restricts which tabs are searchable
-• optional `ranges` restricts tab reads to approved A1 ranges
-• online sheets are rendered into the same semantic block pipeline used for local CSV/XLSX docs
+It describes:
 
-ProjectTaskAgent
-Handles queries that require project data and can call tools.
+- what the system wants to do
+- which agent requested it
+- the scoped target
+- the risk level
+- any selection options or follow-up metadata
 
-DocumentConversionAgent
-Handles Slack-uploaded design docs, asks follow-up questions when required conversion fields are missing, stages canonical knowledge packages, and publishes only after approval.
+### Execution contract
 
-Future agents that may be added:
-• jira_agent
-• document_agent
-• calendar_agent
+When the user replies to a pending action, the runtime interprets that reply into an `ExecutionContract` and validates it into one of these runtime actions:
 
-Current Objective
-The system currently works but is still early-stage.
+- `execute`
+- `cancel`
+- `request_revision`
+- `ask_clarification`
+- `select`
 
-Next improvements should focus on:
+This lets all agents share the same deterministic confirmation model.
 
-1. improving intent routing accuracy
-2. improving project task query reasoning
-3. supporting richer Google Sheets queries
-4. improving Slack UX
-5. adding memory and conversation context
-6. preparing the system for additional agents
+### Skill invocation contract
 
-Development Constraints
-• Python 3.12
-• LangGraph
-• LangChain
-• Slack Bolt Socket Mode
-• Google Sheets API (service account)
+`SkillInvocationContract` captures:
 
-Key Design Rule
-Tools should stay platform-agnostic.
-Formatting should only happen at the Slack boundary.
+- skill id and name
+- description
+- source path
+- mode (`inline` or `fork`)
+- target agent
+- invocation source
+- invocation reason
+- context paths
 
-Your job is to help extend and maintain this architecture while preserving these design principles.
+The prompt consumes runtime-selected skill instructions. The prompt does not decide routing or delegation.
+
+### Tool invocation and result envelopes
+
+`ToolInvocationEnvelope` and `ToolResultEnvelope` standardize both normal tool-node work and internal workflow operations.
+
+## Pending Actions and Confirmation
+
+Pending-action logic lives in `app/pending_actions.py`.
+
+Supported flows:
+
+- explicit approval
+- rejection
+- narrowing or modification requests
+- request-for-preview or diff before execution
+- deterministic option selection
+- ambiguity detection
+
+Current agent usage:
+
+- `knowledge_agent`: document selection and document follow-up
+- `project_task_agent`: task selection and task-detail follow-up
+- `knowledge_base_builder_agent`: confirmation-gated KB writes
+- `document_conversion_agent`: approval-gated package publishing
+
+The gateway routes active pending actions back to the owning agent before normal matcher routing runs.
+
+## Skills
+
+Skill discovery and normalization are implemented in `app/skills.py`.
+
+Supported skill scopes:
+
+- path-scoped project skills
+- agent-local skills
+- project-shared skills
+
+Precedence:
+
+`path-scoped > agent-local > project-shared`
+
+Execution modes:
+
+- `inline`: stays in the current agent
+- `fork`: routes to the delegate agent
+
+If a forked skill has no active delegate agent, the gateway falls back to `GeneralAssistant`.
+
+The skill runtime is implemented in `app/skill_runtime.py`. It filters active contracts for the executing agent and attaches the selected skill's instruction body to the prompt as runtime-selected context.
+
+## Tools
+
+Tool metadata and routing hints live in `app/tool_registry.py`.
+
+Runtime normalization lives in `app/tool_runtime.py`.
+
+Standard tool families currently include:
+
+- knowledge read
+- knowledge write
+- project tracker
+- document conversion internal operations
+
+Tool metadata powers:
+
+- gateway tool-intent routing
+- normalized tool ids
+- display labels
+- runtime tracing
+
+## Agents
+
+### `general_chat_agent`
+
+Purpose:
+
+- greetings
+- general chat
+- fallback conversational help
+
+It has no business-specific tools and acts as the `GeneralAssistant` fallback in gateway policy.
+
+### `knowledge_agent`
+
+Purpose:
+
+- repository guidance
+- setup and architecture questions
+- internal document lookup and reading
+
+It uses knowledge read tools and shared pending-action selection for follow-up document selection.
+
+### `knowledge_base_builder_agent`
+
+Purpose:
+
+- knowledge elicitation
+- KB review
+- layer-placement guidance
+- feature-spec skeleton support
+- KB file drafting
+
+It uses read tools plus builder-only path resolution and KB write tools. KB file mutation is always confirmation-gated.
+
+### `project_task_agent`
+
+Purpose:
+
+- task lookup
+- assignee and deadline questions
+- tracker overviews
+
+It uses project tracker tools, renders task results deterministically, and uses shared pending-action selection for task-detail follow-ups.
+
+### `document_conversion_agent`
+
+Purpose:
+
+- ingest uploaded files and Google document references
+- extract structured draft packages
+- ask for missing required conversion details
+- stage packages
+- publish only after approval
+
+It uses the same shared pending-action confirmation model as the other agents, but its internal workflow steps are wrapped as standardized internal tool envelopes.
+
+## State Model
+
+The shared graph state is defined in `app/state.py`.
+
+Important runtime fields include:
+
+- `messages`
+- `route`
+- `route_reason`
+- `route_policy_step`
+- `pending_action`
+- `execution_contract`
+- `assistant_response`
+- `routing_decision`
+- `skill_invocation_contracts`
+- `active_skill_invocation_contracts`
+- `skill_execution_diagnostics`
+- `tool_invocation`
+- `tool_result`
+- `tool_execution_trace`
+- `requested_agent`
+- `requested_skill_ids`
+- `resolved_skill_ids`
+- `context_paths`
+
+## Knowledge and Data Sources
+
+Knowledge-base content is organized under `knowledge/`.
+
+Current major areas:
+
+- `knowledge/Docs/00_Shared/`
+- `knowledge/Docs/10_GameLines/`
+- `knowledge/Docs/20_Deployments/`
+- `knowledge/Docs/30_Review/`
+- `knowledge/Docs/40_Legacy/`
+- `knowledge/Docs/50_Templates/`
+
+The project tracker source is Google Sheets, via `tools/project_tracker_google_sheets.py`.
+
+Document conversion can also ingest Google document references through:
+
+- `tools/conversion_google_sources.py`
+- `tools/google_workspace_services.py`
+
+## Legacy Cutoff
+
+The following systems are no longer supported as live runtime behavior:
+
+- `pending_interaction`
+- regex-only approval or cancel parsing as an agent-local control path
+- prompt-only skill routing or delegation
+
+Historical web transcripts may still be normalized on load for readability, but that is history cleanup only and not part of the live runtime control model.

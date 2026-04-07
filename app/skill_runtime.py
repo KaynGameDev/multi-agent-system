@@ -6,9 +6,6 @@ from app.contracts import SkillInvocationContract, normalize_skill_invocation_co
 from app.prompt_loader import join_prompt_layers
 from app.skills import SkillDefinition, SkillRegistry
 
-LEGACY_PROMPT_ADAPTER_NAME = "legacy_skill_markdown_prompt_context"
-
-
 def get_active_skill_invocation_contracts(
     state: dict[str, Any] | None,
     *,
@@ -64,7 +61,6 @@ def build_skill_execution_diagnostics(
     contracts: list[SkillInvocationContract] | tuple[SkillInvocationContract, ...],
     *,
     agent_name: str,
-    compatibility_adapter: str = LEGACY_PROMPT_ADAPTER_NAME,
 ) -> list[dict[str, Any]]:
     diagnostics: list[dict[str, Any]] = []
     for raw_contract in contracts:
@@ -80,7 +76,6 @@ def build_skill_execution_diagnostics(
                 "executed_by_agent": agent_name,
                 "source": str(contract.get("source", "")).strip(),
                 "reason": str(contract.get("reason", "")).strip(),
-                "legacy_prompt_adapter": compatibility_adapter,
             }
         )
     return diagnostics
@@ -156,21 +151,21 @@ def render_skill_prompt_context(
         lines.append(f"- Invocation reason: {reason}")
     lines.append("- Treat this as runtime-selected context. Do not reinterpret skill routing or delegation inside the prompt.")
 
-    legacy_body = load_legacy_skill_body(skill_registry, normalized)
-    if legacy_body:
+    skill_body = load_skill_body_for_contract(skill_registry, normalized)
+    if skill_body:
         lines.extend(
             (
                 "",
-                "### Legacy SKILL.md Compatibility Context",
-                "The following SKILL.md body is attached only as a temporary compatibility adapter while runtime execution semantics are being migrated.",
-                legacy_body,
+                "### Skill Instructions",
+                "The following SKILL.md body is the instruction body for the runtime-selected skill.",
+                skill_body,
             )
         )
 
     return "\n".join(line for line in lines if line is not None).strip()
 
 
-def load_legacy_skill_body(
+def load_skill_body_for_contract(
     skill_registry: SkillRegistry,
     contract: SkillInvocationContract,
 ) -> str:

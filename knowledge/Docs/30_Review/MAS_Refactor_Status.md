@@ -49,7 +49,7 @@ Removed:
 - Hidden prompt-only skill execution semantics spread across general chat, knowledge, project task, KB builder, and document conversion prompt assembly.
 
 Added:
-- Shared skill runtime adapter in `app/skill_runtime.py` for active-skill filtering, runtime diagnostics, and the temporary legacy `SKILL.md` prompt-compatibility layer.
+- Shared skill runtime adapter in `app/skill_runtime.py` for active-skill filtering, runtime diagnostics, and runtime-selected `SKILL.md` instruction attachment.
 - Richer `SkillInvocationContract` metadata in `app/contracts.py` and `app/skills.py`, including skill name, description, source path, explicit invocation source, and explicit invocation reason.
 - Gateway-emitted active skill runtime state in `gateway/agent.py`, including `active_skill_invocation_contracts` and `skill_execution_diagnostics`.
 - Prompt builders that consume runtime-selected skill contracts instead of `resolved_skill_ids`.
@@ -115,3 +115,50 @@ Added:
 Remains:
 - Agent migration and deletion.
 - Docs, tests, and cutoff cleanup.
+
+## Part 6 - Agent Migration and Legacy Deletion
+
+Removed:
+- The unused legacy pending-interaction compatibility module at `app/pending_interactions.py`.
+- The legacy-named `tests/test_pending_interactions.py` suite in favor of current-runtime migration coverage.
+- Builder-local retry-tool reconstruction helpers and duplicate latest-user-text parsing now superseded by shared runtime helpers.
+- The project-task agent's model-dependent tool-result summarization path for task-list results.
+
+Added:
+- Shared pending-action tool reconstruction helpers in `app/tool_runtime.py` so agents can replay confirmed tool calls without private adapters.
+- Shared message-content extraction usage across knowledge, KB builder, project task, and document conversion via `app/messages.py`.
+- Deterministic tool-result rendering for `agents/project_task/agent.py`, including pending-action setup from shared tool envelopes before any LLM fallback path.
+- Migration regression coverage in `tests/test_agent_runtime_migration.py` for:
+  - knowledge selection follow-ups
+  - deterministic project-task rendering and follow-up selection
+  - KB builder pending-action confirmation / diff / cancel behavior
+  - default registration tool-id consistency
+
+Remains:
+- Docs, tests, and cutoff cleanup.
+
+## Part 7 - Docs, Tests, and Legacy Cutoff
+
+Removed:
+- Migration-era wording that still described runtime-selected skill instructions as a temporary legacy compatibility adapter.
+- Final live references that implied old waiting or prompt-only routing models were still supported runtime behavior.
+
+Added:
+- A rewritten [ARCHITECTURE.md](/Users/kayngame/jade_ai_core/ARCHITECTURE.md) that documents:
+  - user turn flow
+  - routing order
+  - pending actions and execution contracts
+  - skill invocation contracts
+  - tool invocation/result envelopes
+  - agent boundaries
+  - explicit legacy cutoff
+- README runtime-model updates in [README.md](/Users/kayngame/jade_ai_core/README.md).
+- Additional regression coverage for:
+  - ambiguous knowledge follow-ups blocking execution deterministically
+  - ambiguous project-task follow-ups blocking execution deterministically
+  - ambiguous KB-builder confirmations blocking execution deterministically
+  - finalized skill prompt wording in `tests/test_skills.py`
+- Explicit legacy cutoff notes stating that `pending_interaction`, regex-only approval paths, and prompt-only skill routing are no longer supported live runtime systems.
+
+Remains:
+- No remaining refactor parts in this execution plan.

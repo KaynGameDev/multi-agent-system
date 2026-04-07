@@ -16,6 +16,7 @@ from app.contracts import (
     build_tool_result_envelope,
     normalize_tool_invocation_envelope,
     normalize_tool_result_envelope,
+    tool_invocation_to_tool_call,
 )
 from app.tool_registry import get_tool_metadata_by_runtime_name
 
@@ -287,6 +288,66 @@ def build_tool_execution_record_for_message(
         if tool_call_id and not str(invocation.get("tool_call_id", "")).strip():
             invocation["tool_call_id"] = tool_call_id
     return build_tool_execution_record(invocation=invocation, result=result)
+
+
+def get_pending_action_tool_invocation(
+    pending_action: dict[str, Any] | None,
+    *,
+    source: str = "",
+    reason: str = "",
+    execution_backend: str = LANGGRAPH_TOOL_NODE_BACKEND,
+) -> ToolInvocationEnvelope | None:
+    if not isinstance(pending_action, dict):
+        return None
+
+    metadata = pending_action.get("metadata") if isinstance(pending_action.get("metadata"), dict) else {}
+    tool_invocation = metadata.get("tool_invocation")
+    if isinstance(tool_invocation, dict):
+        return normalize_runtime_tool_invocation(
+            tool_invocation,
+            source=source,
+            reason=reason,
+            execution_backend=execution_backend,
+        )
+
+    tool_name = str(metadata.get("tool_name", "")).strip()
+    tool_args = metadata.get("tool_args")
+    if not tool_name or not isinstance(tool_args, dict):
+        return None
+    return build_runtime_tool_invocation(
+        tool_name,
+        dict(tool_args),
+        source=source,
+        reason=reason,
+        tool_call_id=str(metadata.get("tool_call_id", "")).strip(),
+        execution_backend=execution_backend,
+    )
+
+
+def build_pending_action_retry_tool_call(
+    pending_action: dict[str, Any] | None,
+    *,
+    source: str = "",
+    reason: str = "",
+    fallback_tool_call_id: str = "",
+    execution_backend: str = LANGGRAPH_TOOL_NODE_BACKEND,
+) -> tuple[AIMessage, ToolInvocationEnvelope] | None:
+    tool_invocation = get_pending_action_tool_invocation(
+        pending_action,
+        source=source,
+        reason=reason,
+        execution_backend=execution_backend,
+    )
+    if tool_invocation is None:
+        return None
+
+    tool_call = tool_invocation_to_tool_call(tool_invocation)
+    if not tool_call.get("name"):
+        return None
+    tool_call["id"] = str(tool_call.get("id", "")).strip() or str(fallback_tool_call_id).strip()
+    if not str(tool_call["id"]).strip():
+        return None
+    return AIMessage(content="", tool_calls=[tool_call]), tool_invocation
 
 
 def run_internal_tool_operation(

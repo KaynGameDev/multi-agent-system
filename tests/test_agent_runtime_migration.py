@@ -20,14 +20,6 @@ class NoopLLM:
         raise RuntimeError("LLM should not be called during deterministic follow-up tests.")
 
 
-class SummaryLLM:
-    def bind_tools(self, _tools):
-        return self
-
-    def invoke(self, _messages):
-        return AIMessage(content="Here is the short task summary.")
-
-
 class FallbackLLM:
     def __init__(self, content: str) -> None:
         self.content = content
@@ -39,7 +31,7 @@ class FallbackLLM:
         return AIMessage(content=self.content)
 
 
-class PendingActionFlowTests(unittest.TestCase):
+class AgentRuntimeMigrationTests(unittest.TestCase):
     def test_knowledge_agent_list_follow_up_uses_pending_action(self) -> None:
         payload = {
             "ok": True,
@@ -65,7 +57,7 @@ class PendingActionFlowTests(unittest.TestCase):
                 "messages": [
                     HumanMessage(content="what docs are available"),
                     ToolMessage(content=json.dumps(payload), tool_call_id="call_list"),
-                ]
+                ],
             }
         )
         self.assertIn("pending_action", first_result)
@@ -140,7 +132,7 @@ class PendingActionFlowTests(unittest.TestCase):
                 "messages": [
                     HumanMessage(content="show me the available docs"),
                     ToolMessage(content=json.dumps(payload), tool_call_id="call_list"),
-                ]
+                ],
             }
         )
         for reply in ("details", "that one", "详情"):
@@ -184,14 +176,55 @@ class PendingActionFlowTests(unittest.TestCase):
                     ToolMessage(content=json.dumps(payload), tool_call_id="call_list"),
                     AIMessage(content="Setup Guide"),
                     HumanMessage(content="details"),
-                ]
+                ],
             }
         )
 
         self.assertEqual(result["messages"][-1].content, "llm fallback")
         self.assertNotIn("pending_action", result)
 
-    def test_project_task_agent_summary_sets_pending_action_and_details_reuse_payload(self) -> None:
+    def test_knowledge_agent_ambiguous_follow_up_blocks_execution_deterministically(self) -> None:
+        payload = {
+            "ok": True,
+            "document_count": 1,
+            "documents": [
+                {
+                    "name": "SetupGuide",
+                    "title": "Setup Guide",
+                    "path": "knowledge/Docs/00_Shared/SetupGuide.md",
+                }
+            ],
+        }
+        node = KnowledgeAgentNode(NoopLLM(), [], agent_name="knowledge_agent")
+
+        first_result = node(
+            {
+                "thread_id": "thread-1",
+                "messages": [
+                    HumanMessage(content="show me the available docs"),
+                    ToolMessage(content=json.dumps(payload), tool_call_id="call_list"),
+                ],
+            }
+        )
+
+        second_result = node(
+            {
+                "thread_id": "thread-1",
+                "messages": [
+                    HumanMessage(content="show me the available docs"),
+                    ToolMessage(content=json.dumps(payload), tool_call_id="call_list"),
+                    *first_result["messages"],
+                    HumanMessage(content="maybe later"),
+                ],
+                "pending_action": first_result["pending_action"],
+            }
+        )
+
+        self.assertIn("can't determine", second_result["messages"][-1].content)
+        self.assertEqual(second_result["pending_action"]["status"], "ask_clarification")
+        self.assertNotIn("tool_invocation", second_result)
+
+    def test_project_task_tool_result_renders_deterministically_and_details_reuse_payload(self) -> None:
         payload = {
             "ok": True,
             "tasks": [
@@ -212,7 +245,7 @@ class PendingActionFlowTests(unittest.TestCase):
                 "assignee": "Tester",
             },
         }
-        node = ProjectTaskAgentNode(SummaryLLM(), [], agent_name="project_task_agent")
+        node = ProjectTaskAgentNode(NoopLLM(), [], agent_name="project_task_agent")
 
         first_result = node(
             {
@@ -220,9 +253,13 @@ class PendingActionFlowTests(unittest.TestCase):
                 "messages": [
                     HumanMessage(content="show my tasks due today"),
                     ToolMessage(content=json.dumps(payload), tool_call_id="call_tasks"),
-                ]
+                ],
             }
         )
+        markdown = first_result["messages"][-1].content
+        self.assertIn("Tasks due today for Tester", markdown)
+        self.assertIn("Ship durable memory", markdown)
+        self.assertIn("Reply with the task number or exact task title for details", markdown)
         self.assertIn("pending_action", first_result)
 
         second_result = node(
@@ -271,14 +308,63 @@ class PendingActionFlowTests(unittest.TestCase):
                 "messages": [
                     HumanMessage(content="show my tasks due today"),
                     ToolMessage(content=json.dumps(payload), tool_call_id="call_tasks"),
-                    AIMessage(content="Here is the short task summary."),
+                    AIMessage(content="Tasks due today for Tester (1)\n\n1. Ship durable memory"),
                     HumanMessage(content="details"),
-                ]
+                ],
             }
         )
 
         self.assertEqual(result["messages"][-1].content, "task fallback")
         self.assertNotIn("pending_action", result)
+
+    def test_project_task_ambiguous_follow_up_blocks_execution_deterministically(self) -> None:
+        payload = {
+            "ok": True,
+            "tasks": [
+                {
+                    "content": "Ship durable memory",
+                    "project": "Infra",
+                    "iteration": "S1",
+                    "platform": "Web",
+                    "priority": "P1",
+                    "assignee": "Tester",
+                    "end_date": "2026-04-04",
+                    "due_status": "today",
+                }
+            ],
+            "match_count": 1,
+            "filters": {
+                "due_scope": "today",
+                "assignee": "Tester",
+            },
+        }
+        node = ProjectTaskAgentNode(NoopLLM(), [], agent_name="project_task_agent")
+
+        first_result = node(
+            {
+                "thread_id": "thread-1",
+                "messages": [
+                    HumanMessage(content="show my tasks due today"),
+                    ToolMessage(content=json.dumps(payload), tool_call_id="call_tasks"),
+                ],
+            }
+        )
+
+        second_result = node(
+            {
+                "thread_id": "thread-1",
+                "messages": [
+                    HumanMessage(content="show my tasks due today"),
+                    ToolMessage(content=json.dumps(payload), tool_call_id="call_tasks"),
+                    *first_result["messages"],
+                    HumanMessage(content="maybe later"),
+                ],
+                "pending_action": first_result["pending_action"],
+            }
+        )
+
+        self.assertIn("can't determine", second_result["messages"][-1].content)
+        self.assertEqual(second_result["pending_action"]["status"], "ask_clarification")
 
     def test_builder_pending_action_retries_write_on_natural_confirmation(self) -> None:
         write_request = AIMessage(
@@ -310,7 +396,7 @@ class PendingActionFlowTests(unittest.TestCase):
                 "messages": [
                     write_request,
                     ToolMessage(content=json.dumps(blocked_payload), tool_call_id="call_write"),
-                ]
+                ],
             }
         )
         self.assertIn("pending_action", first_result)
@@ -365,7 +451,7 @@ class PendingActionFlowTests(unittest.TestCase):
                 "messages": [
                     write_request,
                     ToolMessage(content=json.dumps(blocked_payload), tool_call_id="call_write"),
-                ]
+                ],
             }
         )
 
@@ -384,6 +470,57 @@ class PendingActionFlowTests(unittest.TestCase):
 
         self.assertIn("```diff", second_result["messages"][-1].content)
         self.assertEqual(second_result["pending_action"]["status"], "request_revision")
+        self.assertIsNone(second_result["execution_contract"])
+
+    def test_builder_ambiguous_follow_up_blocks_execution_deterministically(self) -> None:
+        write_request = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "write_knowledge_markdown_document",
+                    "args": {
+                        "relative_path": "Docs/10_GameLines/BuYuDaLuanDou/LineOverview/Test.md",
+                        "content": "# Test\n",
+                    },
+                    "id": "call_write",
+                }
+            ],
+        )
+        blocked_payload = {
+            "ok": False,
+            "knowledge_mutation": "write_markdown",
+            "requires_confirmation": True,
+            "relative_path": "Docs/10_GameLines/BuYuDaLuanDou/LineOverview/Test.md",
+            "absolute_path": "/tmp/Test.md",
+            "target_exists": False,
+        }
+        node = KnowledgeBaseBuilderAgentNode(NoopLLM(), [], agent_name="knowledge_base_builder_agent")
+
+        first_result = node(
+            {
+                "thread_id": "thread-1",
+                "messages": [
+                    write_request,
+                    ToolMessage(content=json.dumps(blocked_payload), tool_call_id="call_write"),
+                ],
+            }
+        )
+
+        second_result = node(
+            {
+                "thread_id": "thread-1",
+                "messages": [
+                    write_request,
+                    ToolMessage(content=json.dumps(blocked_payload), tool_call_id="call_write"),
+                    *first_result["messages"],
+                    HumanMessage(content="maybe later"),
+                ],
+                "pending_action": first_result["pending_action"],
+            }
+        )
+
+        self.assertIn("cannot execute", second_result["messages"][-1].content)
+        self.assertEqual(second_result["pending_action"]["status"], "ask_clarification")
         self.assertIsNone(second_result["execution_contract"])
 
     def test_builder_pending_action_cancels(self) -> None:
@@ -415,7 +552,7 @@ class PendingActionFlowTests(unittest.TestCase):
                 "messages": [
                     write_request,
                     ToolMessage(content=json.dumps(blocked_payload), tool_call_id="call_write"),
-                ]
+                ],
             }
         )
 

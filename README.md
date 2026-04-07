@@ -5,6 +5,10 @@ A lean LangGraph + Slack + Gemini starter for a company-facing multi-agent assis
 ## Current architecture
 
 - `gateway` is the deterministic policy layer for routing, skill precedence, fallback, and delegation
+- `app/contracts.py` and `app/state.py` define the shared runtime contract model
+- `app/pending_actions.py` is the only supported confirmation and waiting model
+- `app/tool_runtime.py` standardizes tool invocation/results for both ToolNode calls and internal workflows
+- `app/skill_runtime.py` attaches runtime-selected skill instructions to prompts
 - `app/skills.py` holds the shared skill registry and normalized skill resolution
 - `project_task_agent` answers questions that depend on the Google Sheets project tracker
 - `knowledge_agent` answers questions about internal docs, architecture, and setup guidance
@@ -18,6 +22,29 @@ A lean LangGraph + Slack + Gemini starter for a company-facing multi-agent assis
 
 This project uses a **supervisor + specialist agents** pattern instead of a fully autonomous swarm.
 That keeps routing explicit, tool execution bounded, and the runtime easier to debug.
+
+## Runtime model
+
+Each turn follows one supported runtime flow:
+
+1. Slack or web appends the user message and metadata to graph state.
+2. The gateway resolves the route deterministically in this order:
+   - requested agent
+   - forked-skill delegate
+   - forked-skill fallback
+   - inline-skill-compatible agent
+   - pending-action owner
+   - tool-intent route
+   - deterministic matcher
+   - general fallback
+3. The selected agent either:
+   - resolves a shared `pending_action`
+   - renders a standardized tool result deterministically
+   - or invokes the model
+4. Tool execution flows through one shared envelope model.
+5. The final answer is emitted through `assistant_response`.
+
+See [ARCHITECTURE.md](/Users/kayngame/jade_ai_core/ARCHITECTURE.md) for the full runtime description.
 
 ## Project layout
 
@@ -149,4 +176,6 @@ python main.py
   - `tabs` to allow specific tabs only
   - `ranges` to restrict tab reads to a specific A1 range
 - The web API now returns structured `skill_resolution_diagnostics`, `agent_selection_diagnostics`, and `selection_warnings` alongside legacy `route` metadata.
+- Routing is owned by runtime policy code, not by prompt instructions.
+- `pending_interaction`, regex-only approval flows, and prompt-only skill routing are retired live runtime systems.
 - Do **not** commit `.env`, `credentials.json`, `.venv`, or IDE folders.

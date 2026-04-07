@@ -178,7 +178,8 @@ class SkillRegistryTests(unittest.TestCase):
         self.assertIn("Execution mode: `inline`", prompt)
         self.assertIn("Greeting Enhancer", prompt)
         self.assertIn("Always greet the user warmly and concisely.", prompt)
-        self.assertIn("Legacy SKILL.md Compatibility Context", prompt)
+        self.assertIn("Skill Instructions", prompt)
+        self.assertNotIn("temporary compatibility adapter", prompt)
 
     def test_builder_skill_frontmatter_is_parsed(self) -> None:
         registrations = (

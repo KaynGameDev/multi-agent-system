@@ -2,13 +2,11 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
+from langchain_core.messages import AIMessage, SystemMessage
 
-from app.contracts import (
-    AssistantResponse,
-    build_assistant_response,
-)
+from app.contracts import build_assistant_response
 from app.language import detect_response_language
+from app.messages import extract_latest_human_text, stringify_message_content
 from app.pending_actions import (
     PendingActionSelectionOption,
     build_pending_action,
@@ -48,9 +46,9 @@ class ProjectTaskAgentNode:
         self.tool_ids = tuple(tool_ids)
 
     def __call__(self, state: AgentState) -> dict:
-        task_list_response = build_task_list_response(state, agent_name=self.agent_name)
-        if task_list_response is not None:
-            return task_list_response
+        rendered_response = build_project_task_response(state, agent_name=self.agent_name)
+        if rendered_response is not None:
+            return rendered_response
 
         messages = [
             SystemMessage(
@@ -80,24 +78,6 @@ class ProjectTaskAgentNode:
         }
         if tool_invocation is not None:
             result["tool_invocation"] = tool_invocation
-        latest_tool_result = get_latest_task_tool_result(state)
-        if latest_tool_result is not None:
-            result["tool_result"] = latest_tool_result
-            pending_action = build_task_pending_action(state, latest_tool_result)
-            if pending_action is not None:
-                result["pending_action"] = pending_action
-            tool_execution_record = None
-            messages = state.get("messages", [])
-            if messages:
-                tool_execution_record = build_tool_execution_record_for_message(
-                    messages[-1],
-                    messages=messages,
-                    tool_name=str(latest_tool_result.get("tool_name", "")).strip() or "project_task",
-                    source="project_task_agent",
-                    reason="Project task ToolNode returned a result.",
-                )
-            if tool_execution_record is not None:
-                result["tool_execution_trace"] = [tool_execution_record]
         return result
 
 
@@ -193,8 +173,8 @@ TASK_FIELD_LABELS_ZH = {
 }
 
 
-def build_task_list_response(state: AgentState, *, agent_name: str) -> dict[str, Any] | None:
-    latest_user_text = get_latest_user_text(state)
+def build_project_task_response(state: AgentState, *, agent_name: str) -> dict[str, Any] | None:
+    latest_user_text = extract_latest_human_text(state)
     preferred_language = detect_response_language(latest_user_text)
     pending_action = get_pending_action(state)
     if pending_action and pending_action.get("requested_by_agent") == agent_name and is_pending_action_active(pending_action):
@@ -205,30 +185,11 @@ def build_task_list_response(state: AgentState, *, agent_name: str) -> dict[str,
         )
         if follow_up_result is not None:
             return follow_up_result
+
+    latest_tool_result = get_latest_task_tool_result(state)
+    if latest_tool_result is not None:
+        return render_task_update(state, latest_tool_result, preferred_language=preferred_language)
     return None
-
-
-def get_latest_user_text(state: AgentState) -> str:
-    for message in reversed(state.get("messages", [])):
-        if isinstance(message, HumanMessage):
-            return stringify_message_content(message.content)
-    return ""
-
-
-def stringify_message_content(content) -> str:
-    if isinstance(content, str):
-        return content
-
-    parts: list[str] = []
-    if isinstance(content, list):
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                text = item.get("text") or item.get("content")
-                if isinstance(text, str):
-                    parts.append(text)
-    return " ".join(parts).strip()
 
 
 def get_latest_task_tool_result(state: AgentState) -> dict[str, Any] | None:
@@ -252,6 +213,47 @@ def get_task_tool_result(message, *, messages: list[Any] | None = None) -> dict[
     if isinstance(payload.get("tasks"), list):
         return result
     return None
+
+
+def render_task_update(state: AgentState, tool_result: dict[str, Any], *, preferred_language: str) -> dict[str, Any] | None:
+    payload = tool_result.get("payload") if isinstance(tool_result.get("payload"), dict) else {}
+    rendered = render_task_payload(payload, preferred_language=preferred_language)
+    if rendered is None:
+        return None
+
+    prompt_context = ""
+    pending_action = build_task_pending_action(state, tool_result)
+    if pending_action is not None:
+        prompt_context = str(get_pending_action_metadata(pending_action).get("prompt_context", "")).strip()
+    content = rendered
+    if prompt_context:
+        content = f"{rendered}\n\n{prompt_context}"
+
+    tool_execution_record = None
+    messages = state.get("messages", [])
+    if messages:
+        tool_execution_record = build_tool_execution_record_for_message(
+            messages[-1],
+            messages=messages,
+            tool_name=str(tool_result.get("tool_name", "")).strip() or "project_task",
+            source="project_task_agent",
+            reason="Project task ToolNode returned a result.",
+        )
+
+    result: dict[str, Any] = {
+        "messages": [AIMessage(content=content)],
+        "pending_action": pending_action,
+        "tool_result": tool_result,
+        "assistant_response": build_assistant_response(
+            kind="text",
+            content=content,
+            pending_action=pending_action,
+            tool_result=tool_result,
+        ),
+    }
+    if tool_execution_record is not None:
+        result["tool_execution_trace"] = [tool_execution_record]
+    return result
 
 
 def build_task_pending_action(state: AgentState, tool_result: dict[str, Any]) -> dict[str, Any] | None:
@@ -312,7 +314,7 @@ def build_task_pending_action_response(
     pending_action: dict[str, Any],
     preferred_language: str,
 ) -> dict[str, Any] | None:
-    latest_user_text = get_latest_user_text(state)
+    latest_user_text = extract_latest_human_text(state)
     resolution = resolve_pending_action_reply(pending_action, latest_user_text)
     contract = resolution["contract"]
     validation = resolution["validation"]

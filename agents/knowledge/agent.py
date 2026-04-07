@@ -1,15 +1,15 @@
 from __future__ import annotations
 from typing import Any
 
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, SystemMessage
 
 from agents.knowledge.rendering import first_non_empty, is_search_payload
 from app.contracts import (
-    AssistantResponse,
     build_assistant_response,
     tool_invocation_to_tool_call,
 )
 from app.language import detect_response_language
+from app.messages import extract_latest_human_text, stringify_message_content
 from app.pending_actions import (
     PendingActionSelectionOption,
     build_pending_action,
@@ -89,12 +89,6 @@ class KnowledgeAgentNode:
         }
         if tool_invocation is not None:
             result["tool_invocation"] = tool_invocation
-        latest_tool_result = get_latest_tool_result(state)
-        if latest_tool_result is not None:
-            result["tool_result"] = latest_tool_result
-            pending_action = build_knowledge_pending_action(state, latest_tool_result)
-            if pending_action is not None:
-                result["pending_action"] = pending_action
         return result
 
 
@@ -128,7 +122,7 @@ def build_knowledge_prompt(
 
 
 def build_knowledge_response(state: AgentState, *, agent_name: str) -> dict[str, Any] | None:
-    latest_user_text = get_latest_user_text(state)
+    latest_user_text = extract_latest_human_text(state)
     preferred_language = detect_response_language(latest_user_text)
     pending_action = get_pending_action(state)
     if pending_action and pending_action.get("requested_by_agent") == agent_name and is_pending_action_active(pending_action):
@@ -144,29 +138,6 @@ def build_knowledge_response(state: AgentState, *, agent_name: str) -> dict[str,
     if latest_tool_result is not None:
         return render_knowledge_update(state, latest_tool_result, preferred_language=preferred_language)
     return None
-
-
-def get_latest_user_text(state: AgentState) -> str:
-    for message in reversed(state.get("messages", [])):
-        if isinstance(message, HumanMessage):
-            return stringify_message_content(message.content)
-    return ""
-
-
-def stringify_message_content(content) -> str:
-    if isinstance(content, str):
-        return content
-
-    parts: list[str] = []
-    if isinstance(content, list):
-        for item in content:
-            if isinstance(item, str):
-                parts.append(item)
-            elif isinstance(item, dict):
-                text = item.get("text") or item.get("content")
-                if isinstance(text, str):
-                    parts.append(text)
-    return " ".join(parts).strip()
 
 
 def get_tool_result(message, *, messages: list[Any] | None = None) -> dict[str, Any] | None:
@@ -323,7 +294,7 @@ def build_knowledge_pending_action_response(
     pending_action: dict[str, Any],
     preferred_language: str,
 ) -> dict[str, Any] | None:
-    latest_user_text = get_latest_user_text(state)
+    latest_user_text = extract_latest_human_text(state)
     selection_phase = get_pending_action_selection_phase(pending_action)
     if selection_phase == "render_after_tool_result":
         latest_tool_result = get_latest_tool_result(state)
