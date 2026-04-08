@@ -48,6 +48,9 @@ class Settings:
     google_api_key: str
     gemini_model: str
     gemini_temperature: float
+    pending_action_parser_model: str
+    pending_action_parser_temperature: float
+    pending_action_parser_confidence_threshold: float
     google_application_credentials: str
     jade_project_sheet_id: str
     project_sheet_range: str
@@ -96,6 +99,14 @@ def load_settings(force_reload: bool = False) -> Settings:
         google_api_key=os.getenv("GOOGLE_API_KEY", ""),
         gemini_model=os.getenv("GEMINI_MODEL", "gemini-3-flash-preview"),
         gemini_temperature=float(os.getenv("GEMINI_TEMPERATURE", "0.2")),
+        pending_action_parser_model=(
+            os.getenv("PENDING_ACTION_PARSER_MODEL", os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")).strip()
+            or os.getenv("GEMINI_MODEL", "gemini-3-flash-preview")
+        ),
+        pending_action_parser_temperature=float(os.getenv("PENDING_ACTION_PARSER_TEMPERATURE", "0.0")),
+        pending_action_parser_confidence_threshold=float(
+            os.getenv("PENDING_ACTION_PARSER_CONFIDENCE_THRESHOLD", "0.75")
+        ),
         google_application_credentials=os.getenv("GOOGLE_APPLICATION_CREDENTIALS", ""),
         jade_project_sheet_id=os.getenv("JADE_PROJECT_SHEET_ID", ""),
         project_sheet_range=os.getenv("PROJECT_SHEET_RANGE", "Tasks!A1:Z"),

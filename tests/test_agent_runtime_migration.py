@@ -31,6 +31,28 @@ class FallbackLLM:
         return AIMessage(content=self.content)
 
 
+class ReplyMapInterpreter:
+    def __init__(self, mapping: dict[str, dict], *, default: dict | None = None) -> None:
+        self.mapping = {str(key).strip().casefold(): dict(value) for key, value in mapping.items()}
+        self.default = dict(
+            default
+            or {
+                "decision": "unclear",
+                "requested_outputs": [],
+                "target_scope": {},
+                "selected_index": None,
+                "should_execute": False,
+                "reason": "The reply was ambiguous.",
+                "confidence": 0.0,
+                "interpretation_source": "llm_parser",
+            }
+        )
+
+    def parse_pending_action_reply(self, _action, prepared_input):
+        normalized_reply = str(prepared_input.get("normalized_user_reply", "")).strip().casefold()
+        return dict(self.mapping.get(normalized_reply, self.default))
+
+
 class AgentRuntimeMigrationTests(unittest.TestCase):
     def test_knowledge_agent_list_follow_up_uses_pending_action(self) -> None:
         payload = {
@@ -388,7 +410,86 @@ class AgentRuntimeMigrationTests(unittest.TestCase):
             "absolute_path": "/tmp/Test.md",
             "target_exists": False,
         }
-        node = KnowledgeBaseBuilderAgentNode(NoopLLM(), [], agent_name="knowledge_base_builder_agent")
+        confirmation_interpreter = ReplyMapInterpreter(
+            {
+                "approve": {
+                    "decision": "approve",
+                    "requested_outputs": [],
+                    "target_scope": {},
+                    "selected_index": None,
+                    "should_execute": True,
+                    "reason": "The user approved the write.",
+                    "confidence": 0.98,
+                    "interpretation_source": "llm_parser",
+                },
+                "confirm": {
+                    "decision": "approve",
+                    "requested_outputs": [],
+                    "target_scope": {},
+                    "selected_index": None,
+                    "should_execute": True,
+                    "reason": "The user approved the write.",
+                    "confidence": 0.98,
+                    "interpretation_source": "llm_parser",
+                },
+                "批准": {
+                    "decision": "approve",
+                    "requested_outputs": [],
+                    "target_scope": {},
+                    "selected_index": None,
+                    "should_execute": True,
+                    "reason": "The user approved the write.",
+                    "confidence": 0.98,
+                    "interpretation_source": "llm_parser",
+                },
+                "确认": {
+                    "decision": "approve",
+                    "requested_outputs": [],
+                    "target_scope": {},
+                    "selected_index": None,
+                    "should_execute": True,
+                    "reason": "The user approved the write.",
+                    "confidence": 0.98,
+                    "interpretation_source": "llm_parser",
+                },
+                "continue": {
+                    "decision": "approve",
+                    "requested_outputs": [],
+                    "target_scope": {},
+                    "selected_index": None,
+                    "should_execute": True,
+                    "reason": "The user approved the write.",
+                    "confidence": 0.98,
+                    "interpretation_source": "llm_parser",
+                },
+                "go ahead": {
+                    "decision": "approve",
+                    "requested_outputs": [],
+                    "target_scope": {},
+                    "selected_index": None,
+                    "should_execute": True,
+                    "reason": "The user approved the write.",
+                    "confidence": 0.98,
+                    "interpretation_source": "llm_parser",
+                },
+                "ok": {
+                    "decision": "approve",
+                    "requested_outputs": [],
+                    "target_scope": {},
+                    "selected_index": None,
+                    "should_execute": True,
+                    "reason": "The user approved the write.",
+                    "confidence": 0.98,
+                    "interpretation_source": "llm_parser",
+                },
+            }
+        )
+        node = KnowledgeBaseBuilderAgentNode(
+            NoopLLM(),
+            [],
+            pending_action_interpreter=confirmation_interpreter,
+            agent_name="knowledge_base_builder_agent",
+        )
 
         first_result = node(
             {
@@ -443,7 +544,26 @@ class AgentRuntimeMigrationTests(unittest.TestCase):
             "absolute_path": "/tmp/Test.md",
             "target_exists": False,
         }
-        node = KnowledgeBaseBuilderAgentNode(NoopLLM(), [], agent_name="knowledge_base_builder_agent")
+        diff_interpreter = ReplyMapInterpreter(
+            {
+                "show me the diff first": {
+                    "decision": "modify",
+                    "requested_outputs": ["diff"],
+                    "target_scope": {},
+                    "selected_index": None,
+                    "should_execute": False,
+                    "reason": "The user asked to review the diff first.",
+                    "confidence": 0.97,
+                    "interpretation_source": "llm_parser",
+                }
+            }
+        )
+        node = KnowledgeBaseBuilderAgentNode(
+            NoopLLM(),
+            [],
+            pending_action_interpreter=diff_interpreter,
+            agent_name="knowledge_base_builder_agent",
+        )
 
         first_result = node(
             {
@@ -494,7 +614,26 @@ class AgentRuntimeMigrationTests(unittest.TestCase):
             "absolute_path": "/tmp/Test.md",
             "target_exists": False,
         }
-        node = KnowledgeBaseBuilderAgentNode(NoopLLM(), [], agent_name="knowledge_base_builder_agent")
+        cancel_interpreter = ReplyMapInterpreter(
+            {
+                "取消": {
+                    "decision": "reject",
+                    "requested_outputs": [],
+                    "target_scope": {},
+                    "selected_index": None,
+                    "should_execute": False,
+                    "reason": "The user cancelled the write.",
+                    "confidence": 0.96,
+                    "interpretation_source": "llm_parser",
+                }
+            }
+        )
+        node = KnowledgeBaseBuilderAgentNode(
+            NoopLLM(),
+            [],
+            pending_action_interpreter=cancel_interpreter,
+            agent_name="knowledge_base_builder_agent",
+        )
 
         first_result = node(
             {
@@ -545,7 +684,26 @@ class AgentRuntimeMigrationTests(unittest.TestCase):
             "absolute_path": "/tmp/Test.md",
             "target_exists": False,
         }
-        node = KnowledgeBaseBuilderAgentNode(NoopLLM(), [], agent_name="knowledge_base_builder_agent")
+        cancel_interpreter = ReplyMapInterpreter(
+            {
+                "取消": {
+                    "decision": "reject",
+                    "requested_outputs": [],
+                    "target_scope": {},
+                    "selected_index": None,
+                    "should_execute": False,
+                    "reason": "The user cancelled the write.",
+                    "confidence": 0.96,
+                    "interpretation_source": "llm_parser",
+                }
+            }
+        )
+        node = KnowledgeBaseBuilderAgentNode(
+            NoopLLM(),
+            [],
+            pending_action_interpreter=cancel_interpreter,
+            agent_name="knowledge_base_builder_agent",
+        )
         first_result = node(
             {
                 "thread_id": "thread-1",

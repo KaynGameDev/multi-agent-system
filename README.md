@@ -115,6 +115,9 @@ Interface configuration:
 Optional:
 - `GEMINI_MODEL` (default: `gemini-3-flash-preview`)
 - `GEMINI_TEMPERATURE` (default: `0.2`)
+- `PENDING_ACTION_PARSER_MODEL` (default: `GEMINI_MODEL`)
+- `PENDING_ACTION_PARSER_TEMPERATURE` (default: `0.0`)
+- `PENDING_ACTION_PARSER_CONFIDENCE_THRESHOLD` (default: `0.75`)
 - `GEMINI_HTTP_TRUST_ENV` (default: `false`; set to `true` only if Gemini traffic must use `HTTPS_PROXY` / `ALL_PROXY`)
 - `PROJECT_SHEET_RANGE` (default: `Tasks!A1:Z`)
 - `PROJECT_SHEET_CACHE_TTL_SECONDS` (default: `30`)

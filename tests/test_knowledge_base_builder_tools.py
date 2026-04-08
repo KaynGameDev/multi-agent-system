@@ -15,6 +15,14 @@ from app.pending_actions import build_pending_action, resolve_pending_action_rep
 from tools.knowledge_base import resolve_knowledge_markdown_path, write_knowledge_markdown_document
 
 
+class StaticInterpreter:
+    def __init__(self, parsed_reply: dict) -> None:
+        self.parsed_reply = dict(parsed_reply)
+
+    def parse_pending_action_reply(self, _action, _prepared_input):
+        return dict(self.parsed_reply)
+
+
 class KnowledgeBaseBuilderToolTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -95,7 +103,22 @@ class KnowledgeBaseBuilderToolTests(unittest.TestCase):
             summary=f"Write knowledge-base draft to `{resolved['relative_path']}`.",
             target_scope={"files": [resolved["relative_path"]]},
         )
-        execution_contract = resolve_pending_action_reply(pending_action, "approve")["contract"]
+        execution_contract = resolve_pending_action_reply(
+            pending_action,
+            "approve",
+            interpreter=StaticInterpreter(
+                {
+                    "decision": "approve",
+                    "requested_outputs": [],
+                    "target_scope": {},
+                    "selected_index": None,
+                    "should_execute": True,
+                    "reason": "The user approved the write.",
+                    "confidence": 0.99,
+                    "interpretation_source": "llm_parser",
+                }
+            ),
+        )["contract"]
 
         written = write_knowledge_markdown_document.func(
             relative_path=resolved["relative_path"],
@@ -158,7 +181,22 @@ class KnowledgeBaseBuilderToolTests(unittest.TestCase):
             summary=f"Write knowledge-base draft to `{relative_path}`.",
             target_scope={"files": [relative_path]},
         )
-        execution_contract = resolve_pending_action_reply(pending_action, "continue")["contract"]
+        execution_contract = resolve_pending_action_reply(
+            pending_action,
+            "continue",
+            interpreter=StaticInterpreter(
+                {
+                    "decision": "approve",
+                    "requested_outputs": [],
+                    "target_scope": {},
+                    "selected_index": None,
+                    "should_execute": True,
+                    "reason": "The user approved the write.",
+                    "confidence": 0.99,
+                    "interpretation_source": "llm_parser",
+                }
+            ),
+        )["contract"]
 
         written = write_knowledge_markdown_document.func(
             relative_path=relative_path,

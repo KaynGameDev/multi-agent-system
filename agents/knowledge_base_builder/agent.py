@@ -9,6 +9,7 @@ from langchain_core.messages import AIMessage, SystemMessage
 from app.contracts import build_assistant_response
 from app.language import detect_response_language
 from app.messages import extract_latest_human_text
+from app.pending_action_parser import PendingActionReplyInterpreter
 from app.pending_actions import (
     build_pending_action,
     get_pending_action,
@@ -40,11 +41,13 @@ class KnowledgeBaseBuilderAgentNode:
         tools: list,
         *,
         skill_registry: SkillRegistry | None = None,
+        pending_action_interpreter: PendingActionReplyInterpreter | None = None,
         agent_name: str = "",
         tool_ids: tuple[str, ...] = (),
     ) -> None:
         self.llm = llm.bind_tools(tools)
         self.skill_registry = skill_registry
+        self.pending_action_interpreter = pending_action_interpreter
         self.agent_name = agent_name
         self.tool_ids = tuple(tool_ids)
 
@@ -55,7 +58,11 @@ class KnowledgeBaseBuilderAgentNode:
             and pending_action.get("requested_by_agent") == self.agent_name
             and is_pending_action_active(pending_action)
         ):
-            pending_action_response = build_pending_action_response(state, pending_action)
+            pending_action_response = build_pending_action_response(
+                state,
+                pending_action,
+                pending_action_interpreter=self.pending_action_interpreter,
+            )
             if pending_action_response is not None:
                 return pending_action_response
 
@@ -264,13 +271,22 @@ def build_builder_pending_action(
     )
 
 
-def build_pending_action_response(state: AgentState, pending_action: dict[str, Any]) -> dict[str, Any] | None:
+def build_pending_action_response(
+    state: AgentState,
+    pending_action: dict[str, Any],
+    *,
+    pending_action_interpreter: PendingActionReplyInterpreter | None = None,
+) -> dict[str, Any] | None:
     latest_user_text = extract_latest_human_text(state)
     if not latest_user_text.strip():
         return None
 
     preferred_language = detect_response_language(latest_user_text)
-    resolution = resolve_pending_action_reply(pending_action, latest_user_text)
+    resolution = resolve_pending_action_reply(
+        pending_action,
+        latest_user_text,
+        interpreter=pending_action_interpreter,
+    )
     contract = resolution["contract"]
     validation = resolution["validation"]
 

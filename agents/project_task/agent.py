@@ -7,6 +7,7 @@ from langchain_core.messages import AIMessage, SystemMessage
 from app.contracts import build_assistant_response
 from app.language import detect_response_language
 from app.messages import extract_latest_human_text, stringify_message_content
+from app.pending_action_parser import PendingActionReplyInterpreter
 from app.pending_actions import (
     PendingActionSelectionOption,
     build_pending_action,
@@ -37,16 +38,22 @@ class ProjectTaskAgentNode:
         tools: list,
         *,
         skill_registry: SkillRegistry | None = None,
+        pending_action_interpreter: PendingActionReplyInterpreter | None = None,
         agent_name: str = "",
         tool_ids: tuple[str, ...] = (),
     ) -> None:
         self.llm = llm.bind_tools(tools)
         self.skill_registry = skill_registry
+        self.pending_action_interpreter = pending_action_interpreter
         self.agent_name = agent_name
         self.tool_ids = tuple(tool_ids)
 
     def __call__(self, state: AgentState) -> dict:
-        rendered_response = build_project_task_response(state, agent_name=self.agent_name)
+        rendered_response = build_project_task_response(
+            state,
+            agent_name=self.agent_name,
+            pending_action_interpreter=self.pending_action_interpreter,
+        )
         if rendered_response is not None:
             return rendered_response
 
@@ -173,7 +180,12 @@ TASK_FIELD_LABELS_ZH = {
 }
 
 
-def build_project_task_response(state: AgentState, *, agent_name: str) -> dict[str, Any] | None:
+def build_project_task_response(
+    state: AgentState,
+    *,
+    agent_name: str,
+    pending_action_interpreter: PendingActionReplyInterpreter | None = None,
+) -> dict[str, Any] | None:
     latest_user_text = extract_latest_human_text(state)
     preferred_language = detect_response_language(latest_user_text)
     pending_action = get_pending_action(state)
@@ -182,6 +194,7 @@ def build_project_task_response(state: AgentState, *, agent_name: str) -> dict[s
             state,
             pending_action=pending_action,
             preferred_language=preferred_language,
+            pending_action_interpreter=pending_action_interpreter,
         )
         if follow_up_result is not None:
             return follow_up_result
@@ -313,9 +326,14 @@ def build_task_pending_action_response(
     *,
     pending_action: dict[str, Any],
     preferred_language: str,
+    pending_action_interpreter: PendingActionReplyInterpreter | None = None,
 ) -> dict[str, Any] | None:
     latest_user_text = extract_latest_human_text(state)
-    resolution = resolve_pending_action_reply(pending_action, latest_user_text)
+    resolution = resolve_pending_action_reply(
+        pending_action,
+        latest_user_text,
+        interpreter=pending_action_interpreter,
+    )
     contract = resolution["contract"]
     validation = resolution["validation"]
 

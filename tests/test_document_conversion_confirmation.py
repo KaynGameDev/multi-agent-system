@@ -24,6 +24,14 @@ class ConversionLLM:
         return AIMessage(content="rendered")
 
 
+class StaticInterpreter:
+    def __init__(self, parsed_reply: dict) -> None:
+        self.parsed_reply = dict(parsed_reply)
+
+    def parse_pending_action_reply(self, _action, _prepared_input):
+        return dict(self.parsed_reply)
+
+
 class DocumentConversionConfirmationTests(unittest.TestCase):
     def setUp(self) -> None:
         self.tempdir = tempfile.TemporaryDirectory()
@@ -37,7 +45,11 @@ class DocumentConversionConfirmationTests(unittest.TestCase):
         self.tempdir.cleanup()
 
     def _build_node_and_session(self) -> tuple[DocumentConversionAgentNode, object]:
-        node = DocumentConversionAgentNode(ConversionLLM(), settings=self.settings, agent_name="document_conversion_agent")
+        node = DocumentConversionAgentNode(
+            ConversionLLM(),
+            settings=self.settings,
+            agent_name="document_conversion_agent",
+        )
         session = node.store.create_session(thread_id="thread-1", channel_id="channel-1", user_id="user-1")
         session = node.store.update_session(
             session.session_id,
@@ -67,6 +79,18 @@ class DocumentConversionConfirmationTests(unittest.TestCase):
 
     def test_document_conversion_pending_action_publishes_on_approval(self) -> None:
         node, session = self._build_node_and_session()
+        node.pending_action_interpreter = StaticInterpreter(
+            {
+                "decision": "approve",
+                "requested_outputs": [],
+                "target_scope": {},
+                "selected_index": None,
+                "should_execute": True,
+                "reason": "The user approved publishing.",
+                "confidence": 0.97,
+                "interpretation_source": "llm_parser",
+            }
+        )
         pending_action = self._build_pending_action(session)
 
         def fake_publish(store, current_session, knowledge_root):
@@ -104,6 +128,18 @@ class DocumentConversionConfirmationTests(unittest.TestCase):
 
     def test_document_conversion_pending_action_cancels(self) -> None:
         node, session = self._build_node_and_session()
+        node.pending_action_interpreter = StaticInterpreter(
+            {
+                "decision": "reject",
+                "requested_outputs": [],
+                "target_scope": {},
+                "selected_index": None,
+                "should_execute": False,
+                "reason": "The user rejected publishing.",
+                "confidence": 0.97,
+                "interpretation_source": "llm_parser",
+            }
+        )
         pending_action = self._build_pending_action(session)
 
         with patch("agents.document_conversion.agent.render_conversion_response", side_effect=lambda *args, **kwargs: f"{kwargs['response_kind']}:{kwargs['preferred_language']}"):

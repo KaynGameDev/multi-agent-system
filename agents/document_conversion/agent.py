@@ -23,6 +23,7 @@ from agents.document_conversion.rendering import (
     render_conversion_response,
 )
 from app.language import detect_response_language
+from app.pending_action_parser import PendingActionReplyInterpreter
 from app.pending_actions import (
     build_pending_action,
     get_pending_action,
@@ -152,11 +153,20 @@ def build_tool_runtime_updates(trace: list[dict[str, Any]]) -> dict[str, Any]:
 
 
 class DocumentConversionAgentNode:
-    def __init__(self, llm, settings=None, *, skill_registry: SkillRegistry | None = None, agent_name: str = "") -> None:
+    def __init__(
+        self,
+        llm,
+        settings=None,
+        *,
+        skill_registry: SkillRegistry | None = None,
+        pending_action_interpreter: PendingActionReplyInterpreter | None = None,
+        agent_name: str = "",
+    ) -> None:
         self.llm = llm
         self.extractor = llm.with_structured_output(ConversionDraftPayload)
         self.settings = settings or load_settings()
         self.skill_registry = skill_registry
+        self.pending_action_interpreter = pending_action_interpreter
         self.agent_name = agent_name
         self.store = ConversionSessionStore(self._resolve_path(self.settings.conversion_work_dir, DEFAULT_CONVERSION_WORK_DIR))
         self.knowledge_root = self._resolve_path(
@@ -572,7 +582,11 @@ class DocumentConversionAgentNode:
     ) -> dict[str, Any] | None:
         tool_execution_trace: list[dict[str, Any]] = []
         latest_text = extract_latest_human_text(state)
-        resolution = resolve_pending_action_reply(pending_action, latest_text)
+        resolution = resolve_pending_action_reply(
+            pending_action,
+            latest_text,
+            interpreter=self.pending_action_interpreter,
+        )
         contract = resolution["contract"]
         validation = resolution["validation"]
 

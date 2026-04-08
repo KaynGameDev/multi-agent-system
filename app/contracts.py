@@ -70,6 +70,8 @@ class ExecutionContract(TypedDict, total=False):
     requested_outputs: list[str]
     constraints: dict[str, Any]
     should_execute: bool
+    interpretation_source: str
+    confidence: float
 
 
 class ExecutionContractValidation(TypedDict, total=False):

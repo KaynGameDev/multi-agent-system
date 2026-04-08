@@ -12,6 +12,7 @@ from langchain_google_genai import ChatGoogleGenerativeAI
 from app.checkpoints import build_checkpoint_store
 from app.config import is_agent_runtime_enabled, is_slack_enabled, load_settings, validate_bootstrap_settings
 from app.graph import build_agent_graph, build_web_agent_registrations
+from app.pending_action_parser import LLMPendingActionInterpreter
 from interfaces.slack.listener import SlackListener
 from interfaces.web.server import WebServer, format_web_chat_url
 
@@ -77,14 +78,32 @@ def bootstrap_system() -> list[object]:
             temperature=settings.gemini_temperature,
             client_args={"trust_env": settings.gemini_http_trust_env},
         )
+        pending_action_parser_llm = ChatGoogleGenerativeAI(
+            model=settings.pending_action_parser_model,
+            temperature=settings.pending_action_parser_temperature,
+            client_args={"trust_env": settings.gemini_http_trust_env},
+        )
+        pending_action_interpreter = LLMPendingActionInterpreter(
+            pending_action_parser_llm,
+            confidence_threshold=settings.pending_action_parser_confidence_threshold,
+        )
         checkpoint_store = build_checkpoint_store(settings)
         try:
-            agent_graph = build_agent_graph(llm, checkpointer=checkpoint_store.saver, settings=settings)
+            agent_graph = build_agent_graph(
+                llm,
+                checkpointer=checkpoint_store.saver,
+                settings=settings,
+                pending_action_interpreter=pending_action_interpreter,
+            )
             web_graph = build_agent_graph(
                 llm,
                 checkpointer=checkpoint_store.saver,
                 settings=settings,
-                agent_registrations=build_web_agent_registrations(settings=settings),
+                agent_registrations=build_web_agent_registrations(
+                    settings=settings,
+                    pending_action_interpreter=pending_action_interpreter,
+                ),
+                pending_action_interpreter=pending_action_interpreter,
             )
         except Exception:
             checkpoint_store.close()
