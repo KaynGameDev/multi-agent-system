@@ -4,7 +4,7 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Jade Agent</title>
-    <link rel="stylesheet" href="/static/app.css" />
+    <link rel="stylesheet" href="{{ APP_CSS_HREF }}" />
   </head>
   <body>
     <div class="app-shell">
@@ -16,7 +16,7 @@
         <section class="sidebar__section">
           <div class="sidebar__label">
             Recent chats
-            <span class="sidebar__label-hint">Right-click for actions</span>
+            <span class="sidebar__label-hint">Right-click or use ... for actions</span>
           </div>
           <nav class="conversation-list" id="conversationList"></nav>
         </section>
@@ -36,8 +36,9 @@
       </aside>
 
       <div class="sidebar-overlay" id="sidebarOverlay"></div>
-      <div class="context-menu" id="conversationContextMenu" hidden>
-        <button class="context-menu__item" id="contextMenuRenameButton" type="button">Rename chat</button>
+      <div class="context-menu" id="conversationContextMenu" role="menu" hidden>
+        <button class="context-menu__item" id="contextMenuRenameButton" role="menuitem" type="button">Rename chat</button>
+        <button class="context-menu__item context-menu__item--danger" id="contextMenuDeleteButton" role="menuitem" type="button">Delete chat</button>
       </div>
 
       <main class="main-panel">
@@ -48,14 +49,6 @@
             <span></span>
           </button>
           <div class="mobile-header__title">Jade Agent</div>
-        </header>
-
-        <header class="chat-header">
-          <div class="chat-header__eyebrow">Current chat</div>
-          <div class="chat-header__row">
-            <h2 class="chat-header__title" id="activeConversationTitle">New chat</h2>
-            <button class="chat-header__rename" id="renameConversationButton" type="button">Rename</button>
-          </div>
         </header>
 
         <section class="chat-stage" id="chatStage">
@@ -101,6 +94,6 @@
       </main>
     </div>
 
-    <script src="/static/app.js" defer></script>
+    <script src="{{ APP_JS_HREF }}" defer></script>
   </body>
 </html>

@@ -21,14 +21,86 @@ const elements = {
   mobileMenuButton: document.getElementById("mobileMenuButton"),
   sidebar: document.getElementById("sidebar"),
   sidebarOverlay: document.getElementById("sidebarOverlay"),
-  activeConversationTitle: document.getElementById("activeConversationTitle"),
-  renameConversationButton: document.getElementById("renameConversationButton"),
   conversationContextMenu: document.getElementById("conversationContextMenu"),
   contextMenuRenameButton: document.getElementById("contextMenuRenameButton"),
+  contextMenuDeleteButton: document.getElementById("contextMenuDeleteButton"),
 };
 
 const PROFILE_STORAGE_KEY = "jade-web-profile";
 const ACTIVE_CONVERSATION_STORAGE_KEY = "jade-active-conversation";
+const CONTEXT_MENU_DEBUG_VERSION = "2026-04-09-ctx-debug-1";
+const CONTEXT_MENU_DEBUG_ENABLED = new URLSearchParams(window.location.search).has("debugContextMenu");
+
+let contextMenuDebugPanel = null;
+
+function describeDebugTarget(target) {
+  if (!(target instanceof Element)) {
+    return String(target);
+  }
+
+  const tagName = target.tagName.toLowerCase();
+  const idPart = target.id ? `#${target.id}` : "";
+  const classPart = target.classList.length ? `.${Array.from(target.classList).join(".")}` : "";
+  return `${tagName}${idPart}${classPart}`;
+}
+
+function ensureContextMenuDebugPanel() {
+  if (!CONTEXT_MENU_DEBUG_ENABLED || contextMenuDebugPanel) {
+    return contextMenuDebugPanel;
+  }
+
+  const panel = document.createElement("aside");
+  panel.className = "debug-panel";
+  panel.innerHTML = `
+    <div class="debug-panel__header">
+      <strong>Context Menu Debug</strong>
+      <span>${escapeHtml(CONTEXT_MENU_DEBUG_VERSION)}</span>
+    </div>
+    <div class="debug-panel__body" id="contextMenuDebugBody"></div>
+  `;
+  document.body.appendChild(panel);
+  contextMenuDebugPanel = panel.querySelector("#contextMenuDebugBody");
+  return contextMenuDebugPanel;
+}
+
+function logContextMenuDebug(label, event = null, details = {}) {
+  if (!CONTEXT_MENU_DEBUG_ENABLED) {
+    return;
+  }
+
+  const payload = {
+    label,
+    ...(event
+      ? {
+          type: event.type,
+          button: "button" in event ? event.button : undefined,
+          buttons: "buttons" in event ? event.buttons : undefined,
+          clientX: "clientX" in event ? event.clientX : undefined,
+          clientY: "clientY" in event ? event.clientY : undefined,
+          defaultPrevented: event.defaultPrevented,
+          target: describeDebugTarget(event.target),
+        }
+      : {}),
+    ...details,
+  };
+
+  const timestamp = new Date().toLocaleTimeString();
+  console.info("[ctx-debug]", CONTEXT_MENU_DEBUG_VERSION, payload);
+
+  const body = ensureContextMenuDebugPanel();
+  if (!body) {
+    return;
+  }
+
+  const row = document.createElement("div");
+  row.className = "debug-panel__entry";
+  row.textContent = `${timestamp} ${JSON.stringify(payload)}`;
+  body.prepend(row);
+
+  while (body.childElementCount > 30) {
+    body.lastElementChild?.remove();
+  }
+}
 
 async function api(path, options = {}) {
   const response = await fetch(path, {
@@ -135,10 +207,20 @@ function openSidebar() {
   elements.sidebarOverlay.classList.add("is-open");
 }
 
+function isConversationContextMenuOpen() {
+  return !elements.conversationContextMenu.hidden;
+}
+
 function closeConversationContextMenu() {
+  logContextMenuDebug("menu-close", null, {
+    conversationId: state.contextMenuConversationId,
+    open: isConversationContextMenuOpen(),
+  });
   state.contextMenuConversationId = null;
   state.contextMenuConversationTitle = "New chat";
   elements.conversationContextMenu.hidden = true;
+  elements.conversationContextMenu.style.left = "";
+  elements.conversationContextMenu.style.top = "";
 }
 
 function openConversationContextMenu(conversationId, conversationTitle, clientX, clientY) {
@@ -157,13 +239,19 @@ function openConversationContextMenu(conversationId, conversationTitle, clientX,
 
   menu.style.left = `${left}px`;
   menu.style.top = `${top}px`;
+  logContextMenuDebug("menu-open", null, {
+    conversationId,
+    conversationTitle: conversationTitle || "New chat",
+    requestedX: clientX,
+    requestedY: clientY,
+    left,
+    top,
+  });
 }
 
 function updateConversationHeader(title) {
   const normalizedTitle = (title || "New chat").trim() || "New chat";
   state.activeConversationTitle = normalizedTitle;
-  elements.activeConversationTitle.textContent = normalizedTitle;
-  elements.renameConversationButton.disabled = !state.activeConversationId;
 }
 
 async function renameConversation(conversationId, currentTitle) {
@@ -185,6 +273,37 @@ async function renameConversation(conversationId, currentTitle) {
     updateConversationHeader(normalizedTitle);
   }
   await refreshConversationList();
+}
+
+async function deleteConversation(conversationId, currentTitle) {
+  const normalizedTitle = (currentTitle || "New chat").trim() || "New chat";
+  const confirmed = window.confirm(`Delete "${normalizedTitle}"? This cannot be undone.`);
+  if (!confirmed) {
+    return;
+  }
+
+  const wasActiveConversation = conversationId === state.activeConversationId;
+  await api(`/api/conversations/${conversationId}`, { method: "DELETE" });
+
+  if (wasActiveConversation) {
+    state.activeConversationId = null;
+    window.localStorage.removeItem(ACTIVE_CONVERSATION_STORAGE_KEY);
+    updateConversationHeader("New chat");
+    renderMessages({ messages: [] });
+  }
+
+  await refreshConversationList();
+
+  if (!wasActiveConversation) {
+    return;
+  }
+
+  if (state.conversations.length > 0) {
+    await loadConversation(state.conversations[0].conversation_id, { skipListRefresh: true });
+    return;
+  }
+
+  await createConversation();
 }
 
 function renderConversationList() {
@@ -217,6 +336,22 @@ function renderConversationList() {
     for (const conversation of conversations) {
       const row = document.createElement("div");
       row.className = "conversation-list__row";
+      row.dataset.conversationId = conversation.conversation_id;
+      row.dataset.conversationTitle = conversation.title || "New chat";
+      const openActionsMenuFromPointer = (event) => {
+        logContextMenuDebug("row-open-request", event, {
+          conversationId: conversation.conversation_id,
+          source: describeDebugTarget(event.currentTarget),
+        });
+        event.preventDefault();
+        event.stopPropagation();
+        openConversationContextMenu(
+          conversation.conversation_id,
+          conversation.title || "New chat",
+          event.clientX,
+          event.clientY,
+        );
+      };
 
       const button = document.createElement("button");
       button.type = "button";
@@ -233,17 +368,63 @@ function renderConversationList() {
         await loadConversation(conversation.conversation_id);
         closeSidebar();
       });
-      row.addEventListener("contextmenu", (event) => {
+      button.addEventListener("keydown", (event) => {
+        if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) {
+          return;
+        }
+
+        logContextMenuDebug("button-keydown-open-request", event, {
+          conversationId: conversation.conversation_id,
+          key: event.key,
+          shiftKey: event.shiftKey,
+        });
         event.preventDefault();
+        const rect = button.getBoundingClientRect();
         openConversationContextMenu(
           conversation.conversation_id,
           conversation.title || "New chat",
-          event.clientX,
-          event.clientY,
+          rect.right - 8,
+          rect.bottom + 6,
         );
       });
+      button.addEventListener("contextmenu", openActionsMenuFromPointer);
 
-      row.append(button);
+      row.addEventListener("contextmenu", (event) => {
+        logContextMenuDebug("row-contextmenu", event, {
+          conversationId: conversation.conversation_id,
+          hitRowDirectly: event.target === row,
+        });
+        if (event.target !== row) {
+          return;
+        }
+        openActionsMenuFromPointer(event);
+      });
+
+      const actionsButton = document.createElement("button");
+      actionsButton.type = "button";
+      actionsButton.className = "conversation-list__actions";
+      actionsButton.setAttribute("aria-label", `Open actions for ${conversation.title || "chat"}`);
+      actionsButton.setAttribute("aria-haspopup", "menu");
+      actionsButton.setAttribute("aria-controls", "conversationContextMenu");
+      actionsButton.textContent = "...";
+      actionsButton.title = "Open chat actions";
+      actionsButton.addEventListener("click", (event) => {
+        logContextMenuDebug("actions-button-click", event, {
+          conversationId: conversation.conversation_id,
+        });
+        event.preventDefault();
+        event.stopPropagation();
+        const rect = actionsButton.getBoundingClientRect();
+        openConversationContextMenu(
+          conversation.conversation_id,
+          conversation.title || "New chat",
+          rect.right - 8,
+          rect.bottom + 6,
+        );
+      });
+      actionsButton.addEventListener("contextmenu", openActionsMenuFromPointer);
+
+      row.append(button, actionsButton);
       group.appendChild(row);
       renderedCount += 1;
     }
@@ -451,32 +632,51 @@ elements.displayNameInput.addEventListener("change", saveProfile);
 elements.emailInput.addEventListener("change", saveProfile);
 elements.mobileMenuButton.addEventListener("click", openSidebar);
 elements.sidebarOverlay.addEventListener("click", closeSidebar);
-document.addEventListener("click", (event) => {
-  if (elements.conversationContextMenu.hidden) {
+elements.conversationContextMenu.addEventListener("contextmenu", (event) => {
+  logContextMenuDebug("menu-contextmenu", event);
+  event.preventDefault();
+});
+document.addEventListener("pointerdown", (event) => {
+  logContextMenuDebug("document-pointerdown", event, {
+    menuOpen: isConversationContextMenuOpen(),
+  });
+  if (!isConversationContextMenuOpen()) {
+    return;
+  }
+  if (event.button !== 0 && event.button !== -1) {
+    logContextMenuDebug("document-pointerdown-ignored", event, {
+      reason: "non-primary-button",
+    });
     return;
   }
   if (!elements.conversationContextMenu.contains(event.target)) {
+    logContextMenuDebug("document-pointerdown-close", event);
+    closeConversationContextMenu();
+  }
+}, true);
+document.addEventListener("contextmenu", (event) => {
+  logContextMenuDebug("document-contextmenu", event, {
+    menuOpen: isConversationContextMenuOpen(),
+    insideMenu: elements.conversationContextMenu.contains(event.target),
+  });
+  if (elements.conversationContextMenu.contains(event.target)) {
+    event.preventDefault();
+  } else if (isConversationContextMenuOpen()) {
+    logContextMenuDebug("document-contextmenu-close", event);
     closeConversationContextMenu();
   }
 });
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
+    logContextMenuDebug("document-keydown-escape", event);
+  }
+  if (event.key === "Escape") {
     closeConversationContextMenu();
   }
 });
+document.addEventListener("scroll", closeConversationContextMenu, true);
 window.addEventListener("blur", closeConversationContextMenu);
 window.addEventListener("resize", closeConversationContextMenu);
-elements.renameConversationButton.addEventListener("click", async () => {
-  if (!state.activeConversationId) {
-    return;
-  }
-
-  try {
-    await renameConversation(state.activeConversationId, state.activeConversationTitle);
-  } catch (error) {
-    window.alert(error.message || "Could not rename that chat.");
-  }
-});
 elements.contextMenuRenameButton.addEventListener("click", async () => {
   if (!state.contextMenuConversationId) {
     return;
@@ -490,6 +690,21 @@ elements.contextMenuRenameButton.addEventListener("click", async () => {
     await renameConversation(conversationId, conversationTitle);
   } catch (error) {
     window.alert(error.message || "Could not rename that chat.");
+  }
+});
+elements.contextMenuDeleteButton.addEventListener("click", async () => {
+  if (!state.contextMenuConversationId) {
+    return;
+  }
+
+  const conversationId = state.contextMenuConversationId;
+  const conversationTitle = state.contextMenuConversationTitle;
+  closeConversationContextMenu();
+
+  try {
+    await deleteConversation(conversationId, conversationTitle);
+  } catch (error) {
+    window.alert(error.message || "Could not delete that chat.");
   }
 });
 
@@ -510,3 +725,11 @@ bootstrap().catch((error) => {
     </article>
   `;
 });
+
+if (CONTEXT_MENU_DEBUG_ENABLED) {
+  ensureContextMenuDebugPanel();
+  logContextMenuDebug("debug-enabled", null, {
+    version: CONTEXT_MENU_DEBUG_VERSION,
+    userAgent: navigator.userAgent,
+  });
+}

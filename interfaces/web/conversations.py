@@ -167,6 +167,14 @@ class WebConversationStore:
             self._persist_locked()
             return self._serialize_conversation(conversation)
 
+    def delete_conversation(self, conversation_id: str) -> None:
+        with self._lock:
+            if conversation_id not in self._conversations:
+                raise ConversationNotFoundError(conversation_id)
+
+            del self._conversations[conversation_id]
+            self._persist_locked()
+
     def _load(self) -> None:
         if self._storage_path is None or not self._storage_path.exists():
             return

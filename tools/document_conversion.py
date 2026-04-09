@@ -553,6 +553,41 @@ class ConversionSessionStore:
             ).fetchall()
         return [self._row_to_source(row) for row in rows]
 
+    def delete_sessions_by_thread(self, thread_id: str) -> int:
+        sessions = self._list_sessions_by_thread(thread_id)
+        if not sessions:
+            return 0
+
+        session_ids = [session.session_id for session in sessions]
+        with self._connect() as connection:
+            placeholders = ",".join("?" for _ in session_ids)
+            connection.execute(
+                f"DELETE FROM conversion_sources WHERE session_id IN ({placeholders})",
+                tuple(session_ids),
+            )
+            connection.execute(
+                "DELETE FROM conversion_sessions WHERE thread_id = ?",
+                (thread_id,),
+            )
+            connection.commit()
+
+        for session_id in session_ids:
+            shutil.rmtree(self.uploads_dir / session_id, ignore_errors=True)
+            shutil.rmtree(self.staging_dir / session_id, ignore_errors=True)
+        return len(session_ids)
+
+    def _list_sessions_by_thread(self, thread_id: str) -> list[ConversionSessionRecord]:
+        with self._connect() as connection:
+            rows = connection.execute(
+                """
+                SELECT * FROM conversion_sessions
+                WHERE thread_id = ?
+                ORDER BY updated_at DESC
+                """,
+                (thread_id,),
+            ).fetchall()
+        return [session for row in rows if (session := self._row_to_session(row)) is not None]
+
     def _row_to_session(self, row: sqlite3.Row | None) -> ConversionSessionRecord | None:
         if row is None:
             return None

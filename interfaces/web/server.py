@@ -4,8 +4,8 @@ import logging
 from pathlib import Path
 
 import uvicorn
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import FileResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, HTMLResponse
 from fastapi.staticfiles import StaticFiles
 from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, Field
@@ -83,11 +83,27 @@ class WebServer:
 
     def _build_app(self) -> FastAPI:
         app = FastAPI(title="Jade Agent Web Chat")
+
+        @app.middleware("http")
+        async def disable_frontend_caching(request: Request, call_next):
+            response = await call_next(request)
+            if request.url.path == "/" or request.url.path.startswith("/static/"):
+                response.headers["Cache-Control"] = "no-store, no-cache, must-revalidate, max-age=0"
+                response.headers["Pragma"] = "no-cache"
+                response.headers["Expires"] = "0"
+            return response
+
         app.mount("/static", StaticFiles(directory=str(self.static_dir)), name="static")
 
         @app.get("/")
-        def index() -> FileResponse:
-            return FileResponse(self.static_dir / "index.html")
+        def index() -> HTMLResponse:
+            template = (self.static_dir / "index.html").read_text(encoding="utf-8")
+            html = (
+                template
+                .replace("{{ APP_CSS_HREF }}", self._versioned_static_path("app.css"))
+                .replace("{{ APP_JS_HREF }}", self._versioned_static_path("app.js"))
+            )
+            return HTMLResponse(content=html)
 
         @app.get("/api/health")
         def health() -> dict[str, bool]:
@@ -118,6 +134,30 @@ class WebServer:
                 )
             except ConversationNotFoundError as exc:
                 raise HTTPException(status_code=404, detail="Conversation not found.") from exc
+
+        @app.delete("/api/conversations/{conversation_id}")
+        def delete_conversation(conversation_id: str) -> dict[str, object]:
+            thread_id = f"web:{conversation_id}"
+            try:
+                self.conversation_store.delete_conversation(conversation_id)
+            except ConversationNotFoundError as exc:
+                raise HTTPException(status_code=404, detail="Conversation not found.") from exc
+
+            try:
+                self.conversion_store.delete_sessions_by_thread(thread_id)
+            except Exception:
+                logger.warning("Failed to delete conversion sessions for thread=%s", thread_id, exc_info=True)
+
+            if self.checkpoint_store is not None:
+                try:
+                    self.checkpoint_store.delete_thread(thread_id)
+                except Exception:
+                    logger.warning("Failed to delete checkpoint thread=%s", thread_id, exc_info=True)
+
+            return {
+                "deleted": True,
+                "conversation_id": conversation_id,
+            }
 
         @app.post("/api/conversations/{conversation_id}/messages")
         def send_message(conversation_id: str, payload: WebMessageRequest) -> dict:
@@ -203,6 +243,11 @@ class WebServer:
             }
 
         return app
+
+    def _versioned_static_path(self, relative_path: str) -> str:
+        asset_path = self.static_dir / relative_path
+        version = asset_path.stat().st_mtime_ns
+        return f"/static/{relative_path}?v={version}"
 
     def _resolve_path(self, configured_value: str) -> Path:
         return resolve_project_path(configured_value, self.settings.conversion_work_dir)

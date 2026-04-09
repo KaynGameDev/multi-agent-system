@@ -30,7 +30,8 @@ class WebServerApiTests(unittest.TestCase):
         self.addCleanup(self.tempdir.cleanup)
         self.root = Path(self.tempdir.name)
         self.settings = make_settings(self.root / "runtime")
-        self.client = TestClient(WebServer(agent_graph=DummyGraph(), settings=self.settings).app)
+        self.server = WebServer(agent_graph=DummyGraph(), settings=self.settings)
+        self.client = TestClient(self.server.app)
 
     def test_can_rename_conversation(self) -> None:
         conversation = self.client.post("/api/conversations", json={"title": "Original"}).json()
@@ -55,6 +56,53 @@ class WebServerApiTests(unittest.TestCase):
 
         self.assertEqual(response.status_code, 404)
         self.assertEqual(response.json()["detail"], "Conversation not found.")
+
+    def test_can_delete_conversation_and_linked_conversion_session(self) -> None:
+        conversation = self.client.post("/api/conversations", json={"title": "Disposable"}).json()
+        self.server.conversion_store.create_session(
+            thread_id=f"web:{conversation['conversation_id']}",
+            channel_id=conversation["conversation_id"],
+            user_id="tester@example.com",
+        )
+
+        response = self.client.delete(f"/api/conversations/{conversation['conversation_id']}")
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(
+            response.json(),
+            {"deleted": True, "conversation_id": conversation["conversation_id"]},
+        )
+        self.assertIsNone(
+            self.server.conversion_store.get_active_session_by_thread(
+                f"web:{conversation['conversation_id']}"
+            )
+        )
+
+        missing_response = self.client.get(f"/api/conversations/{conversation['conversation_id']}")
+        self.assertEqual(missing_response.status_code, 404)
+
+    def test_delete_returns_not_found_for_missing_conversation(self) -> None:
+        response = self.client.delete("/api/conversations/missing")
+
+        self.assertEqual(response.status_code, 404)
+        self.assertEqual(response.json()["detail"], "Conversation not found.")
+
+    def test_frontend_responses_disable_caching(self) -> None:
+        index_response = self.client.get("/")
+        self.assertEqual(index_response.status_code, 200)
+        self.assertEqual(
+            index_response.headers.get("cache-control"),
+            "no-store, no-cache, must-revalidate, max-age=0",
+        )
+        self.assertIn("/static/app.css?v=", index_response.text)
+        self.assertIn("/static/app.js?v=", index_response.text)
+
+        static_response = self.client.get("/static/app.js")
+        self.assertEqual(static_response.status_code, 200)
+        self.assertEqual(
+            static_response.headers.get("cache-control"),
+            "no-store, no-cache, must-revalidate, max-age=0",
+        )
 
 
 if __name__ == "__main__":

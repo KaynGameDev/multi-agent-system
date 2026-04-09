@@ -201,36 +201,11 @@
       ]
     },
     {
-      "conversation_id": "7e8a1fa489964b4aa43d37c9be50c4e1",
-      "title": "test",
-      "created_at": "2026-04-08T10:25:47.734495+00:00",
-      "updated_at": "2026-04-08T10:53:26.400328+00:00",
-      "messages": [
-        {
-          "id": "5abdf07f73904c738cb73afabecba529",
-          "role": "user",
-          "markdown": "hello",
-          "created_at": "2026-04-08T10:26:00.177071+00:00"
-        },
-        {
-          "id": "f43523b3f800408cb6a762e0ddd2d6cc",
-          "role": "assistant",
-          "markdown": "[{'type': 'text', 'text': \"Hello! I'm Jade. How can I help you today?\", 'extras': {'signature': 'EukDCuYDAb4+9vve8ACRZU9vgi2/0uYutWBrhq9KS5qDhQVP5x37dDc/k9ueT+B88NTjfM7HMHEEQvY+5St1Nv88MRlr+CIdcXJOeo9UZhd3dgEtfJtHI2kte7i+FwUS6qC0g/Oe4GFMoWdDsOJUu9vuLP2mMuECuokLS4aGGbSYNsHXehIRjcBFHRLeBrp57T+04T7E8Eeu2rswrWCY3E5DOyr2HulljoRoR6pAMkKIHEJjSX8MkE4qKaxO5UJbWv7ywH9mUCWQMAlM8OT1MyRgQJlYKlscBKk3jZfPGFr55/mbfgRR4d2NN/oD3/udwaEs68SQDuFv8tnRwYLq3EfjKxvHbV4+pft0+DFO1Ynbb50IeFCyYhXVdjNQHuNbW2IJBdoF8bF8m+IutIhS8/pi1m/ksnoOxwKUozO6efy8YMt//nC8skoBYTH/nH6NNHq0N45v5TElVRuEZnBK3+2qpzeoj7ffty8p3yTviAdmJgYvJoITwOAbhh1oCAmxdKRSmtZ5mmdlfLCMbuLVQlkmHY6a9frIibFzYiVaL25ZoQ9Z1P8An1guY1xUvhoR7dNdTdDXxEL7x7UQ5pqqefyT+5rUyuaL48PugJX59d52mvj3IaqxKTNiUC7oWFUzpPnI7Z5R1UcL1OLb'}}]",
-          "created_at": "2026-04-08T10:26:02.775058+00:00"
-        },
-        {
-          "id": "fbd984d23ac048cfa98eca27f87bb24d",
-          "role": "user",
-          "markdown": "hello",
-          "created_at": "2026-04-08T10:53:23.608885+00:00"
-        },
-        {
-          "id": "fe4e1a6a484d440eb16d47f95e910a4e",
-          "role": "assistant",
-          "markdown": "Hello again! Is there anything specific you'd like to chat about or any general questions I can help you with?",
-          "created_at": "2026-04-08T10:53:26.400328+00:00"
-        }
-      ]
+      "conversation_id": "66f52bab87cb4c8e90031d17626b8e43",
+      "title": "New chat",
+      "created_at": "2026-04-09T03:27:56.519134+00:00",
+      "updated_at": "2026-04-09T03:27:56.519134+00:00",
+      "messages": []
     }
   ]
 }

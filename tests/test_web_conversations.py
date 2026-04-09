@@ -47,6 +47,17 @@ class WebConversationStoreTests(unittest.TestCase):
 
         self.assertEqual(renamed["title"], "New chat")
 
+    def test_delete_persists_across_store_reload(self) -> None:
+        store = WebConversationStore(self.storage_path)
+        created = store.create_conversation(title="Disposable")
+
+        store.delete_conversation(created["conversation_id"])
+        reloaded_store = WebConversationStore(self.storage_path)
+
+        with self.assertRaises(KeyError):
+            reloaded_store.get_conversation(created["conversation_id"])
+        self.assertEqual(reloaded_store.list_conversations(), [])
+
 
 if __name__ == "__main__":
     unittest.main()
