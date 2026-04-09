@@ -12,6 +12,8 @@ from app.messages import extract_latest_human_text
 from app.pending_action_parser import PendingActionReplyInterpreter
 from app.pending_actions import (
     build_pending_action,
+    build_write_knowledge_approval_payload,
+    compute_approval_payload_hash,
     get_pending_action,
     is_pending_action_active,
     resolve_pending_action_reply,
@@ -259,6 +261,13 @@ def build_builder_pending_action(
         "tool_invocation": tool_invocation,
         "tool_result": dict(tool_result),
     }
+    approval_payload = build_write_knowledge_approval_payload(
+        relative_path=relative_path,
+        content=str((tool_request.get("args") or {}).get("content", "")),
+        overwrite=bool((tool_request.get("args") or {}).get("overwrite", False)),
+    )
+    metadata["approval_payload"] = approval_payload
+    metadata["approval_payload_hash"] = compute_approval_payload_hash(approval_payload)
     return build_pending_action(
         session_id=str(state.get("thread_id", "")).strip(),
         action_type="write_knowledge_markdown",
@@ -445,6 +454,23 @@ def build_pending_action_revision_response(
             "If you want to continue, reply naturally with something like `continue` or `go ahead`. Reply `cancel` to stop."
         )
 
+    if any(output in {"summary", "details", "plan"} for output in requested_outputs):
+        rendered_summary = render_pending_write_summary(
+            pending_action,
+            detailed=any(output in {"details", "plan"} for output in requested_outputs),
+        )
+        if preferred_language == "zh":
+            return (
+                "这是本次知识库写入的摘要，尚未实际写入。\n\n"
+                f"{rendered_summary}\n\n"
+                "如果可以继续，直接回复“继续”或“执行吧”；如果不要执行，回复“取消”。"
+            )
+        return (
+            "Here is the summary for the pending knowledge-base write. Nothing has been written yet.\n\n"
+            f"{rendered_summary}\n\n"
+            "If you want to continue, reply naturally with something like `continue` or `go ahead`. Reply `cancel` to stop."
+        )
+
     if preferred_language == "zh":
         return "我已记录这次修改请求，但还不能直接执行。请继续说明限制，或直接确认执行。"
     return "I recorded the requested modification, but I still need a clearer execution confirmation."
@@ -474,6 +500,33 @@ def render_pending_write_diff(pending_action: dict[str, Any]) -> str:
     )
     rendered = "\n".join(diff_lines) or "(no textual diff available)"
     return f"```diff\n{rendered}\n```"
+
+
+def render_pending_write_summary(pending_action: dict[str, Any], *, detailed: bool = False) -> str:
+    metadata = pending_action.get("metadata") if isinstance(pending_action.get("metadata"), dict) else {}
+    tool_args = metadata.get("tool_args") if isinstance(metadata.get("tool_args"), dict) else {}
+    relative_path = str(metadata.get("relative_path", "")).strip()
+    target_exists = metadata.get("target_exists") is True
+    proposed_content = str(tool_args.get("content", ""))
+    lines = proposed_content.splitlines()
+    heading = ""
+    for line in lines:
+        stripped = line.strip()
+        if stripped.startswith("#"):
+            heading = stripped.lstrip("#").strip()
+            break
+
+    summary_lines = [
+        f"- Target: `{relative_path or 'pending.md'}`",
+        f"- Mode: {'update existing document' if target_exists else 'create new document'}",
+        f"- Content length: {len(proposed_content)} characters across {len(lines)} lines",
+    ]
+    if heading:
+        summary_lines.append(f"- Heading: {heading}")
+    if detailed and lines:
+        preview = "\n".join(lines[: min(8, len(lines))])
+        summary_lines.append("\n```markdown\n" + preview + "\n```")
+    return "\n".join(summary_lines).strip()
 
 def translate_builder_text(text: str, preferred_language: str) -> str:
     if preferred_language != "zh":

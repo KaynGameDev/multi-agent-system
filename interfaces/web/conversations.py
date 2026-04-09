@@ -157,6 +157,16 @@ class WebConversationStore:
             self._persist_locked()
             return self._serialize_conversation(conversation)
 
+    def rename_conversation(self, conversation_id: str, *, title: str) -> dict:
+        with self._lock:
+            conversation = self._conversations.get(conversation_id)
+            if conversation is None:
+                raise ConversationNotFoundError(conversation_id)
+
+            conversation.title = self._normalize_title(title)
+            self._persist_locked()
+            return self._serialize_conversation(conversation)
+
     def _load(self) -> None:
         if self._storage_path is None or not self._storage_path.exists():
             return
@@ -284,3 +294,7 @@ class WebConversationStore:
             **self._serialize_metadata(conversation),
             "messages": [asdict(message) for message in conversation.messages],
         }
+
+    def _normalize_title(self, title: str) -> str:
+        cleaned = " ".join(str(title or "").strip().split())
+        return cleaned or "New chat"

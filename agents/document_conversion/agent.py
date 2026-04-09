@@ -25,8 +25,12 @@ from agents.document_conversion.rendering import (
 from app.language import detect_response_language
 from app.pending_action_parser import PendingActionReplyInterpreter
 from app.pending_actions import (
+    action_allows_execution,
     build_pending_action,
+    build_conversion_publish_approval_payload,
+    compute_approval_payload_hash,
     get_pending_action,
+    get_pending_action_metadata,
     is_pending_action_active,
     resolve_pending_action_reply,
     update_pending_action,
@@ -697,6 +701,51 @@ class DocumentConversionAgentNode:
                 "execution_contract": None,
             }
 
+        approval_payload = build_conversion_publish_approval_payload(
+            relative_package_path=str(
+                get_pending_action_metadata(updated_action).get("relative_package_path", "")
+            ).strip(),
+            staged_package_path=session.staged_package_path,
+        )
+        if not action_allows_execution(
+            updated_action,
+            contract,
+            action_type="publish_conversion_package",
+            file_path=session.staged_package_path,
+            approval_payload=approval_payload,
+        ):
+            refreshed_action = update_pending_action(
+                updated_action,
+                status="ask_clarification",
+                target_scope={"files": [session.staged_package_path]} if session.staged_package_path else {},
+                metadata_updates={
+                    "approval_payload": approval_payload,
+                    "approval_payload_hash": compute_approval_payload_hash(approval_payload),
+                    "staged_package_digest": str(approval_payload.get("staged_package_digest", "")).strip(),
+                },
+            )
+            content = build_conversion_pending_action_clarification(
+                pending_action=refreshed_action,
+                validation={
+                    "reason": (
+                        "The staged package changed since approval was requested. "
+                        "Please review the current staged package and approve again."
+                    )
+                },
+                preferred_language=preferred_language,
+            )
+            return {
+                "content": content,
+                "assistant_response": build_assistant_response(
+                    kind="await_confirmation",
+                    content=content,
+                    pending_action=refreshed_action,
+                ),
+                "session": session,
+                "pending_action": refreshed_action,
+                "execution_contract": None,
+            }
+
         relative_package_path, publish_invocation, publish_tool_result = self._publish_package(
             session=session,
         )
@@ -1006,6 +1055,10 @@ def build_conversion_pending_action(
         session.market_slug,
         session.feature_slug,
     )
+    approval_payload = build_conversion_publish_approval_payload(
+        relative_package_path=relative_package_path,
+        staged_package_path=session.staged_package_path,
+    )
     summary = f"Publish staged conversion package for `{relative_package_path}`."
     metadata = {
         "conversion_session_id": session.session_id,
@@ -1015,6 +1068,9 @@ def build_conversion_pending_action(
         "game_slug": session.game_slug,
         "market_slug": session.market_slug,
         "feature_slug": session.feature_slug,
+        "approval_payload": approval_payload,
+        "approval_payload_hash": compute_approval_payload_hash(approval_payload),
+        "staged_package_digest": str(approval_payload.get("staged_package_digest", "")).strip(),
     }
     return build_pending_action(
         session_id=str(session.session_id or state.get("thread_id", "")).strip(),

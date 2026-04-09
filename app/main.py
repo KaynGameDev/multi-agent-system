@@ -85,6 +85,7 @@ def bootstrap_system() -> list[object]:
         )
         pending_action_interpreter = LLMPendingActionInterpreter(
             pending_action_parser_llm,
+            backup_llm=llm,
             confidence_threshold=settings.pending_action_parser_confidence_threshold,
         )
         checkpoint_store = build_checkpoint_store(settings)

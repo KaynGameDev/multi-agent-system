@@ -14,7 +14,10 @@
         </div>
 
         <section class="sidebar__section">
-          <div class="sidebar__label">Recent chats</div>
+          <div class="sidebar__label">
+            Recent chats
+            <span class="sidebar__label-hint">Right-click for actions</span>
+          </div>
           <nav class="conversation-list" id="conversationList"></nav>
         </section>
 
@@ -33,6 +36,9 @@
       </aside>
 
       <div class="sidebar-overlay" id="sidebarOverlay"></div>
+      <div class="context-menu" id="conversationContextMenu" hidden>
+        <button class="context-menu__item" id="contextMenuRenameButton" type="button">Rename chat</button>
+      </div>
 
       <main class="main-panel">
         <header class="mobile-header">
@@ -42,6 +48,14 @@
             <span></span>
           </button>
           <div class="mobile-header__title">Jade Agent</div>
+        </header>
+
+        <header class="chat-header">
+          <div class="chat-header__eyebrow">Current chat</div>
+          <div class="chat-header__row">
+            <h2 class="chat-header__title" id="activeConversationTitle">New chat</h2>
+            <button class="chat-header__rename" id="renameConversationButton" type="button">Rename</button>
+          </div>
         </header>
 
         <section class="chat-stage" id="chatStage">

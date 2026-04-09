@@ -36,6 +36,10 @@ class ConversationCreateRequest(BaseModel):
     title: str = "New chat"
 
 
+class ConversationRenameRequest(BaseModel):
+    title: str = "New chat"
+
+
 class WebMessageRequest(BaseModel):
     message: str = Field(min_length=1)
     display_name: str = ""
@@ -102,6 +106,16 @@ class WebServer:
         def get_conversation(conversation_id: str) -> dict:
             try:
                 return self.conversation_store.get_conversation(conversation_id)
+            except ConversationNotFoundError as exc:
+                raise HTTPException(status_code=404, detail="Conversation not found.") from exc
+
+        @app.patch("/api/conversations/{conversation_id}")
+        def rename_conversation(conversation_id: str, payload: ConversationRenameRequest) -> dict:
+            try:
+                return self.conversation_store.rename_conversation(
+                    conversation_id,
+                    title=payload.title,
+                )
             except ConversationNotFoundError as exc:
                 raise HTTPException(status_code=404, detail="Conversation not found.") from exc
 

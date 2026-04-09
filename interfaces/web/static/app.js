@@ -1,5 +1,8 @@
 const state = {
   activeConversationId: null,
+  activeConversationTitle: "New chat",
+  contextMenuConversationId: null,
+  contextMenuConversationTitle: "New chat",
   conversations: [],
   sending: false,
 };
@@ -18,6 +21,10 @@ const elements = {
   mobileMenuButton: document.getElementById("mobileMenuButton"),
   sidebar: document.getElementById("sidebar"),
   sidebarOverlay: document.getElementById("sidebarOverlay"),
+  activeConversationTitle: document.getElementById("activeConversationTitle"),
+  renameConversationButton: document.getElementById("renameConversationButton"),
+  conversationContextMenu: document.getElementById("conversationContextMenu"),
+  contextMenuRenameButton: document.getElementById("contextMenuRenameButton"),
 };
 
 const PROFILE_STORAGE_KEY = "jade-web-profile";
@@ -128,8 +135,61 @@ function openSidebar() {
   elements.sidebarOverlay.classList.add("is-open");
 }
 
+function closeConversationContextMenu() {
+  state.contextMenuConversationId = null;
+  state.contextMenuConversationTitle = "New chat";
+  elements.conversationContextMenu.hidden = true;
+}
+
+function openConversationContextMenu(conversationId, conversationTitle, clientX, clientY) {
+  state.contextMenuConversationId = conversationId;
+  state.contextMenuConversationTitle = conversationTitle || "New chat";
+
+  const menu = elements.conversationContextMenu;
+  menu.hidden = false;
+
+  const menuWidth = menu.offsetWidth || 180;
+  const menuHeight = menu.offsetHeight || 48;
+  const maxLeft = Math.max(12, window.innerWidth - menuWidth - 12);
+  const maxTop = Math.max(12, window.innerHeight - menuHeight - 12);
+  const left = Math.min(clientX, maxLeft);
+  const top = Math.min(clientY, maxTop);
+
+  menu.style.left = `${left}px`;
+  menu.style.top = `${top}px`;
+}
+
+function updateConversationHeader(title) {
+  const normalizedTitle = (title || "New chat").trim() || "New chat";
+  state.activeConversationTitle = normalizedTitle;
+  elements.activeConversationTitle.textContent = normalizedTitle;
+  elements.renameConversationButton.disabled = !state.activeConversationId;
+}
+
+async function renameConversation(conversationId, currentTitle) {
+  const nextTitle = window.prompt("Rename chat", currentTitle || "New chat");
+  if (nextTitle === null) {
+    return;
+  }
+
+  const normalizedTitle = nextTitle.trim() || "New chat";
+  if (normalizedTitle === (currentTitle || "New chat")) {
+    return;
+  }
+
+  await api(`/api/conversations/${conversationId}`, {
+    method: "PATCH",
+    body: JSON.stringify({ title: normalizedTitle }),
+  });
+  if (conversationId === state.activeConversationId) {
+    updateConversationHeader(normalizedTitle);
+  }
+  await refreshConversationList();
+}
+
 function renderConversationList() {
   elements.conversationList.innerHTML = "";
+  closeConversationContextMenu();
 
   const orderedGroups = ["Today", "Yesterday", "Previous 7 Days", "Previous 30 Days", "Older"];
   const groups = new Map(orderedGroups.map((label) => [label, []]));
@@ -155,6 +215,9 @@ function renderConversationList() {
     group.appendChild(heading);
 
     for (const conversation of conversations) {
+      const row = document.createElement("div");
+      row.className = "conversation-list__row";
+
       const button = document.createElement("button");
       button.type = "button";
       button.className = "conversation-list__item";
@@ -165,11 +228,23 @@ function renderConversationList() {
         <span class="conversation-list__title">${escapeHtml(conversation.title || "New chat")}</span>
         <span class="conversation-list__time">${escapeHtml(formatRelativeTime(conversation.updated_at))}</span>
       `;
+      button.title = "Right-click for chat actions";
       button.addEventListener("click", async () => {
         await loadConversation(conversation.conversation_id);
         closeSidebar();
       });
-      group.appendChild(button);
+      row.addEventListener("contextmenu", (event) => {
+        event.preventDefault();
+        openConversationContextMenu(
+          conversation.conversation_id,
+          conversation.title || "New chat",
+          event.clientX,
+          event.clientY,
+        );
+      });
+
+      row.append(button);
+      group.appendChild(row);
       renderedCount += 1;
     }
 
@@ -247,6 +322,7 @@ async function loadConversation(conversationId, options = {}) {
   const conversation = await api(`/api/conversations/${conversationId}`);
   state.activeConversationId = conversation.conversation_id;
   window.localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, conversation.conversation_id);
+  updateConversationHeader(conversation.title || "New chat");
   renderMessages(conversation);
 
   if (!options.skipListRefresh) {
@@ -341,6 +417,7 @@ async function handleSubmit(event) {
 async function bootstrap() {
   restoreProfile();
   autoResizeTextarea();
+  updateConversationHeader("New chat");
   await refreshConversationList();
 
   const savedConversationId = window.localStorage.getItem(ACTIVE_CONVERSATION_STORAGE_KEY);
@@ -374,6 +451,47 @@ elements.displayNameInput.addEventListener("change", saveProfile);
 elements.emailInput.addEventListener("change", saveProfile);
 elements.mobileMenuButton.addEventListener("click", openSidebar);
 elements.sidebarOverlay.addEventListener("click", closeSidebar);
+document.addEventListener("click", (event) => {
+  if (elements.conversationContextMenu.hidden) {
+    return;
+  }
+  if (!elements.conversationContextMenu.contains(event.target)) {
+    closeConversationContextMenu();
+  }
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape") {
+    closeConversationContextMenu();
+  }
+});
+window.addEventListener("blur", closeConversationContextMenu);
+window.addEventListener("resize", closeConversationContextMenu);
+elements.renameConversationButton.addEventListener("click", async () => {
+  if (!state.activeConversationId) {
+    return;
+  }
+
+  try {
+    await renameConversation(state.activeConversationId, state.activeConversationTitle);
+  } catch (error) {
+    window.alert(error.message || "Could not rename that chat.");
+  }
+});
+elements.contextMenuRenameButton.addEventListener("click", async () => {
+  if (!state.contextMenuConversationId) {
+    return;
+  }
+
+  const conversationId = state.contextMenuConversationId;
+  const conversationTitle = state.contextMenuConversationTitle;
+  closeConversationContextMenu();
+
+  try {
+    await renameConversation(conversationId, conversationTitle);
+  } catch (error) {
+    window.alert(error.message || "Could not rename that chat.");
+  }
+});
 
 document.querySelectorAll(".starter-card").forEach((button) => {
   button.addEventListener("click", () => {

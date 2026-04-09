@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import unittest
 
+from langchain_core.messages import AIMessage
+
 from app.pending_action_parser import LLMPendingActionInterpreter
 from app.pending_actions import (
     build_pending_action,
@@ -41,6 +43,22 @@ class StructuredOutputLLM:
         if self.error is not None:
             raise self.error
         return self.raw_output
+
+
+class SequencedLLM:
+    def __init__(self, outputs: list[object]) -> None:
+        self.outputs = list(outputs)
+
+    def with_structured_output(self, _schema):
+        return self
+
+    def invoke(self, _prompt):
+        if not self.outputs:
+            raise RuntimeError("No more queued outputs.")
+        current = self.outputs.pop(0)
+        if isinstance(current, Exception):
+            raise current
+        return current
 
 
 class PendingActionTests(unittest.TestCase):
@@ -219,6 +237,36 @@ class PendingActionTests(unittest.TestCase):
         self.assertEqual(validation["runtime_action"], "request_revision")
         self.assertEqual(validation["next_status"], "request_revision")
 
+    def test_summary_request_becomes_request_revision_contract(self) -> None:
+        action = build_pending_action(
+            session_id="thread-1",
+            action_type="apply_edit",
+            requested_by_agent="general_chat_agent",
+            summary="Apply the proposed edit.",
+            target_scope={"files": ["src/main.py"]},
+        )
+        interpreter = StaticInterpreter(
+            {
+                "decision": "modify",
+                "requested_outputs": ["summary"],
+                "target_scope": {},
+                "selected_index": None,
+                "should_execute": False,
+                "reason": "The user asked to see a summary first.",
+                "confidence": 0.95,
+                "interpretation_source": "llm_parser",
+            }
+        )
+
+        contract = interpret_pending_action_reply(action, "show me a summary", interpreter=interpreter)
+        validation = validate_execution_contract(action, contract)
+
+        self.assertEqual(contract["decision"], "modify")
+        self.assertEqual(contract["requested_outputs"], ["summary"])
+        self.assertTrue(validation["valid"])
+        self.assertEqual(validation["runtime_action"], "request_revision")
+        self.assertEqual(validation["next_status"], "request_revision")
+
     def test_unsupported_scope_modification_stays_non_executable(self) -> None:
         action = build_pending_action(
             session_id="thread-1",
@@ -291,7 +339,7 @@ class PendingActionTests(unittest.TestCase):
         self.assertFalse(validation["valid"])
         self.assertEqual(validation["runtime_action"], "ask_clarification")
 
-    def test_llm_inferred_selection_without_exact_match_becomes_clarification(self) -> None:
+    def test_llm_inferred_selection_without_exact_match_becomes_selection(self) -> None:
         action = build_pending_action(
             session_id="thread-1",
             action_type="select_knowledge_document",
@@ -330,7 +378,63 @@ class PendingActionTests(unittest.TestCase):
         contract = interpret_pending_action_reply(action, "the second one sounds right", interpreter=interpreter)
         validation = validate_execution_contract(action, contract)
 
-        self.assertEqual(contract["decision"], "unclear")
+        self.assertEqual(contract["decision"], "select")
+        self.assertTrue(validation["valid"])
+        self.assertEqual(validation["runtime_action"], "select")
+        self.assertEqual(validation["selected_index"], 1)
+
+    def test_inconsistent_approve_with_requested_outputs_becomes_revision(self) -> None:
+        action = build_pending_action(
+            session_id="thread-1",
+            action_type="apply_edit",
+            requested_by_agent="general_chat_agent",
+            summary="Apply the proposed edit.",
+            target_scope={"files": ["src/main.py"]},
+        )
+        interpreter = StaticInterpreter(
+            {
+                "decision": "approve",
+                "requested_outputs": ["diff"],
+                "target_scope": {},
+                "selected_index": None,
+                "should_execute": False,
+                "reason": "The user asked to see the diff first.",
+                "confidence": 0.92,
+                "interpretation_source": "llm_parser",
+            }
+        )
+
+        contract = interpret_pending_action_reply(action, "show me the diff first", interpreter=interpreter)
+        validation = validate_execution_contract(action, contract)
+
+        self.assertEqual(contract["decision"], "approve")
+        self.assertTrue(validation["valid"])
+        self.assertEqual(validation["runtime_action"], "request_revision")
+
+    def test_inconsistent_approve_without_execution_stays_non_executable(self) -> None:
+        action = build_pending_action(
+            session_id="thread-1",
+            action_type="publish_conversion_package",
+            requested_by_agent="document_conversion_agent",
+            summary="Publish the staged conversion package.",
+        )
+        interpreter = StaticInterpreter(
+            {
+                "decision": "approve",
+                "requested_outputs": [],
+                "target_scope": {},
+                "selected_index": None,
+                "should_execute": False,
+                "reason": "The parser was unsure.",
+                "confidence": 0.92,
+                "interpretation_source": "llm_parser",
+            }
+        )
+
+        contract = interpret_pending_action_reply(action, "approve", interpreter=interpreter)
+        validation = validate_execution_contract(action, contract)
+
+        self.assertEqual(contract["decision"], "approve")
         self.assertFalse(validation["valid"])
         self.assertEqual(validation["runtime_action"], "ask_clarification")
 
@@ -404,6 +508,82 @@ class PendingActionParserTests(unittest.TestCase):
         )
 
         self.assertEqual(parsed["decision"], "unclear")
+        self.assertFalse(parsed["should_execute"])
+
+    def test_parser_uses_backup_model_when_primary_is_unavailable(self) -> None:
+        action = build_pending_action(
+            session_id="thread-1",
+            action_type="publish_conversion_package",
+            requested_by_agent="document_conversion_agent",
+            summary="Publish the staged conversion package.",
+        )
+        interpreter = LLMPendingActionInterpreter(
+            SequencedLLM([RuntimeError("network unavailable"), RuntimeError("network unavailable")]),
+            backup_llm=StructuredOutputLLM(
+                {
+                    "decision": "approve",
+                    "requested_outputs": [],
+                    "target_scope": {},
+                    "selected_index": None,
+                    "should_execute": True,
+                    "reason": "The backup parser recovered the approval.",
+                    "confidence": 0.91,
+                }
+            ),
+            confidence_threshold=0.75,
+        )
+
+        parsed = interpreter.parse_pending_action_reply(
+            action,
+            prepare_pending_action_reply_input(action, "approve"),
+        )
+
+        self.assertEqual(parsed["decision"], "approve")
+        self.assertTrue(parsed["should_execute"])
+
+    def test_parser_repairs_low_confidence_output(self) -> None:
+        action = build_pending_action(
+            session_id="thread-1",
+            action_type="apply_edit",
+            requested_by_agent="general_chat_agent",
+            summary="Apply the proposed edit.",
+            target_scope={"files": ["src/main.py"]},
+        )
+        interpreter = LLMPendingActionInterpreter(
+            SequencedLLM(
+                [
+                    {
+                        "decision": "modify",
+                        "requested_outputs": ["preview"],
+                        "target_scope": {},
+                        "selected_index": None,
+                        "should_execute": False,
+                        "reason": "Unsure whether the user wanted a preview or summary.",
+                        "confidence": 0.41,
+                    },
+                    AIMessage(content='{"decision":"modify","requested_outputs":["summary"],"should_execute":false}'),
+                    {
+                        "decision": "modify",
+                        "requested_outputs": ["summary"],
+                        "target_scope": {},
+                        "selected_index": None,
+                        "should_execute": False,
+                        "reason": "The user asked for a summary first.",
+                        "confidence": 0.91,
+                    },
+                ]
+            ),
+            confidence_threshold=0.75,
+            max_parse_attempts=1,
+        )
+
+        parsed = interpreter.parse_pending_action_reply(
+            action,
+            prepare_pending_action_reply_input(action, "show me a summary"),
+        )
+
+        self.assertEqual(parsed["decision"], "modify")
+        self.assertEqual(parsed["requested_outputs"], ["summary"])
         self.assertFalse(parsed["should_execute"])
 
 

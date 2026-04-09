@@ -11,7 +11,12 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from app.config import load_settings
 from app.graph import build_default_agent_registrations
 from app.knowledge_paths import build_knowledge_markdown_relative_path
-from app.pending_actions import build_pending_action, resolve_pending_action_reply
+from app.pending_actions import (
+    build_pending_action,
+    build_write_knowledge_approval_payload,
+    compute_approval_payload_hash,
+    resolve_pending_action_reply,
+)
 from tools.knowledge_base import resolve_knowledge_markdown_path, write_knowledge_markdown_document
 
 
@@ -46,6 +51,25 @@ class KnowledgeBaseBuilderToolTests(unittest.TestCase):
 
         load_settings(force_reload=True)
         self.tempdir.cleanup()
+
+    def _build_write_pending_action(self, *, relative_path: str, content: str, overwrite: bool = False) -> dict[str, object]:
+        approval_payload = build_write_knowledge_approval_payload(
+            relative_path=relative_path,
+            content=content,
+            overwrite=overwrite,
+        )
+        return build_pending_action(
+            session_id="thread-1",
+            action_type="write_knowledge_markdown",
+            requested_by_agent="knowledge_base_builder_agent",
+            summary=f"Write knowledge-base draft to `{relative_path}`.",
+            target_scope={"files": [relative_path]},
+            metadata={
+                "relative_path": relative_path,
+                "approval_payload": approval_payload,
+                "approval_payload_hash": compute_approval_payload_hash(approval_payload),
+            },
+        )
 
     def test_game_line_path_uses_current_hierarchy(self) -> None:
         relative_path = build_knowledge_markdown_relative_path(
@@ -96,12 +120,9 @@ class KnowledgeBaseBuilderToolTests(unittest.TestCase):
         self.assertTrue(blocked["requires_confirmation"])
         self.assertEqual(blocked["knowledge_mutation"], "write_markdown")
 
-        pending_action = build_pending_action(
-            session_id="thread-1",
-            action_type="write_knowledge_markdown",
-            requested_by_agent="knowledge_base_builder_agent",
-            summary=f"Write knowledge-base draft to `{resolved['relative_path']}`.",
-            target_scope={"files": [resolved["relative_path"]]},
+        pending_action = self._build_write_pending_action(
+            relative_path=resolved["relative_path"],
+            content="# 射击塔防组概览\n\n测试内容。\n",
         )
         execution_contract = resolve_pending_action_reply(
             pending_action,
@@ -154,7 +175,7 @@ class KnowledgeBaseBuilderToolTests(unittest.TestCase):
             },
         )
         self.assertFalse(second_write["ok"])
-        self.assertIn("already exists", second_write["error"])
+        self.assertTrue(second_write["requires_confirmation"])
 
     def test_builder_write_still_blocks_if_user_says_approve_without_prior_preview(self) -> None:
         result = write_knowledge_markdown_document.func(
@@ -174,12 +195,9 @@ class KnowledgeBaseBuilderToolTests(unittest.TestCase):
         self.assertFalse(blocked["ok"])
         self.assertTrue(blocked["requires_confirmation"])
 
-        pending_action = build_pending_action(
-            session_id="thread-1",
-            action_type="write_knowledge_markdown",
-            requested_by_agent="knowledge_base_builder_agent",
-            summary=f"Write knowledge-base draft to `{relative_path}`.",
-            target_scope={"files": [relative_path]},
+        pending_action = self._build_write_pending_action(
+            relative_path=relative_path,
+            content="# Contract\n\nApproved.\n",
         )
         execution_contract = resolve_pending_action_reply(
             pending_action,
@@ -223,6 +241,48 @@ class KnowledgeBaseBuilderToolTests(unittest.TestCase):
 
         self.assertTrue(written["ok"])
         self.assertTrue(Path(written["absolute_path"]).exists())
+
+    def test_builder_write_rejects_changed_path_or_overwrite_flag_after_approval(self) -> None:
+        approved_path = "Docs/10_GameLines/BuYuDaLuanDou/LineOverview/Approved.md"
+        approved_content = "# Approved\n\nBody.\n"
+        pending_action = self._build_write_pending_action(
+            relative_path=approved_path,
+            content=approved_content,
+            overwrite=False,
+        )
+        execution_contract = resolve_pending_action_reply(
+            pending_action,
+            "continue",
+            interpreter=StaticInterpreter(
+                {
+                    "decision": "approve",
+                    "requested_outputs": [],
+                    "target_scope": {},
+                    "selected_index": None,
+                    "should_execute": True,
+                    "reason": "The user approved the write.",
+                    "confidence": 0.99,
+                    "interpretation_source": "llm_parser",
+                }
+            ),
+        )["contract"]
+
+        changed_path = write_knowledge_markdown_document.func(
+            relative_path="Docs/10_GameLines/BuYuDaLuanDou/LineOverview/Different.md",
+            content=approved_content,
+            state={"pending_action": pending_action, "execution_contract": execution_contract},
+        )
+        self.assertFalse(changed_path["ok"])
+        self.assertTrue(changed_path["requires_confirmation"])
+
+        overwrite_mismatch = write_knowledge_markdown_document.func(
+            relative_path=approved_path,
+            content=approved_content,
+            overwrite=True,
+            state={"pending_action": pending_action, "execution_contract": execution_contract},
+        )
+        self.assertFalse(overwrite_mismatch["ok"])
+        self.assertTrue(overwrite_mismatch["requires_confirmation"])
 
     def test_builder_agent_gets_write_tools_but_reader_does_not(self) -> None:
         registrations = {registration.name: registration for registration in build_default_agent_registrations()}

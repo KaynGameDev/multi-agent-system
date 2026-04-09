@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import hashlib
+import json
 import re
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
@@ -129,6 +132,19 @@ def get_pending_action_selection_phase(action: PendingAction | None) -> str:
     return str(metadata.get("selection_phase", "")).strip().lower()
 
 
+def get_pending_action_approval_payload(action: PendingAction | None) -> dict[str, Any]:
+    metadata = get_pending_action_metadata(action)
+    payload = metadata.get("approval_payload")
+    if isinstance(payload, dict):
+        return payload
+    return {}
+
+
+def get_pending_action_approval_payload_hash(action: PendingAction | None) -> str:
+    metadata = get_pending_action_metadata(action)
+    return str(metadata.get("approval_payload_hash", "")).strip()
+
+
 def extract_selection_index(normalized_text: str) -> int | None:
     if normalized_text.isdigit():
         return max(int(normalized_text) - 1, 0)
@@ -246,10 +262,6 @@ def build_interpreted_execution_contract(
 
     if decision == "reject":
         should_execute = False
-    if decision == "select":
-        decision = "unclear"
-        should_execute = False
-        selected_index = None
     if decision == "unclear":
         normalized_scope = {}
         requested_outputs = []
@@ -334,6 +346,9 @@ def validate_execution_contract(
         )
 
     decision = str(contract.get("decision", "")).strip().lower()
+    requested_outputs = list(contract.get("requested_outputs") or [])
+    should_execute = contract.get("should_execute") is True
+    selected_index = contract.get("selected_index")
     if decision == "reject":
         return ExecutionContractValidation(
             valid=True,
@@ -344,8 +359,16 @@ def validate_execution_contract(
         )
 
     if decision == "select":
-        selected_option = contract.get("selected_option")
-        if not isinstance(selected_option, dict):
+        if requested_outputs or contract.get("target_scope") or not should_execute:
+            return ExecutionContractValidation(
+                valid=False,
+                runtime_action="ask_clarification",
+                next_status="ask_clarification",
+                reason="The selection reply mixed option picking with unsupported execution instructions.",
+                normalized_scope={},
+            )
+        resolved_selection = resolve_contract_selection(action, contract)
+        if resolved_selection is None:
             return ExecutionContractValidation(
                 valid=False,
                 runtime_action="ask_clarification",
@@ -353,8 +376,7 @@ def validate_execution_contract(
                 reason="The reply did not identify a selectable option.",
                 normalized_scope={},
             )
-        selected_index = contract.get("selected_index")
-        normalized_index = int(selected_index) if isinstance(selected_index, int) else 0
+        selected_option, normalized_index = resolved_selection
         return ExecutionContractValidation(
             valid=True,
             runtime_action="select",
@@ -387,9 +409,56 @@ def validate_execution_contract(
             normalized_scope=normalized_scope,
         )
 
-    requested_outputs = list(contract.get("requested_outputs") or [])
-    should_execute = contract.get("should_execute") is True
+    if decision == "approve":
+        if requested_outputs:
+            return ExecutionContractValidation(
+                valid=True,
+                runtime_action="request_revision",
+                next_status="request_revision",
+                reason="The user requested additional preview material before execution.",
+                normalized_scope=normalized_scope,
+            )
+        if normalized_scope:
+            return ExecutionContractValidation(
+                valid=False,
+                runtime_action="ask_clarification",
+                next_status="ask_clarification",
+                reason="The approval reply included a narrowed scope that requires clarification.",
+                normalized_scope=normalized_scope,
+            )
+        if selected_index is not None:
+            return ExecutionContractValidation(
+                valid=False,
+                runtime_action="ask_clarification",
+                next_status="ask_clarification",
+                reason="The approval reply also identified a selection, so it could not be executed safely.",
+                normalized_scope={},
+            )
+        if not should_execute:
+            return ExecutionContractValidation(
+                valid=False,
+                runtime_action="ask_clarification",
+                next_status="ask_clarification",
+                reason="The parsed approval did not authorize execution.",
+                normalized_scope={},
+            )
+        return ExecutionContractValidation(
+            valid=True,
+            runtime_action="execute",
+            next_status="approved",
+            reason="The user approved the pending action.",
+            normalized_scope={},
+        )
+
     if decision == "modify":
+        if selected_index is not None:
+            return ExecutionContractValidation(
+                valid=False,
+                runtime_action="ask_clarification",
+                next_status="ask_clarification",
+                reason="The requested modification also identified a selection, so it could not be handled deterministically.",
+                normalized_scope={},
+            )
         if not normalized_scope and not requested_outputs:
             return ExecutionContractValidation(
                 valid=False,
@@ -423,12 +492,35 @@ def validate_execution_contract(
         )
 
     return ExecutionContractValidation(
-        valid=True,
-        runtime_action="execute",
-        next_status="approved",
-        reason="The user approved the pending action.",
-        normalized_scope=normalized_scope,
+        valid=False,
+        runtime_action="ask_clarification",
+        next_status="ask_clarification",
+        reason="The reply did not map to a supported execution decision.",
+        normalized_scope={},
     )
+
+
+def resolve_contract_selection(
+    action: PendingAction,
+    contract: ExecutionContract,
+) -> tuple[PendingActionSelectionOption, int] | None:
+    options = get_pending_action_selection_options(action)
+    if not options:
+        return None
+
+    selected_index = contract.get("selected_index")
+    if isinstance(selected_index, int):
+        if 0 <= selected_index < len(options):
+            return options[selected_index], selected_index
+        return None
+
+    selected_option = contract.get("selected_option")
+    if not isinstance(selected_option, dict):
+        return None
+    for index, option in enumerate(options):
+        if option == selected_option:
+            return option, index
+    return None
 
 
 def update_pending_action(
@@ -441,7 +533,7 @@ def update_pending_action(
     updated: PendingAction = dict(action)
     normalized_status = normalize_pending_action_status(str(status).strip())
     updated["status"] = normalized_status or str(status).strip()
-    if target_scope:
+    if target_scope is not None:
         updated["target_scope"] = dict(target_scope)
     if metadata_updates:
         updated_metadata = dict(updated.get("metadata") or {})
@@ -456,6 +548,8 @@ def action_allows_execution(
     *,
     action_type: str,
     file_path: str = "",
+    approval_payload: dict[str, Any] | None = None,
+    approval_payload_hash: str = "",
 ) -> bool:
     if not action or not contract:
         return False
@@ -471,7 +565,11 @@ def action_allows_execution(
         allowed_files = list(normalized_scope.get("files") or action.get("target_scope", {}).get("files", []) or [])
         if allowed_files and file_path not in allowed_files:
             return False
-    return True
+    return approval_payload_matches_action(
+        action,
+        approval_payload=approval_payload,
+        approval_payload_hash=approval_payload_hash,
+    )
 
 
 def normalize_pending_action_text(text: str) -> str:
@@ -528,3 +626,104 @@ def scope_item_matches_text(item: str, normalized_text: str) -> bool:
     basename = normalized_item.rsplit("/", 1)[-1]
     stem = basename.rsplit(".", 1)[0]
     return any(candidate and candidate in normalized_text for candidate in {basename, stem})
+
+
+def approval_payload_matches_action(
+    action: PendingAction | None,
+    *,
+    approval_payload: dict[str, Any] | None = None,
+    approval_payload_hash: str = "",
+) -> bool:
+    expected_hash = get_pending_action_approval_payload_hash(action)
+    if not expected_hash:
+        return False
+
+    resolved_hash = str(approval_payload_hash or "").strip()
+    if not resolved_hash and isinstance(approval_payload, dict):
+        resolved_hash = compute_approval_payload_hash(approval_payload)
+    if not resolved_hash or resolved_hash != expected_hash:
+        return False
+
+    expected_payload = get_pending_action_approval_payload(action)
+    if expected_payload and isinstance(approval_payload, dict):
+        return normalize_approval_payload(approval_payload) == normalize_approval_payload(expected_payload)
+    return True
+
+
+def normalize_approval_payload(payload: dict[str, Any] | None) -> dict[str, Any]:
+    if not isinstance(payload, dict):
+        return {}
+    return {
+        str(key): normalize_approval_payload_value(value)
+        for key, value in sorted(payload.items(), key=lambda item: str(item[0]))
+    }
+
+
+def normalize_approval_payload_value(value: Any) -> Any:
+    if isinstance(value, dict):
+        return {
+            str(key): normalize_approval_payload_value(item)
+            for key, item in sorted(value.items(), key=lambda entry: str(entry[0]))
+        }
+    if isinstance(value, (list, tuple)):
+        return [normalize_approval_payload_value(item) for item in value]
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def compute_approval_payload_hash(payload: dict[str, Any] | None) -> str:
+    normalized_payload = normalize_approval_payload(payload)
+    if not normalized_payload:
+        return ""
+    encoded = json.dumps(
+        normalized_payload,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def build_write_knowledge_approval_payload(
+    *,
+    relative_path: str,
+    content: str,
+    overwrite: bool = False,
+) -> dict[str, Any]:
+    return {
+        "action_type": "write_knowledge_markdown",
+        "tool_name": "write_knowledge_markdown_document",
+        "arguments": {
+            "relative_path": str(relative_path or "").strip(),
+            "content": str(content or ""),
+            "overwrite": bool(overwrite),
+        },
+    }
+
+
+def compute_directory_digest(root_path: str | Path) -> str:
+    resolved_root = Path(root_path)
+    if not resolved_root.exists() or not resolved_root.is_dir():
+        return ""
+
+    hasher = hashlib.sha256()
+    for candidate in sorted(path for path in resolved_root.rglob("*") if path.is_file()):
+        relative_path = candidate.relative_to(resolved_root).as_posix()
+        hasher.update(relative_path.encode("utf-8"))
+        hasher.update(b"\0")
+        hasher.update(candidate.read_bytes())
+        hasher.update(b"\0")
+    return hasher.hexdigest()
+
+
+def build_conversion_publish_approval_payload(
+    *,
+    relative_package_path: str,
+    staged_package_path: str,
+) -> dict[str, Any]:
+    return {
+        "action_type": "publish_conversion_package",
+        "relative_package_path": str(relative_package_path or "").strip(),
+        "staged_package_digest": compute_directory_digest(staged_package_path),
+    }

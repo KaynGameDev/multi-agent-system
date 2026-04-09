@@ -592,6 +592,77 @@ class AgentRuntimeMigrationTests(unittest.TestCase):
         self.assertEqual(second_result["pending_action"]["status"], "request_revision")
         self.assertIsNone(second_result["execution_contract"])
 
+    def test_builder_pending_action_can_render_summary_before_execution(self) -> None:
+        write_request = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "write_knowledge_markdown_document",
+                    "args": {
+                        "relative_path": "Docs/10_GameLines/BuYuDaLuanDou/LineOverview/Test.md",
+                        "content": "# Test\n\nNew content.\n",
+                    },
+                    "id": "call_write",
+                }
+            ],
+        )
+        blocked_payload = {
+            "ok": False,
+            "knowledge_mutation": "write_markdown",
+            "requires_confirmation": True,
+            "relative_path": "Docs/10_GameLines/BuYuDaLuanDou/LineOverview/Test.md",
+            "absolute_path": "/tmp/Test.md",
+            "target_exists": False,
+        }
+        summary_interpreter = ReplyMapInterpreter(
+            {
+                "show me a summary": {
+                    "decision": "modify",
+                    "requested_outputs": ["summary"],
+                    "target_scope": {},
+                    "selected_index": None,
+                    "should_execute": False,
+                    "reason": "The user asked to review a summary first.",
+                    "confidence": 0.97,
+                    "interpretation_source": "llm_parser",
+                }
+            }
+        )
+        node = KnowledgeBaseBuilderAgentNode(
+            NoopLLM(),
+            [],
+            pending_action_interpreter=summary_interpreter,
+            agent_name="knowledge_base_builder_agent",
+        )
+
+        first_result = node(
+            {
+                "thread_id": "thread-1",
+                "messages": [
+                    write_request,
+                    ToolMessage(content=json.dumps(blocked_payload), tool_call_id="call_write"),
+                ],
+            }
+        )
+
+        second_result = node(
+            {
+                "thread_id": "thread-1",
+                "messages": [
+                    write_request,
+                    ToolMessage(content=json.dumps(blocked_payload), tool_call_id="call_write"),
+                    *first_result["messages"],
+                    HumanMessage(content="show me a summary"),
+                ],
+                "pending_action": first_result["pending_action"],
+            }
+        )
+
+        self.assertIn("summary for the pending knowledge-base write", second_result["messages"][-1].content)
+        self.assertNotIn("```diff", second_result["messages"][-1].content)
+        self.assertEqual(second_result["pending_action"]["status"], "request_revision")
+        self.assertIsNone(second_result["execution_contract"])
+
     def test_builder_ambiguous_follow_up_blocks_execution_deterministically(self) -> None:
         write_request = AIMessage(
             content="",

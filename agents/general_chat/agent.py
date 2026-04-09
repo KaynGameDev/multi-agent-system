@@ -3,6 +3,7 @@ from __future__ import annotations
 from langchain_core.messages import SystemMessage
 
 from app.contracts import build_assistant_response
+from app.messages import stringify_message_content
 from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
 from app.skill_runtime import build_skill_prompt_context
 from app.skills import SkillRegistry
@@ -29,7 +30,7 @@ class GeneralChatAgentNode:
             *state["messages"],
         ]
         response = self.llm.invoke(messages)
-        assistant_text = str(getattr(response, "content", "") or "").strip()
+        assistant_text = stringify_message_content(getattr(response, "content", ""))
         return {
             "messages": [response],
             "assistant_response": build_assistant_response(

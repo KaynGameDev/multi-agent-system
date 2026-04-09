@@ -14,7 +14,12 @@ from openpyxl import load_workbook
 
 from app.config import DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH, load_settings
 from app.knowledge_paths import build_knowledge_markdown_relative_path
-from app.pending_actions import action_allows_execution, get_execution_contract, get_pending_action
+from app.pending_actions import (
+    action_allows_execution,
+    build_write_knowledge_approval_payload,
+    get_execution_contract,
+    get_pending_action,
+)
 from app.paths import resolve_project_path
 from tools.google_workspace_services import get_google_sheets_service
 
@@ -980,20 +985,43 @@ def parse_tool_payload(message) -> dict[str, object] | None:
     return payload
 
 
-def knowledge_mutation_is_approved(state: dict | None, *, relative_path: str = "") -> bool:
-    return has_valid_knowledge_mutation_contract(state, relative_path=relative_path)
+def knowledge_mutation_is_approved(
+    state: dict | None,
+    *,
+    relative_path: str = "",
+    content: str = "",
+    overwrite: bool = False,
+) -> bool:
+    return has_valid_knowledge_mutation_contract(
+        state,
+        relative_path=relative_path,
+        content=content,
+        overwrite=overwrite,
+    )
 
 
-def has_valid_knowledge_mutation_contract(state: dict | None, *, relative_path: str = "") -> bool:
+def has_valid_knowledge_mutation_contract(
+    state: dict | None,
+    *,
+    relative_path: str = "",
+    content: str = "",
+    overwrite: bool = False,
+) -> bool:
     if not isinstance(state, dict):
         return False
     pending_action = get_pending_action(state)
     execution_contract = get_execution_contract(state)
+    approval_payload = build_write_knowledge_approval_payload(
+        relative_path=relative_path,
+        content=content,
+        overwrite=overwrite,
+    )
     return action_allows_execution(
         pending_action,
         execution_contract,
         action_type="write_knowledge_markdown",
         file_path=relative_path,
+        approval_payload=approval_payload,
     )
 
 
@@ -1205,7 +1233,12 @@ def write_knowledge_markdown_document(
             "relative_path": relative_path,
         }
 
-    if not knowledge_mutation_is_approved(state, relative_path=relative_path):
+    if not knowledge_mutation_is_approved(
+        state,
+        relative_path=relative_path,
+        content=content,
+        overwrite=overwrite,
+    ):
         return {
             "ok": False,
             **context,

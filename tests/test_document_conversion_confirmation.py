@@ -8,8 +8,7 @@ from unittest.mock import patch
 
 from langchain_core.messages import AIMessage, HumanMessage
 
-from agents.document_conversion.agent import DocumentConversionAgentNode
-from app.pending_actions import build_pending_action
+from agents.document_conversion.agent import DocumentConversionAgentNode, build_conversion_pending_action
 from tests.common import make_settings
 
 
@@ -50,6 +49,9 @@ class DocumentConversionConfirmationTests(unittest.TestCase):
             settings=self.settings,
             agent_name="document_conversion_agent",
         )
+        staged_package_path = self.root / "runtime" / "staging" / "package"
+        staged_package_path.mkdir(parents=True, exist_ok=True)
+        (staged_package_path / "README.md").write_text("# Weekly Activity\n", encoding="utf-8")
         session = node.store.create_session(thread_id="thread-1", channel_id="channel-1", user_id="user-1")
         session = node.store.update_session(
             session.session_id,
@@ -57,7 +59,7 @@ class DocumentConversionConfirmationTests(unittest.TestCase):
             game_slug="buyu-da-luan-dou",
             market_slug="indonesia-main",
             feature_slug="weekly-activity",
-            staged_package_path=str(self.root / "runtime" / "staging" / "package"),
+            staged_package_path=str(staged_package_path),
             draft_payload={"feature": "weekly-activity"},
             missing_required_fields=[],
             approval_state="pending",
@@ -65,17 +67,13 @@ class DocumentConversionConfirmationTests(unittest.TestCase):
         return node, session
 
     def _build_pending_action(self, session) -> dict[str, object]:
-        return build_pending_action(
-            session_id=session.session_id,
-            action_type="publish_conversion_package",
-            requested_by_agent="document_conversion_agent",
-            summary="Publish staged conversion package for `Docs/20_Deployments/IndonesiaMain/BuYuDaLuanDou/Features/weekly-activity`.",
-            metadata={
-                "conversion_session_id": session.session_id,
-                "staged_package_path": session.staged_package_path,
-                "relative_package_path": "Docs/20_Deployments/IndonesiaMain/BuYuDaLuanDou/Features/weekly-activity",
-            },
+        pending_action = build_conversion_pending_action(
+            state={"thread_id": "thread-1"},
+            session=session,
+            source_count=1,
         )
+        assert pending_action is not None
+        return pending_action
 
     def test_document_conversion_pending_action_publishes_on_approval(self) -> None:
         node, session = self._build_node_and_session()
@@ -176,6 +174,42 @@ class DocumentConversionConfirmationTests(unittest.TestCase):
         self.assertIsNotNone(result)
         assert result is not None
         self.assertIn("can't determine", result["content"])
+        self.assertEqual(result["pending_action"]["status"], "ask_clarification")
+        self.assertIsNone(result["execution_contract"])
+
+    def test_document_conversion_pending_action_requires_reapproval_when_staged_package_changes(self) -> None:
+        node, session = self._build_node_and_session()
+        node.pending_action_interpreter = StaticInterpreter(
+            {
+                "decision": "approve",
+                "requested_outputs": [],
+                "target_scope": {},
+                "selected_index": None,
+                "should_execute": True,
+                "reason": "The user approved publishing.",
+                "confidence": 0.97,
+                "interpretation_source": "llm_parser",
+            }
+        )
+        pending_action = self._build_pending_action(session)
+        staged_package = Path(session.staged_package_path)
+        (staged_package / "README.md").write_text("# Updated Weekly Activity\n", encoding="utf-8")
+
+        with patch("agents.document_conversion.agent.render_conversion_response", side_effect=lambda *args, **kwargs: f"{kwargs['response_kind']}:{kwargs['preferred_language']}"):
+            with patch("agents.document_conversion.agent.publish_conversion_package") as publish_mock:
+                result = node._build_pending_action_response(
+                    {
+                        "messages": [HumanMessage(content="approve")],
+                    },
+                    session=session,
+                    pending_action=pending_action,
+                    preferred_language="en",
+                )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        publish_mock.assert_not_called()
+        self.assertIn("changed since approval was requested", result["content"])
         self.assertEqual(result["pending_action"]["status"], "ask_clarification")
         self.assertIsNone(result["execution_contract"])
 
