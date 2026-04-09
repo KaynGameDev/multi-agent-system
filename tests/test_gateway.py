@@ -456,7 +456,7 @@ class GatewayTests(unittest.TestCase):
 
         self.assertEqual(result["route"], "knowledge_base_builder_agent")
 
-    def test_builder_confirmation_follow_up_stays_on_knowledge_base_builder(self) -> None:
+    def test_builder_confirmation_follow_up_without_pending_action_uses_general_fallback(self) -> None:
         registrations = (
             build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
             build_registration("knowledge_agent", namespace="knowledge", selection_order=30, matcher=knowledge_matcher),
@@ -489,7 +489,8 @@ class GatewayTests(unittest.TestCase):
             }
         )
 
-        self.assertEqual(result["route"], "knowledge_base_builder_agent")
+        self.assertEqual(result["route"], "general_chat_agent")
+        self.assertEqual(result["route_policy_step"], "general_fallback")
 
     def test_direct_file_write_capability_question_routes_to_knowledge_base_builder(self) -> None:
         registrations = build_default_agent_registrations()
@@ -513,16 +514,7 @@ class GatewayTests(unittest.TestCase):
         self.assertIn("tool_availability_question", result["route_reason"])
 
     def test_write_into_file_phrase_routes_to_knowledge_base_builder(self) -> None:
-        registrations = (
-            build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
-            build_registration("knowledge_agent", namespace="knowledge", selection_order=30, matcher=knowledge_matcher),
-            build_registration(
-                "knowledge_base_builder_agent",
-                namespace="knowledge_base_builder",
-                selection_order=35,
-                matcher=knowledge_base_builder_matcher,
-            ),
-        )
+        registrations = build_default_agent_registrations()
         orchestrator = self.build_orchestrator(registrations)
 
         result = orchestrator(
@@ -547,16 +539,7 @@ class GatewayTests(unittest.TestCase):
         self.assertIn("tool_action_request", result["route_reason"])
 
     def test_update_into_knowledge_base_phrase_routes_to_knowledge_base_builder(self) -> None:
-        registrations = (
-            build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
-            build_registration("knowledge_agent", namespace="knowledge", selection_order=30, matcher=knowledge_matcher),
-            build_registration(
-                "knowledge_base_builder_agent",
-                namespace="knowledge_base_builder",
-                selection_order=35,
-                matcher=knowledge_base_builder_matcher,
-            ),
-        )
+        registrations = build_default_agent_registrations()
         orchestrator = self.build_orchestrator(registrations)
 
         result = orchestrator(

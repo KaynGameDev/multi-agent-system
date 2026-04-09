@@ -1,14 +1,10 @@
 from __future__ import annotations
 
-import json
 import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from langchain_core.messages import ToolMessage
-
 from app.agent_registry import AgentRegistration
-from app.contracts import normalize_tool_result_envelope
 from gateway.text_utils import is_casual_greeting, normalize_text
 from tools.conversion_google_sources import extract_google_document_references
 
@@ -95,45 +91,6 @@ KB_BUILDER_LAYER_DECISION_PHRASES = (
     "哪一层",
     "放在哪层",
     "放到哪层",
-)
-KB_BUILDER_FILE_WRITE_PHRASES = (
-    "写入文件",
-    "写入知识库",
-    "写到知识库",
-    "存入知识库",
-    "更新知识库",
-    "更新到知识库",
-    "保存到知识库",
-    "创建知识库文档",
-    "更新知识库文档",
-    "修改知识库文档",
-    "写文件",
-    "改文件",
-    "创建文件",
-    "保存文件",
-    "删除文件",
-    "能写文件吗",
-    "可以写文件吗",
-    "你能写文件吗",
-    "能改文件吗",
-    "可以改文件吗",
-    "能创建文件吗",
-    "可以创建文件吗",
-    "有写入权限吗",
-    "有修改权限吗",
-    "can you write files",
-    "can you write file",
-    "can you edit files",
-    "can you edit file",
-    "can you create files",
-    "can you create file",
-    "can you save files",
-    "can you save file",
-    "can you delete files",
-    "can you modify files",
-    "write to the knowledge base",
-    "write knowledge base files",
-    "edit knowledge base files",
 )
 PROJECT_PATTERNS = (
     "my tasks",
@@ -223,33 +180,9 @@ def knowledge_matcher(_state: dict[str, Any], latest_user_text: str) -> AgentMat
 
 
 def knowledge_base_builder_matcher(state: dict[str, Any], latest_user_text: str) -> AgentMatchResult:
-    pending_mutation_payload = get_latest_knowledge_mutation_payload(state)
-    if pending_mutation_payload and pending_mutation_payload.get("requires_confirmation") is True and not is_casual_greeting(latest_user_text):
-        return AgentMatchResult(
-            matched=True,
-            score=92,
-            reasons=("Pending knowledge-base file confirmation should continue in knowledge_base_builder_agent.",),
-        )
-
     normalized = normalize_text(latest_user_text)
     reasons: list[str] = []
     score = 0
-
-    file_write_hits = [phrase for phrase in KB_BUILDER_FILE_WRITE_PHRASES if phrase in normalized]
-    if file_write_hits:
-        score = max(score, 89 + min(len(file_write_hits), 5))
-        reasons.append(f"Knowledge-base file write signals matched: {', '.join(file_write_hits[:4])}.")
-
-    if (
-        "知识库" in normalized
-        and any(keyword in normalized for keyword in ("写入", "更新", "修改", "创建", "保存", "删除"))
-    ):
-        score = max(score, 90)
-        reasons.append("Knowledge-base update intent matched via `知识库` + mutation verb.")
-
-    if "文件" in normalized and any(keyword in normalized for keyword in ("写入", "写", "修改", "创建", "保存", "删除")):
-        score = max(score, 88)
-        reasons.append("File write intent matched via `文件` + mutation verb.")
 
     elicitation_hits = [phrase for phrase in KB_BUILDER_ELICITATION_PHRASES if phrase in normalized]
     if elicitation_hits:
@@ -275,26 +208,6 @@ def knowledge_base_builder_matcher(state: dict[str, Any], latest_user_text: str)
     if not reasons:
         return AgentMatchResult(matched=False, score=0, reasons=())
     return AgentMatchResult(matched=True, score=score, reasons=tuple(reasons))
-
-
-def get_latest_knowledge_mutation_payload(state: dict[str, Any]) -> dict[str, Any] | None:
-    for message in reversed(state.get("messages") or []):
-        if not isinstance(message, ToolMessage):
-            continue
-        content = getattr(message, "content", "")
-        if not isinstance(content, str):
-            continue
-        try:
-            payload = normalize_tool_result_envelope(
-                json.loads(content),
-                tool_name="knowledge_base",
-            )
-        except Exception:
-            continue
-        inner_payload = payload.get("payload") if isinstance(payload, dict) else None
-        if isinstance(inner_payload, dict) and str(inner_payload.get("knowledge_mutation", "")).strip():
-            return inner_payload
-    return None
 
 
 def general_chat_matcher(_state: dict[str, Any], latest_user_text: str) -> AgentMatchResult:
