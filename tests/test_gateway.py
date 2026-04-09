@@ -9,24 +9,40 @@ from langchain_core.messages import HumanMessage, ToolMessage
 
 from app.graph import build_default_agent_registrations
 from app.skills import SkillRegistry
-from app.tool_registry import KNOWLEDGE_BUILDER_TOOL_IDS
-from gateway.agent import (
-    AgentMatchResult,
-    GatewayNode,
-    document_conversion_matcher,
-    knowledge_base_builder_matcher,
-    knowledge_matcher,
-)
+from gateway.agent import GatewayNode
 from tests.common import build_registration, write_skill
 
 
 def keyword_matcher(keyword: str, score: int = 50):
-    def matcher(_state, latest_user_text: str) -> AgentMatchResult:
-        if keyword in latest_user_text.lower():
-            return AgentMatchResult(matched=True, score=score, reasons=(f"Matched keyword `{keyword}`.",))
-        return AgentMatchResult(matched=False, score=0, reasons=())
+    def matcher(_state, latest_user_text: str):
+        return None
 
     return matcher
+
+
+class FakeRoutingLLM:
+    def __init__(self, decisions=None, *, default_agent: str = "", default_reason: str = "") -> None:
+        self.decisions = dict(decisions or {})
+        self.default_agent = default_agent
+        self.default_reason = default_reason
+
+    def with_structured_output(self, _schema):
+        return self
+
+    def invoke(self, messages):
+        latest_user_text = ""
+        for message in reversed(messages):
+            if isinstance(message, HumanMessage):
+                latest_user_text = str(message.content)
+                break
+        decision = self.decisions.get(
+            latest_user_text,
+            {
+                "selected_agent": self.default_agent,
+                "reason": self.default_reason,
+            },
+        )
+        return dict(decision)
 
 
 class GatewayTests(unittest.TestCase):
@@ -37,10 +53,10 @@ class GatewayTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
-    def build_orchestrator(self, registrations):
+    def build_orchestrator(self, registrations, *, routing_llm=None):
         registry = SkillRegistry(tuple(registrations), project_root=self.root)
         return GatewayNode(
-            None,
+            routing_llm,
             agent_registrations=tuple(registrations),
             default_route=registrations[0].name,
             skill_registry=registry,
@@ -150,15 +166,10 @@ class GatewayTests(unittest.TestCase):
             body="# Shared Inline\n\nShared inline behavior.",
         )
 
-        def tie_matcher(_state, latest_user_text: str) -> AgentMatchResult:
-            if "shared" in latest_user_text.lower():
-                return AgentMatchResult(matched=True, score=10, reasons=("Matched shared keyword.",))
-            return AgentMatchResult(matched=False, score=0, reasons=())
-
         registrations = (
             build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True, selection_order=30),
-            build_registration("alpha_agent", namespace="alpha", selection_order=20, matcher=tie_matcher),
-            build_registration("beta_agent", namespace="beta", selection_order=10, matcher=tie_matcher),
+            build_registration("alpha_agent", namespace="alpha", selection_order=20),
+            build_registration("beta_agent", namespace="beta", selection_order=10),
         )
         orchestrator = self.build_orchestrator(registrations)
 
@@ -331,7 +342,15 @@ class GatewayTests(unittest.TestCase):
 
     def test_pending_action_owner_beats_tool_intent_metadata(self) -> None:
         registrations = build_default_agent_registrations()
-        orchestrator = self.build_orchestrator(registrations)
+        routing_llm = FakeRoutingLLM(
+            {
+                "can you write files?": {
+                    "selected_agent": "knowledge_base_builder_agent",
+                    "reason": "The model router would otherwise choose the knowledge-base builder.",
+                }
+            }
+        )
+        orchestrator = self.build_orchestrator(registrations, routing_llm=routing_llm)
 
         result = orchestrator(
             {
@@ -351,7 +370,7 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(result["route"], "project_task_agent")
         self.assertEqual(result["route_policy_step"], "pending_action_owner")
 
-    def test_tool_intent_metadata_beats_deterministic_matcher_scores(self) -> None:
+    def test_model_router_selects_specialist_agent(self) -> None:
         registrations = (
             build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
             build_registration("alpha_agent", namespace="alpha", selection_order=10, matcher=keyword_matcher("alpha", 95)),
@@ -359,10 +378,17 @@ class GatewayTests(unittest.TestCase):
                 "knowledge_base_builder_agent",
                 namespace="knowledge_base_builder",
                 selection_order=30,
-                tool_ids=KNOWLEDGE_BUILDER_TOOL_IDS,
             ),
         )
-        orchestrator = self.build_orchestrator(registrations)
+        routing_llm = FakeRoutingLLM(
+            {
+                "alpha can you write files?": {
+                    "selected_agent": "knowledge_base_builder_agent",
+                    "reason": "This request is best handled by the knowledge-base builder.",
+                }
+            }
+        )
+        orchestrator = self.build_orchestrator(registrations, routing_llm=routing_llm)
 
         result = orchestrator(
             {
@@ -371,15 +397,14 @@ class GatewayTests(unittest.TestCase):
         )
 
         self.assertEqual(result["route"], "knowledge_base_builder_agent")
-        self.assertEqual(result["route_policy_step"], "tool_intent")
+        self.assertEqual(result["route_policy_step"], "model_router")
 
-    def test_document_conversion_matcher_routes_deterministically(self) -> None:
+    def test_uploaded_files_route_to_document_conversion_from_state(self) -> None:
         registrations = (
             build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
             build_registration(
                 "document_conversion_agent",
                 namespace="document_conversion",
-                matcher=document_conversion_matcher,
             ),
         )
         orchestrator = self.build_orchestrator(registrations)
@@ -392,44 +417,64 @@ class GatewayTests(unittest.TestCase):
         )
 
         self.assertEqual(result["route"], "document_conversion_agent")
+        self.assertEqual(result["route_policy_step"], "state_route")
 
     def test_builder_elicitation_request_routes_to_knowledge_base_builder(self) -> None:
         registrations = (
             build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
-            build_registration("knowledge_agent", namespace="knowledge", selection_order=30, matcher=knowledge_matcher),
             build_registration(
                 "knowledge_base_builder_agent",
                 namespace="knowledge_base_builder",
                 selection_order=35,
-                matcher=knowledge_base_builder_matcher,
             ),
         )
-        orchestrator = self.build_orchestrator(registrations)
+        text = "请一步步提问，帮我们梳理这个功能并整理成 feature spec 骨架。"
+        orchestrator = self.build_orchestrator(
+            registrations,
+            routing_llm=FakeRoutingLLM(
+                {
+                    text: {
+                        "selected_agent": "knowledge_base_builder_agent",
+                        "reason": "The user is asking for structured knowledge elicitation.",
+                    }
+                }
+            ),
+        )
 
         result = orchestrator(
             {
-                "messages": [HumanMessage(content="请一步步提问，帮我们梳理这个功能并整理成 feature spec 骨架。")],
+                "messages": [HumanMessage(content=text)],
             }
         )
 
         self.assertEqual(result["route"], "knowledge_base_builder_agent")
+        self.assertEqual(result["route_policy_step"], "model_router")
 
     def test_builder_review_request_routes_to_knowledge_base_builder(self) -> None:
         registrations = (
             build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
-            build_registration("knowledge_agent", namespace="knowledge", selection_order=30, matcher=knowledge_matcher),
             build_registration(
                 "knowledge_base_builder_agent",
                 namespace="knowledge_base_builder",
                 selection_order=35,
-                matcher=knowledge_base_builder_matcher,
             ),
         )
-        orchestrator = self.build_orchestrator(registrations)
+        text = "请 review 这份 KB 文档的 metadata 和层级归属。"
+        orchestrator = self.build_orchestrator(
+            registrations,
+            routing_llm=FakeRoutingLLM(
+                {
+                    text: {
+                        "selected_agent": "knowledge_base_builder_agent",
+                        "reason": "The user is asking for KB document review.",
+                    }
+                }
+            ),
+        )
 
         result = orchestrator(
             {
-                "messages": [HumanMessage(content="请 review 这份 KB 文档的 metadata 和层级归属。")],
+                "messages": [HumanMessage(content=text)],
             }
         )
 
@@ -438,19 +483,28 @@ class GatewayTests(unittest.TestCase):
     def test_builder_tracking_request_routes_to_knowledge_base_builder(self) -> None:
         registrations = (
             build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
-            build_registration("knowledge_agent", namespace="knowledge", selection_order=30, matcher=knowledge_matcher),
             build_registration(
                 "knowledge_base_builder_agent",
                 namespace="knowledge_base_builder",
                 selection_order=35,
-                matcher=knowledge_base_builder_matcher,
             ),
         )
-        orchestrator = self.build_orchestrator(registrations)
+        text = "当前 KB V1 到哪个 milestone 了？"
+        orchestrator = self.build_orchestrator(
+            registrations,
+            routing_llm=FakeRoutingLLM(
+                {
+                    text: {
+                        "selected_agent": "knowledge_base_builder_agent",
+                        "reason": "The user is asking for KB execution tracking.",
+                    }
+                }
+            ),
+        )
 
         result = orchestrator(
             {
-                "messages": [HumanMessage(content="当前 KB V1 到哪个 milestone 了？")],
+                "messages": [HumanMessage(content=text)],
             }
         )
 
@@ -459,12 +513,10 @@ class GatewayTests(unittest.TestCase):
     def test_builder_confirmation_follow_up_without_pending_action_uses_general_fallback(self) -> None:
         registrations = (
             build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
-            build_registration("knowledge_agent", namespace="knowledge", selection_order=30, matcher=knowledge_matcher),
             build_registration(
                 "knowledge_base_builder_agent",
                 namespace="knowledge_base_builder",
                 selection_order=35,
-                matcher=knowledge_base_builder_matcher,
             ),
         )
         orchestrator = self.build_orchestrator(registrations)
@@ -494,11 +546,22 @@ class GatewayTests(unittest.TestCase):
 
     def test_direct_file_write_capability_question_routes_to_knowledge_base_builder(self) -> None:
         registrations = build_default_agent_registrations()
-        orchestrator = self.build_orchestrator(registrations)
+        text = "你可以写文件吗"
+        orchestrator = self.build_orchestrator(
+            registrations,
+            routing_llm=FakeRoutingLLM(
+                {
+                    text: {
+                        "selected_agent": "knowledge_base_builder_agent",
+                        "reason": "This is a request about KB write capability.",
+                    }
+                }
+            ),
+        )
 
         result = orchestrator(
             {
-                "messages": [HumanMessage(content="你可以写文件吗")],
+                "messages": [HumanMessage(content=text)],
             }
         )
 
@@ -506,20 +569,42 @@ class GatewayTests(unittest.TestCase):
 
     def test_english_tool_availability_question_routes_to_knowledge_base_builder(self) -> None:
         registrations = build_default_agent_registrations()
-        orchestrator = self.build_orchestrator(registrations)
+        text = "can you write files?"
+        orchestrator = self.build_orchestrator(
+            registrations,
+            routing_llm=FakeRoutingLLM(
+                {
+                    text: {
+                        "selected_agent": "knowledge_base_builder_agent",
+                        "reason": "This asks about KB file-writing capability.",
+                    }
+                }
+            ),
+        )
 
-        result = orchestrator({"messages": [HumanMessage(content="can you write files?")]})
+        result = orchestrator({"messages": [HumanMessage(content=text)]})
 
         self.assertEqual(result["route"], "knowledge_base_builder_agent")
-        self.assertIn("tool_availability_question", result["route_reason"])
+        self.assertEqual(result["route_policy_step"], "model_router")
 
     def test_write_into_file_phrase_routes_to_knowledge_base_builder(self) -> None:
         registrations = build_default_agent_registrations()
-        orchestrator = self.build_orchestrator(registrations)
+        text = "你能帮我写入文件吗"
+        orchestrator = self.build_orchestrator(
+            registrations,
+            routing_llm=FakeRoutingLLM(
+                {
+                    text: {
+                        "selected_agent": "knowledge_base_builder_agent",
+                        "reason": "This is a KB write request.",
+                    }
+                }
+            ),
+        )
 
         result = orchestrator(
             {
-                "messages": [HumanMessage(content="你能帮我写入文件吗")],
+                "messages": [HumanMessage(content=text)],
             }
         )
 
@@ -527,24 +612,46 @@ class GatewayTests(unittest.TestCase):
 
     def test_save_discussion_to_knowledge_base_routes_to_builder(self) -> None:
         registrations = build_default_agent_registrations()
-        orchestrator = self.build_orchestrator(registrations)
+        text = "can you save our discussion to the knowledge base?"
+        orchestrator = self.build_orchestrator(
+            registrations,
+            routing_llm=FakeRoutingLLM(
+                {
+                    text: {
+                        "selected_agent": "knowledge_base_builder_agent",
+                        "reason": "This requests saving discussion into the KB.",
+                    }
+                }
+            ),
+        )
 
         result = orchestrator(
             {
-                "messages": [HumanMessage(content="can you save our discussion to the knowledge base?")],
+                "messages": [HumanMessage(content=text)],
             }
         )
 
         self.assertEqual(result["route"], "knowledge_base_builder_agent")
-        self.assertIn("tool_action_request", result["route_reason"])
+        self.assertEqual(result["route_policy_step"], "model_router")
 
     def test_update_into_knowledge_base_phrase_routes_to_knowledge_base_builder(self) -> None:
         registrations = build_default_agent_registrations()
-        orchestrator = self.build_orchestrator(registrations)
+        text = "你能帮我把内容更新到知识库吗"
+        orchestrator = self.build_orchestrator(
+            registrations,
+            routing_llm=FakeRoutingLLM(
+                {
+                    text: {
+                        "selected_agent": "knowledge_base_builder_agent",
+                        "reason": "This asks to update the knowledge base.",
+                    }
+                }
+            ),
+        )
 
         result = orchestrator(
             {
-                "messages": [HumanMessage(content="你能帮我把内容更新到知识库吗")],
+                "messages": [HumanMessage(content=text)],
             }
         )
 
@@ -553,19 +660,29 @@ class GatewayTests(unittest.TestCase):
     def test_generic_repository_question_stays_on_knowledge_agent(self) -> None:
         registrations = (
             build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
-            build_registration("knowledge_agent", namespace="knowledge", selection_order=30, matcher=knowledge_matcher),
+            build_registration("knowledge_agent", namespace="knowledge", selection_order=30),
             build_registration(
                 "knowledge_base_builder_agent",
                 namespace="knowledge_base_builder",
                 selection_order=35,
-                matcher=knowledge_base_builder_matcher,
             ),
         )
-        orchestrator = self.build_orchestrator(registrations)
+        text = "请介绍一下这个仓库的 setup 文档和架构说明。"
+        orchestrator = self.build_orchestrator(
+            registrations,
+            routing_llm=FakeRoutingLLM(
+                {
+                    text: {
+                        "selected_agent": "knowledge_agent",
+                        "reason": "This is a repository documentation question.",
+                    }
+                }
+            ),
+        )
 
         result = orchestrator(
             {
-                "messages": [HumanMessage(content="请介绍一下这个仓库的 setup 文档和架构说明。")],
+                "messages": [HumanMessage(content=text)],
             }
         )
 
@@ -574,7 +691,7 @@ class GatewayTests(unittest.TestCase):
     def test_pending_action_short_circuits_to_owner_agent(self) -> None:
         registrations = (
             build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
-            build_registration("knowledge_agent", namespace="knowledge", selection_order=30, matcher=knowledge_matcher),
+            build_registration("knowledge_agent", namespace="knowledge", selection_order=30),
             build_registration("project_task_agent", namespace="project_task", selection_order=20),
         )
         orchestrator = self.build_orchestrator(registrations)
@@ -606,7 +723,7 @@ class GatewayTests(unittest.TestCase):
     def test_legacy_pending_interaction_is_ignored_by_gateway(self) -> None:
         registrations = (
             build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
-            build_registration("knowledge_agent", namespace="knowledge", selection_order=30, matcher=knowledge_matcher),
+            build_registration("knowledge_agent", namespace="knowledge", selection_order=30),
             build_registration("project_task_agent", namespace="project_task", selection_order=20),
         )
         orchestrator = self.build_orchestrator(registrations)

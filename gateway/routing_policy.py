@@ -7,8 +7,7 @@ from app.agent_registry import AgentRegistration
 from app.pending_actions import get_pending_action, is_pending_action_active
 from app.skills import SkillDefinition
 from app.state import AgentState
-from gateway.matchers import evaluate_agent_match
-from gateway.tool_intent import select_agent_from_tool_intent
+from gateway.model_router import ModelRouter
 
 GENERAL_ASSISTANT_ALIAS = "GeneralAssistant"
 ROUTING_POLICY_REQUESTED_AGENT = "requested_agent"
@@ -16,8 +15,8 @@ ROUTING_POLICY_FORKED_SKILL_DELEGATE = "forked_skill_delegate"
 ROUTING_POLICY_FORKED_SKILL_FALLBACK = "forked_skill_fallback"
 ROUTING_POLICY_INLINE_SKILL_COMPATIBILITY = "inline_skill_compatibility"
 ROUTING_POLICY_PENDING_ACTION_OWNER = "pending_action_owner"
-ROUTING_POLICY_TOOL_INTENT = "tool_intent"
-ROUTING_POLICY_MATCHER = "deterministic_matcher"
+ROUTING_POLICY_STATE_ROUTE = "state_route"
+ROUTING_POLICY_MODEL_ROUTER = "model_router"
 ROUTING_POLICY_GENERAL_FALLBACK = "general_fallback"
 
 
@@ -38,6 +37,7 @@ class RoutingPolicyContext:
     registrations_by_name: dict[str, AgentRegistration]
     default_route: str
     general_assistant_name: str
+    model_router: ModelRouter | None
 
 
 def resolve_general_assistant_name(
@@ -65,7 +65,7 @@ def build_route_reason(agent_diagnostics: list[dict[str, Any]], route: str) -> s
         reason = str(item.get("reason", "")).strip()
         if reason:
             return reason
-    return f"Selected `{route}` from deterministic gateway policy."
+    return f"Selected `{route}` from gateway routing policy."
 
 
 def select_agent_by_policy(
@@ -79,8 +79,8 @@ def select_agent_by_policy(
         _select_explicit_forked_skill_fallback,
         _select_explicit_inline_skill_candidate,
         _select_pending_action_owner,
-        _select_tool_intent_agent,
-        _select_deterministic_matcher,
+        _select_state_route,
+        _select_model_router,
     )
 
     for selector in selectors:
@@ -217,73 +217,67 @@ def _select_pending_action_owner(
     return None
 
 
-def _select_tool_intent_agent(
+def _select_state_route(
     context: RoutingPolicyContext,
     warnings: list[str],
 ) -> AgentRouteSelection | None:
-    selection = select_agent_from_tool_intent(
-        context.agent_registrations,
-        context.state,
-        context.latest_user_text,
+    document_conversion_agent = "document_conversion_agent"
+    if document_conversion_agent not in context.registrations_by_name:
+        return None
+
+    uploaded_files = context.state.get("uploaded_files")
+    if isinstance(uploaded_files, list) and uploaded_files:
+        return AgentRouteSelection(
+            agent_name=document_conversion_agent,
+            policy_step=ROUTING_POLICY_STATE_ROUTE,
+            diagnostics=(
+                {
+                    "kind": "state_route",
+                    "policy_step": ROUTING_POLICY_STATE_ROUTE,
+                    "selected_agent": document_conversion_agent,
+                    "reason": "Uploaded files require document conversion handling.",
+                },
+            ),
+        )
+
+    conversion_session_id = str(context.state.get("conversion_session_id", "")).strip()
+    if conversion_session_id:
+        return AgentRouteSelection(
+            agent_name=document_conversion_agent,
+            policy_step=ROUTING_POLICY_STATE_ROUTE,
+            diagnostics=(
+                {
+                    "kind": "state_route",
+                    "policy_step": ROUTING_POLICY_STATE_ROUTE,
+                    "selected_agent": document_conversion_agent,
+                    "reason": "Active conversion session should stay on document conversion.",
+                },
+            ),
+        )
+
+    return None
+
+
+def _select_model_router(
+    context: RoutingPolicyContext,
+    warnings: list[str],
+) -> AgentRouteSelection | None:
+    if context.model_router is None:
+        return None
+
+    selection = context.model_router.select_specialist(
+        agent_registrations=context.agent_registrations,
+        general_assistant_name=context.general_assistant_name,
+        latest_user_text=context.latest_user_text,
+        state=context.state,
     )
     if selection is None:
         return None
+
     selected_agent, diagnostics = selection
     return AgentRouteSelection(
         agent_name=selected_agent,
-        policy_step=ROUTING_POLICY_TOOL_INTENT,
-        diagnostics=tuple(diagnostics),
-    )
-
-
-def _select_deterministic_matcher(
-    context: RoutingPolicyContext,
-    warnings: list[str],
-) -> AgentRouteSelection | None:
-    diagnostics: list[dict[str, Any]] = []
-    candidate_results = []
-    for registration in context.agent_registrations:
-        result = evaluate_agent_match(registration, context.state, context.latest_user_text)
-        candidate_results.append((registration, result))
-        diagnostics.append(
-            {
-                "kind": "matcher_result",
-                "policy_step": ROUTING_POLICY_MATCHER,
-                "agent": registration.name,
-                "matched": result.matched,
-                "score": result.score,
-                "reasons": list(result.reasons),
-            }
-        )
-
-    matched_candidates = [
-        (registration, result)
-        for registration, result in candidate_results
-        if result.matched and result.score > 0
-    ]
-    if not matched_candidates:
-        return None
-
-    selected_registration, selected_result = sorted(
-        matched_candidates,
-        key=lambda item: (
-            -item[1].score,
-            item[0].selection_order,
-            item[0].name,
-        ),
-    )[0]
-    diagnostics.append(
-        {
-            "kind": "selected",
-            "policy_step": ROUTING_POLICY_MATCHER,
-            "selected_agent": selected_registration.name,
-            "reason": "; ".join(selected_result.reasons)
-            or f"Selected `{selected_registration.name}` from deterministic matcher policy.",
-        }
-    )
-    return AgentRouteSelection(
-        agent_name=selected_registration.name,
-        policy_step=ROUTING_POLICY_MATCHER,
+        policy_step=ROUTING_POLICY_MODEL_ROUTER,
         diagnostics=tuple(diagnostics),
     )
 
@@ -295,7 +289,7 @@ def _select_general_fallback(
     selected_agent = _fallback_general_assistant(
         context,
         warnings,
-        "No specialist matcher applied; GeneralAssistant fallback applied.",
+        "No specialist route applied; GeneralAssistant fallback applied.",
     )
     return AgentRouteSelection(
         agent_name=selected_agent,
@@ -305,7 +299,7 @@ def _select_general_fallback(
                 "kind": "fallback",
                 "policy_step": ROUTING_POLICY_GENERAL_FALLBACK,
                 "selected_agent": selected_agent,
-                "reason": "No specialist matcher applied; used GeneralAssistant fallback.",
+                "reason": "No specialist route applied; used GeneralAssistant fallback.",
             },
         ),
     )
@@ -344,29 +338,21 @@ def _choose_from_candidates(
         )
 
     diagnostics: list[dict[str, Any]] = []
-    scored_candidates = []
     for registration in candidates:
-        result = evaluate_agent_match(registration, context.state, context.latest_user_text)
         diagnostics.append(
             {
-                "kind": "candidate_matcher_result",
+                "kind": "candidate_available",
                 "policy_step": policy_step,
                 "agent": registration.name,
-                "matched": result.matched,
-                "score": result.score,
-                "reasons": list(result.reasons),
+                "selection_order": registration.selection_order,
             }
         )
-        scored_candidates.append((registration, result))
 
-    positively_matched = [item for item in scored_candidates if item[1].matched and item[1].score > 0]
-    ordered_candidates = positively_matched or scored_candidates
-    selected_registration, selected_result = sorted(
-        ordered_candidates,
+    selected_registration = sorted(
+        candidates,
         key=lambda item: (
-            -item[1].score,
-            item[0].selection_order,
-            item[0].name,
+            item.selection_order,
+            item.name,
         ),
     )[0]
     diagnostics.append(
@@ -374,7 +360,7 @@ def _choose_from_candidates(
             "kind": "candidate_selected",
             "policy_step": policy_step,
             "selected_agent": selected_registration.name,
-            "reason": "; ".join(selected_result.reasons) or reason_prefix,
+            "reason": reason_prefix,
         }
     )
     return AgentRouteSelection(

@@ -15,7 +15,6 @@ from agents.project_task.agent import ProjectTaskAgentNode
 from app.checkpoints import build_checkpoint_store
 from app.graph import build_graph
 from app.main import bootstrap_system
-from gateway.agent import AgentMatchResult
 from interfaces.web.server import WebServer
 from tests.common import build_registration, make_settings
 
@@ -66,10 +65,6 @@ class BrokenCheckpointStore:
 
     def delete_thread(self, thread_id: str) -> None:
         self.deleted_threads.append(thread_id)
-
-
-def always_match(_state, _latest_user_text: str) -> AgentMatchResult:
-    return AgentMatchResult(matched=True, score=100, reasons=("Matched in durable resume test.",))
 
 
 @tool
@@ -153,7 +148,6 @@ class DurableResumeTests(unittest.TestCase):
                 namespace="general_chat",
                 is_general_assistant=True,
                 selection_order=10,
-                matcher=always_match,
                 build_node=lambda _llm=None, skill_registry=None: CountingAgentNode(),
             ),
         )
@@ -297,7 +291,6 @@ class DurableResumeTests(unittest.TestCase):
                 namespace="project_task",
                 is_general_assistant=True,
                 selection_order=10,
-                matcher=always_match,
                 build_node=lambda _llm=None, skill_registry=None: ProjectTaskAgentNode(
                     FakeTaskLLM(),
                     [fake_project_tasks],

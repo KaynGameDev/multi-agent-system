@@ -8,14 +8,7 @@ from app.messages import extract_latest_human_text
 from app.skill_runtime import build_skill_runtime_state
 from app.skills import SkillRegistry
 from app.state import AgentState
-from gateway.matchers import (
-    AgentMatchResult,
-    document_conversion_matcher,
-    general_chat_matcher,
-    knowledge_base_builder_matcher,
-    knowledge_matcher,
-    project_task_matcher_factory,
-)
+from gateway.model_router import ModelRouter
 from gateway.routing_policy import (
     RoutingPolicyContext,
     build_route_reason,
@@ -46,6 +39,7 @@ class GatewayNode:
         self.agent_registrations = tuple(agent_registrations)
         self.default_route = default_route
         self.skill_registry = skill_registry
+        self.model_router = ModelRouter(_llm)
         self.registrations_by_name = {registration.name: registration for registration in self.agent_registrations}
         self.general_assistant_name = resolve_general_assistant_name(
             self.agent_registrations,
@@ -76,6 +70,7 @@ class GatewayNode:
                 registrations_by_name=self.registrations_by_name,
                 default_route=self.default_route,
                 general_assistant_name=self.general_assistant_name,
+                model_router=self.model_router,
             ),
             warnings=warnings,
         )
@@ -148,12 +143,6 @@ class GatewayNode:
 
 
 __all__ = [
-    "AgentMatchResult",
     "GatewayNode",
     "SelectedSkillRuntime",
-    "document_conversion_matcher",
-    "general_chat_matcher",
-    "knowledge_base_builder_matcher",
-    "knowledge_matcher",
-    "project_task_matcher_factory",
 ]

@@ -151,14 +151,14 @@ class RuntimeContractTests(unittest.TestCase):
     def test_routing_decision_tracks_policy_step(self) -> None:
         decision = build_routing_decision(
             "knowledge_base_builder_agent",
-            reason="Tool intent matched the KB writer.",
-            policy_step="tool_intent",
+            reason="Model router selected the KB writer.",
+            policy_step="model_router",
             warnings=["none"],
-            diagnostics=[{"kind": "selected", "policy_step": "tool_intent"}],
+            diagnostics=[{"kind": "selected", "policy_step": "model_router"}],
         )
 
         self.assertEqual(decision["route"], "knowledge_base_builder_agent")
-        self.assertEqual(decision["policy_step"], "tool_intent")
+        self.assertEqual(decision["policy_step"], "model_router")
 
 
 if __name__ == "__main__":

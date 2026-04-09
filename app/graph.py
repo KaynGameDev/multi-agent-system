@@ -15,13 +15,6 @@ from app.agent_registry import AgentRegistration
 from app.config import load_settings
 from app.pending_action_parser import PendingActionReplyInterpreter
 from gateway.agent import GatewayNode
-from gateway.agent import (
-    document_conversion_matcher,
-    general_chat_matcher,
-    knowledge_base_builder_matcher,
-    knowledge_matcher,
-    project_task_matcher_factory,
-)
 from app.skills import SkillRegistry
 from app.state import AgentState
 from tools.knowledge_base import (
@@ -68,7 +61,6 @@ def build_default_agent_registrations(
             selection_order=40,
             is_general_assistant=True,
             skill_namespace="general_chat",
-            matcher=general_chat_matcher,
         ),
         AgentRegistration(
             name="knowledge_agent",
@@ -88,7 +80,6 @@ def build_default_agent_registrations(
             tool_ids=knowledge_read_tool_ids,
             selection_order=30,
             skill_namespace="knowledge",
-            matcher=knowledge_matcher,
         ),
         AgentRegistration(
             name="knowledge_base_builder_agent",
@@ -108,7 +99,6 @@ def build_default_agent_registrations(
             tool_ids=knowledge_builder_tool_ids,
             selection_order=35,
             skill_namespace="knowledge_base_builder",
-            matcher=knowledge_base_builder_matcher,
         ),
         AgentRegistration(
             name="project_task_agent",
@@ -128,7 +118,6 @@ def build_default_agent_registrations(
             tool_ids=project_tool_ids,
             selection_order=20,
             skill_namespace="project_task",
-            matcher=project_task_matcher_factory(resolved_settings.project_lookup_keywords),
         ),
         AgentRegistration(
             name="document_conversion_agent",
@@ -145,7 +134,6 @@ def build_default_agent_registrations(
             ),
             selection_order=10,
             skill_namespace="document_conversion",
-            matcher=document_conversion_matcher,
         ),
     )
 

@@ -11,7 +11,6 @@ from langgraph.checkpoint.memory import InMemorySaver
 
 from app.graph import build_default_agent_registrations, build_graph, build_web_agent_registrations
 from app.skills import SkillRegistry
-from gateway.agent import AgentMatchResult
 from interfaces.web.server import WebServer
 from tests.common import build_registration, make_settings, write_skill
 
@@ -63,17 +62,25 @@ class StaticAgentNode:
         return {"messages": [AIMessage(content="Static response.")]}
 
 
-def always_match(_state, _latest_user_text: str) -> AgentMatchResult:
-    return AgentMatchResult(matched=True, score=100, reasons=("Always matched for integration test.",))
+class FakeRoutingLLM:
+    def __init__(self, decisions=None) -> None:
+        self.decisions = dict(decisions or {})
 
+    def with_structured_output(self, _schema):
+        return self
 
-def keyword_match(keyword: str, *, score: int = 100):
-    def matcher(_state, latest_user_text: str) -> AgentMatchResult:
-        if keyword in latest_user_text.lower():
-            return AgentMatchResult(matched=True, score=score, reasons=(f"Matched `{keyword}`.",))
-        return AgentMatchResult(matched=False, score=0, reasons=())
-
-    return matcher
+    def invoke(self, messages):
+        latest_user_text = ""
+        for message in reversed(messages):
+            if isinstance(message, HumanMessage):
+                latest_user_text = str(message.content)
+                break
+        return dict(
+            self.decisions.get(
+                latest_user_text,
+                {"selected_agent": "", "reason": ""},
+            )
+        )
 
 
 class DeterministicIntegrationTests(unittest.TestCase):
@@ -97,7 +104,6 @@ class DeterministicIntegrationTests(unittest.TestCase):
                 "alpha_agent",
                 namespace="alpha",
                 selection_order=10,
-                matcher=always_match,
                 build_node=lambda _llm=None, skill_registry=None: LoopAgentNode(),
                 tools=(echo_tool,),
             ),
@@ -114,7 +120,7 @@ class DeterministicIntegrationTests(unittest.TestCase):
         )
         registry = SkillRegistry(registrations, project_root=self.root)
         graph = build_graph(
-            None,
+            FakeRoutingLLM(),
             agent_registrations=registrations,
             default_route="alpha_agent",
             skill_registry=registry,
@@ -190,14 +196,12 @@ class DeterministicIntegrationTests(unittest.TestCase):
                 "alpha_agent",
                 namespace="alpha",
                 selection_order=10,
-                matcher=keyword_match("alpha"),
                 build_node=lambda _llm=None, skill_registry=None: StaticAgentNode(),
             ),
             build_registration(
                 "beta_agent",
                 namespace="beta",
                 selection_order=20,
-                matcher=keyword_match("beta"),
                 build_node=lambda _llm=None, skill_registry=None: StaticAgentNode(),
             ),
         )
@@ -213,7 +217,14 @@ class DeterministicIntegrationTests(unittest.TestCase):
         )
         registry = SkillRegistry(registrations, project_root=self.root)
         graph = build_graph(
-            None,
+            FakeRoutingLLM(
+                {
+                    "please beta": {
+                        "selected_agent": "beta_agent",
+                        "reason": "This turn should go to beta.",
+                    }
+                }
+            ),
             checkpointer=InMemorySaver(),
             agent_registrations=registrations,
             default_route="general_chat_agent",
