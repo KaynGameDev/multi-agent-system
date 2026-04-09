@@ -1,6 +1,9 @@
 from __future__ import annotations
 
+import logging
+
 from pydantic import BaseModel, Field
+from pydantic import ValidationError
 from langchain_core.messages import AIMessage, SystemMessage
 
 from app.contracts import build_assistant_response
@@ -11,6 +14,7 @@ from app.skills import SkillRegistry
 from app.state import AgentState
 
 PROMPT_PATH = "agents/general_chat/AGENT.md"
+logger = logging.getLogger(__name__)
 
 
 class GeneralChatReply(BaseModel):
@@ -25,6 +29,7 @@ class GeneralChatAgentNode:
         self.llm = llm
         structured_output = getattr(llm, "with_structured_output", None)
         self.response_llm = structured_output(GeneralChatReply) if callable(structured_output) else llm
+        self.uses_structured_output = self.response_llm is not llm
         self.skill_registry = skill_registry
         self.agent_name = agent_name
 
@@ -39,7 +44,7 @@ class GeneralChatAgentNode:
             ),
             *state["messages"],
         ]
-        response = self.response_llm.invoke(messages)
+        response = self._invoke_response_model(messages)
         assistant_text = extract_general_chat_reply_text(response)
         return {
             "messages": [AIMessage(content=assistant_text)],
@@ -48,6 +53,20 @@ class GeneralChatAgentNode:
                 content=assistant_text,
             ),
         }
+
+    def _invoke_response_model(self, messages):
+        try:
+            return self.response_llm.invoke(messages)
+        except Exception as exc:
+            if not self.uses_structured_output or not is_structured_output_contract_error(exc):
+                raise
+            logger.warning(
+                "General chat structured output failed validation; falling back to plain-text invocation. error=%s",
+                exc,
+            )
+            self.response_llm = self.llm
+            self.uses_structured_output = False
+            return self.llm.invoke(messages)
 
 
 def build_general_chat_prompt(
@@ -88,6 +107,10 @@ def build_general_chat_prompt(
         sections["output_contract"],
         format_prompt,
     )
+
+
+def is_structured_output_contract_error(exc: Exception) -> bool:
+    return isinstance(exc, ValidationError)
 
 
 def extract_general_chat_reply_text(response) -> str:

@@ -257,106 +257,58 @@
       ]
     },
     {
-      "conversation_id": "fc03572d3be54e199653f4007c6c8441",
-      "title": "你好，我打算给你输入一些项目知识",
-      "created_at": "2026-04-09T05:19:16.976619+00:00",
-      "updated_at": "2026-04-09T07:19:17.720597+00:00",
+      "conversation_id": "efff44f64f504ef6ab11458831264adc",
+      "title": "你好",
+      "created_at": "2026-04-09T08:14:42.075795+00:00",
+      "updated_at": "2026-04-09T08:19:31.991939+00:00",
       "messages": [
         {
-          "id": "7847a494cc3e4295b5f2779aa30a9f76",
-          "role": "user",
-          "markdown": "你好，我打算给你输入一些项目知识",
-          "created_at": "2026-04-09T05:19:28.862218+00:00"
-        },
-        {
-          "id": "bf57536b8c3a41bfab8fd6a00aec189d",
-          "role": "assistant",
-          "markdown": "你好！我是 Jade。\n\n如果你准备输入的是关于项目文档、公司流程或技术架构等**知识库内容**，建议通过专门的知识管理流程进行录入，以便系统中的其他 Agent 也能准确地检索和使用这些信息。\n\n如果你只是想在当前对话中分享一些背景信息，或者有其他通用问题，请随时发送。我会在这里协助你！",
-          "created_at": "2026-04-09T05:20:48.127606+00:00"
-        },
-        {
-          "id": "992d1761c6f84393a2a72b33f7ed8d18",
+          "id": "d9614847d5a848009923529e4f97270c",
           "role": "user",
           "markdown": "你好",
-          "created_at": "2026-04-09T07:10:36.617638+00:00"
+          "created_at": "2026-04-09T08:14:45.631280+00:00"
         },
         {
-          "id": "210ae05a8422471199bca8bf919df72b",
+          "id": "24686fc014304dafa05e90a49b96eba1",
           "role": "assistant",
-          "markdown": "你好！有什么我可以帮你的吗？",
-          "created_at": "2026-04-09T07:10:45.721570+00:00"
+          "markdown": "你好！我是 Jade，很高兴为你服务。请问有什么我可以帮你的吗？",
+          "created_at": "2026-04-09T08:15:08.451488+00:00"
         },
         {
-          "id": "994274c1e6a64653ade93865a98c4929",
+          "id": "f358059f1bc143c58056a4c4ea03742a",
           "role": "user",
-          "markdown": "你能帮我做什么",
-          "created_at": "2026-04-09T07:11:05.726264+00:00"
+          "markdown": "你能做什么",
+          "created_at": "2026-04-09T08:15:14.494230+00:00"
         },
         {
-          "id": "d2c6cc1bb2944b45ace89054c5f7ba4d",
+          "id": "52cb03a759d54db097db54ce65cd82f3",
           "role": "assistant",
-          "markdown": "作为 Jade Games 的通用聊天 Agent，我可以帮你处理以下事项：\n\n- **日常对话** — 问候、闲聊、通用问题解答\n- **公司介绍** — 关于 Jade Games 的基本信息\n- **基础指引** — 帮你了解系统中不同 Agent 的职责，引导你找到正确的渠道\n- **非技术性问题** — 涉及流程、制度等公开信息的简单问答\n\n---\n\n**不归我处理的内容**（请通过对应渠道）：\n\n| 需求 | 推荐渠道 |\n|---|---|\n| 项目任务、进度、负责人 | 项目任务 Agent |\n| 技术文档、架构、代码 | 知识管理 Agent |\n| 敏感信息、凭证、ID | 请通过正式安全渠道 |\n\n有什么具体需求吗？",
-          "created_at": "2026-04-09T07:11:16.126169+00:00"
+          "markdown": "你好！我是 Jade，Jade Games 的通用聊天助手。我主要可以为你提供以下帮助：\n\n1. **日常交流与问候**：处理基础的对话和礼貌互动。\n2. **通用问题解答**：回答不涉及公司内部特定项目数据或私有文档的常规问题。\n3. **引导与分流**：如果你有关于项目进度、任务分配或公司内部流程的具体需求，我可以协助你明确方向。\n\n请问今天有什么我可以帮你的吗？",
+          "created_at": "2026-04-09T08:16:20.592510+00:00"
         },
         {
-          "id": "b8424f862ab1436c90141665ca4c0be4",
+          "id": "a1d73eed8ab541f089aa843ba6c809b6",
           "role": "user",
-          "markdown": "你好",
-          "created_at": "2026-04-09T07:17:10.177322+00:00"
+          "markdown": "我想跟你同步一些知识",
+          "created_at": "2026-04-09T08:16:37.650892+00:00"
         },
         {
-          "id": "3bd892b96372418aa18967de2342a12f",
+          "id": "5e691eb70aa54c0b811e223380a9fd8a",
           "role": "assistant",
-          "markdown": "你好！有什么我可以帮你的吗？",
-          "created_at": "2026-04-09T07:17:13.829079+00:00"
+          "markdown": "好的，请随时告诉我你想同步的内容。我会认真记录并根据你的需求提供后续支持。如果是关于公司流程、技术文档或特定项目知识的更新，你也可以直接发送给我。",
+          "created_at": "2026-04-09T08:17:02.090481+00:00"
         },
         {
-          "id": "44fd96d8a7cb4cf79f76cf230ab6f717",
+          "id": "1f98b587042a40a9aa03d7f550b0e752",
           "role": "user",
-          "markdown": "你是谁",
-          "created_at": "2026-04-09T07:17:17.052655+00:00"
+          "markdown": "目前我们公司主要分成两个业务组，一个是国际休闲娱乐组和一个射击塔防组。我们今天先聊聊射击塔防组有哪些业务线。目前主要在线上运营的游戏有四款，他们是：二人捕鱼，四人捕鱼，飞机捕鱼，西游捕鱼。他们基本上都有在以下三个大厅平台上运营：印尼主包，印尼副包和泰国副包。",
+          "created_at": "2026-04-09T08:18:22.502122+00:00"
         },
         {
-          "id": "f431ca33e6924155b4d3f94b33a9125a",
+          "id": "380e8ed05f144b2199af8a79801fe983",
           "role": "assistant",
-          "markdown": "我是 **Jade**，Jade Games 的通用聊天 Agent。\n\n你可以把我看作你的对话入口助手 — 帮你处理日常聊天、简单问答，以及引导你找到正确的内部资源或 Agent。\n\n有什么需要的话，随时说！",
-          "created_at": "2026-04-09T07:17:20.667046+00:00"
-        },
-        {
-          "id": "eb5faead999d40e88dd96c7c1fca9362",
-          "role": "user",
-          "markdown": "你能帮我做什么",
-          "created_at": "2026-04-09T07:17:30.356972+00:00"
-        },
-        {
-          "id": "c53c7e8f287b4f2c9a0bd52d701d6886",
-          "role": "assistant",
-          "markdown": "<think>\nThe user is asking what I can help with again. I'll give a concise overview of my capabilities.\n</think>\n\n我可以在以下方面帮助你：\n\n- 日常对话与问答\n- 公司与团队的基本介绍\n- 引导你找到合适的内部资源或 Agent\n- 非项目、非技术性的通用问题\n\n---\n\n**超出我能力范围的内容**（不要问我）：\n\n- 项目任务详情、进度、优先级\n- 技术架构、代码、配置\n- 内部流程文档细节\n\n这类问题我会如实告诉你去找对应的 Agent。\n\n有什么想聊的吗？",
-          "created_at": "2026-04-09T07:17:43.136066+00:00"
-        },
-        {
-          "id": "9c3672ee8e904b65bfa68c49c0c445cd",
-          "role": "user",
-          "markdown": "有什么a gen t",
-          "created_at": "2026-04-09T07:18:53.460548+00:00"
-        },
-        {
-          "id": "325ba7ff34d44753a61e593acdbfb0e0",
-          "role": "assistant",
-          "markdown": "I hit an error while processing that request: Connection error.",
-          "created_at": "2026-04-09T07:18:54.849290+00:00"
-        },
-        {
-          "id": "bb6a9be2872d4a2a80576fae64ebc936",
-          "role": "user",
-          "markdown": "你好",
-          "created_at": "2026-04-09T07:19:05.882461+00:00"
-        },
-        {
-          "id": "a7d7226ac7b04e2ab49bf5157a813734",
-          "role": "assistant",
-          "markdown": "<think>\nThe user seems to be asking about agents in the system, with a typo \"a gen t\". Then they say \"你好\" again, which might be a new message or continuation.\n\nLet me answer about the agents in the system. Based on the instructions, I know about:\n- Project task agent (项目任务 Agent)\n- Knowledge agent (知识管理 Agent)\n- General Chat Agent (me, Jade)\n\nI should mention these agents and what they handle, while being concise.\n</think>\n\n你好！\n\n目前系统中的主要 Agent 及其职责：\n\n| Agent | 职责 |\n|---|---|\n| **Jade（我）** | 通用聊天、问候、简单问答、引导 |\n| **项目任务 Agent** | 项目任务、进度、优先级、负责人等 |\n| **知识管理 Agent** | 技术文档、架构、流程文档、内部知识 |\n\n如果你有具体需求，我可以帮你判断该找哪个 Agent。",
-          "created_at": "2026-04-09T07:19:17.720597+00:00"
+          "markdown": "感谢分享。我已经记录下射击塔防组的相关业务信息。目前该组主要运营四款捕鱼类游戏（二人捕鱼、四人捕鱼、飞机捕鱼、西游捕鱼），并覆盖了印尼主包、印尼副包及泰国副包这三个主要大厅平台。\n\n关于射击塔防组的业务线，你还有其他需要补充的信息，或者我们接下来要讨论的具体细节吗？",
+          "created_at": "2026-04-09T08:19:31.991939+00:00"
         }
       ]
     }
