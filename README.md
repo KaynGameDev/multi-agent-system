@@ -1,6 +1,6 @@
 # Jade Agent Multi-Agent System
 
-A lean LangGraph + Slack + Gemini starter for a company-facing multi-agent assistant.
+A lean LangGraph + Slack starter for a company-facing multi-agent assistant with Google, MiniMax, and OpenAI LLM support.
 
 ## Current architecture
 
@@ -105,20 +105,25 @@ main.py
 Copy `.env.example` to `.env` and fill in the values.
 
 Required:
-- `GOOGLE_API_KEY`
-- `JADE_PROJECT_SHEET_ID`
 - `GOOGLE_APPLICATION_CREDENTIALS`
+- `JADE_PROJECT_SHEET_ID`
 
 Interface configuration:
 - Slack: `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN`
 
 Optional:
-- `GEMINI_MODEL` (default: `gemini-3-flash-preview`)
-- `GEMINI_TEMPERATURE` (default: `0.2`)
-- `PENDING_ACTION_PARSER_MODEL` (default: `GEMINI_MODEL`)
-- `PENDING_ACTION_PARSER_TEMPERATURE` (default: `0.0`)
+- `LLM_PROVIDER` (default: `google`; supported: `google`, `minimax`, `openai`)
+- `LLM_MODEL` (default depends on provider: `gemini-3-flash-preview`, `MiniMax-M2.7-highspeed`, `gpt-5-mini`)
+- `LLM_TEMPERATURE` (default: `0.2`)
+- `GOOGLE_API_KEY` (required only when `LLM_PROVIDER=google`)
+- `MINIMAX_API_KEY` (required only when `LLM_PROVIDER=minimax`)
+- `MINIMAX_BASE_URL` (default: `https://api.minimaxi.com/anthropic`)
+- `OPENAI_API_KEY` (required only when `LLM_PROVIDER=openai`)
+- `OPENAI_BASE_URL` (default: `https://api.openai.com/v1`)
+- `PENDING_ACTION_PARSER_MODEL` (default: `LLM_MODEL`)
+- `PENDING_ACTION_PARSER_TEMPERATURE` (default: `0.0` for `google`/`openai`, `0.01` for `minimax`)
 - `PENDING_ACTION_PARSER_CONFIDENCE_THRESHOLD` (default: `0.75`)
-- `GEMINI_HTTP_TRUST_ENV` (default: `false`; set to `true` only if Gemini traffic must use `HTTPS_PROXY` / `ALL_PROXY`)
+- `LLM_HTTP_TRUST_ENV` (default: `false`; currently applied to the Google provider path)
 - `PROJECT_SHEET_RANGE` (default: `Tasks!A1:Z`)
 - `PROJECT_SHEET_CACHE_TTL_SECONDS` (default: `30`)
 - `SLACK_THINKING_REACTION` (default: `eyes`)
@@ -128,6 +133,33 @@ Optional:
 - `KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH` (default: `knowledge/AI/Rules/google_sheets_catalog.json`)
 - `KNOWLEDGE_GOOGLE_SHEETS_CACHE_TTL_SECONDS` (default: `120`)
 - `CONVERSION_WORK_DIR` (default: `runtime/conversion`)
+
+Legacy Google compatibility aliases:
+- `GEMINI_MODEL` is still honored as a fallback for `LLM_MODEL` when `LLM_PROVIDER=google`
+- `GEMINI_TEMPERATURE` is still honored as a fallback for `LLM_TEMPERATURE` when `LLM_PROVIDER=google`
+- `GEMINI_HTTP_TRUST_ENV` is still honored as a fallback for `LLM_HTTP_TRUST_ENV` when `LLM_PROVIDER=google`
+
+Provider examples:
+
+```bash
+# Google
+LLM_PROVIDER=google
+LLM_MODEL=gemini-3-flash-preview
+GOOGLE_API_KEY=...
+
+# MiniMax
+LLM_PROVIDER=minimax
+LLM_MODEL=MiniMax-M2.7-highspeed
+MINIMAX_API_KEY=...
+MINIMAX_BASE_URL=https://api.minimaxi.com/anthropic
+
+# OpenAI
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-5-mini
+OPENAI_API_KEY=...
+```
+
+`GOOGLE_APPLICATION_CREDENTIALS` and `JADE_PROJECT_SHEET_ID` remain required for the Google Sheets/Docs integrations regardless of which LLM provider is selected.
 
 ## Slack setup
 

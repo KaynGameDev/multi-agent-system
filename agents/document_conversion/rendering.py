@@ -396,24 +396,26 @@ def build_conversion_failure_response(exc: Exception, preferred_language: str = 
         if preferred_language == "zh":
             return "\n".join(
                 [
-                    "我无法连接 Gemini API 来处理这个转换会话，因为 HTTP 代理返回了 `503 Service Unavailable`。",
+                    "我无法连接当前配置的模型 API 来处理这个转换会话，因为 HTTP 代理返回了 `503 Service Unavailable`。",
                     "",
                     "请检查以下任一项：",
-                    "1. 如果这个 bot 应该直连外网，请设置 `GEMINI_HTTP_TRUST_ENV=false` 后重启。",
-                    "2. 如果必须走代理，请修复 `HTTPS_PROXY` / `ALL_PROXY` 到 Gemini 的出口。",
-                    "3. 网络恢复后再重试这个转换。",
+                    "1. 如果这个 bot 应该直连外网，请清理 `HTTPS_PROXY` / `ALL_PROXY` 后重启。",
+                    "2. 如果当前 provider 是 Google 并且使用了 `LLM_HTTP_TRUST_ENV=true`，请改为 `false` 后重启。",
+                    "3. 如果必须走代理，请修复 `HTTPS_PROXY` / `ALL_PROXY` 的外网出口。",
+                    "4. 网络恢复后再重试这个转换。",
                     "",
                     f"错误详情：`{exc}`",
                 ]
             ).strip()
         return "\n".join(
             [
-                "I couldn't reach the Gemini API for this conversion session because the HTTP proxy returned `503 Service Unavailable`.",
+                "I couldn't reach the configured model API for this conversion session because the HTTP proxy returned `503 Service Unavailable`.",
                 "",
                 "Please check one of these:",
-                "1. If this bot should connect directly, set `GEMINI_HTTP_TRUST_ENV=false` and restart it.",
-                "2. If a proxy is required, fix `HTTPS_PROXY` / `ALL_PROXY` for outbound Gemini traffic.",
-                "3. Retry the conversion after the network path is healthy.",
+                "1. If this bot should connect directly, clear `HTTPS_PROXY` / `ALL_PROXY` and restart it.",
+                "2. If the current provider is Google and `LLM_HTTP_TRUST_ENV=true`, set it to `false` and restart.",
+                "3. If a proxy is required, fix `HTTPS_PROXY` / `ALL_PROXY` for outbound model traffic.",
+                "4. Retry the conversion after the network path is healthy.",
                 "",
                 f"Error detail: `{exc}`",
             ]
@@ -423,28 +425,28 @@ def build_conversion_failure_response(exc: Exception, preferred_language: str = 
         if preferred_language == "zh":
             return "\n".join(
                 [
-                    "我已经读取到源文档，但在把内容发送给 Gemini 做结构化提取时，连接在返回结果前中断了。",
+                    "我已经读取到源文档，但在把内容发送给当前配置的模型做结构化提取时，连接在返回结果前中断了。",
                     "",
                     "这通常是临时性的模型网络问题，或者源内容过大导致上游提前断开，而不是文档权限问题。",
                     "",
                     "你可以这样处理：",
                     "1. 直接再重试一次转换。",
                     "2. 如果反复发生，请先缩小文档范围，或把最关键的 sheet / 段落单独发来。",
-                    "3. 如果环境必须经过代理，请继续检查 Gemini 的外网链路是否稳定。",
+                    "3. 如果环境必须经过代理，请继续检查模型 provider 的外网链路是否稳定。",
                     "",
                     f"错误详情：`{exc}`",
                 ]
             ).strip()
         return "\n".join(
             [
-                "I could read the source document, but the connection dropped while Gemini was generating the structured extraction result.",
+                "I could read the source document, but the connection dropped while the configured model was generating the structured extraction result.",
                 "",
                 "This usually means a transient model/network issue, or that the source bundle was large enough for the upstream request to get cut off. It is not the same as a document-permission failure.",
                 "",
                 "Please try one of these:",
                 "1. Retry the conversion once.",
                 "2. If it keeps happening, narrow the document or send the most important sheet/tab first.",
-                "3. If this environment must use a proxy, keep checking that outbound Gemini traffic is stable.",
+                "3. If this environment must use a proxy, keep checking that outbound model-provider traffic is stable.",
                 "",
                 f"Error detail: `{exc}`",
             ]

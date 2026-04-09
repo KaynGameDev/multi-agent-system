@@ -191,7 +191,7 @@ class DurableResumeTests(unittest.TestCase):
             return object()
 
         with patch.dict(os.environ, env, clear=False):
-            with patch("app.main.ChatGoogleGenerativeAI", return_value=object()):
+            with patch("app.main.build_runtime_llms", return_value=(object(), object())):
                 with patch("app.main.build_agent_graph", side_effect=fake_build_agent_graph):
                     with patch("app.main.build_web_agent_registrations", return_value=()):
                         with patch("app.main.WebServer", side_effect=lambda *args, **kwargs: DummyListener()):

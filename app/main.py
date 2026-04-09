@@ -7,11 +7,11 @@ from collections.abc import Sequence
 from threading import Thread
 
 from dotenv import load_dotenv
-from langchain_google_genai import ChatGoogleGenerativeAI
 
 from app.checkpoints import build_checkpoint_store
 from app.config import is_agent_runtime_enabled, is_slack_enabled, load_settings, validate_bootstrap_settings
 from app.graph import build_agent_graph, build_web_agent_registrations
+from app.llm_factory import build_runtime_llms
 from app.pending_action_parser import LLMPendingActionInterpreter
 from interfaces.slack.listener import SlackListener
 from interfaces.web.server import WebServer, format_web_chat_url
@@ -65,24 +65,16 @@ def bootstrap_system() -> list[object]:
     settings = load_settings(force_reload=True)
     validate_bootstrap_settings(settings)
     logger.debug(
-        "Configuring Gemini client model=%s temperature=%s trust_env=%s",
-        settings.gemini_model,
-        settings.gemini_temperature,
-        settings.gemini_http_trust_env,
+        "Configuring LLM provider=%s model=%s temperature=%s trust_env=%s",
+        settings.llm_provider,
+        settings.llm_model,
+        settings.llm_temperature,
+        settings.llm_http_trust_env,
     )
 
     listeners: list[object] = []
     if is_agent_runtime_enabled(settings):
-        llm = ChatGoogleGenerativeAI(
-            model=settings.gemini_model,
-            temperature=settings.gemini_temperature,
-            client_args={"trust_env": settings.gemini_http_trust_env},
-        )
-        pending_action_parser_llm = ChatGoogleGenerativeAI(
-            model=settings.pending_action_parser_model,
-            temperature=settings.pending_action_parser_temperature,
-            client_args={"trust_env": settings.gemini_http_trust_env},
-        )
+        llm, pending_action_parser_llm = build_runtime_llms(settings)
         pending_action_interpreter = LLMPendingActionInterpreter(
             pending_action_parser_llm,
             backup_llm=llm,

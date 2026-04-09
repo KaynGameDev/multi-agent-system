@@ -40,9 +40,14 @@ def make_settings(runtime_dir: Path) -> Settings:
         web_enabled=True,
         web_host="127.0.0.1",
         web_port=8000,
+        llm_provider="google",
+        llm_model="gemini-test",
+        llm_temperature=0.2,
         google_api_key="test-google-api-key",
-        gemini_model="gemini-test",
-        gemini_temperature=0.2,
+        minimax_api_key="test-minimax-api-key",
+        minimax_base_url="https://api.minimaxi.com/anthropic",
+        openai_api_key="test-openai-api-key",
+        openai_base_url="https://api.openai.com/v1",
         pending_action_parser_model="gemini-parser-test",
         pending_action_parser_temperature=0.0,
         pending_action_parser_confidence_threshold=0.75,
@@ -59,7 +64,7 @@ def make_settings(runtime_dir: Path) -> Settings:
         knowledge_google_sheets_cache_ttl_seconds=120,
         conversion_work_dir=str(runtime_dir),
         langgraph_checkpoint_db_path="",
-        gemini_http_trust_env=False,
+        llm_http_trust_env=False,
     )
 
 
