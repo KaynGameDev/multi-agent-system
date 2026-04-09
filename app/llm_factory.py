@@ -10,11 +10,6 @@ except ImportError:  # pragma: no cover - dependency availability is tested thro
     ChatGoogleGenerativeAI = None
 
 try:
-    from langchain_anthropic import ChatAnthropic
-except ImportError:  # pragma: no cover - dependency availability is tested through constructor patching
-    ChatAnthropic = None
-
-try:
     from langchain_openai import ChatOpenAI
 except ImportError:  # pragma: no cover - dependency availability is tested through constructor patching
     ChatOpenAI = None
@@ -52,9 +47,9 @@ def build_chat_model(
         )
 
     if provider == "minimax":
-        if ChatAnthropic is None:
-            raise RuntimeError("langchain-anthropic is not installed.")
-        return ChatAnthropic(
+        if ChatOpenAI is None:
+            raise RuntimeError("langchain-openai is not installed.")
+        return ChatOpenAI(
             model=model,
             temperature=temperature,
             api_key=settings.minimax_api_key,

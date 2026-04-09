@@ -24,28 +24,29 @@ class LLMConfigTests(unittest.TestCase):
     def tearDown(self) -> None:
         config_module._cached_settings = None
 
-    def test_google_provider_uses_legacy_gemini_aliases(self) -> None:
+    def test_google_provider_uses_generic_llm_fields(self) -> None:
         with patch.dict(
             os.environ,
             {
                 "WEB_ENABLED": "true",
                 "SLACK_ENABLED": "false",
+                "LLM_PROVIDER": "google",
+                "LLM_MODEL": "gemini-generic-test",
+                "LLM_TEMPERATURE": "0.4",
+                "LLM_HTTP_TRUST_ENV": "true",
                 "GOOGLE_API_KEY": "test-google-key",
                 "GOOGLE_APPLICATION_CREDENTIALS": "/tmp/credentials.json",
                 "JADE_PROJECT_SHEET_ID": "sheet-id",
-                "GEMINI_MODEL": "gemini-legacy-test",
-                "GEMINI_TEMPERATURE": "0.4",
-                "GEMINI_HTTP_TRUST_ENV": "true",
             },
             clear=True,
         ):
             settings = load_settings(force_reload=True)
 
         self.assertEqual(settings.llm_provider, "google")
-        self.assertEqual(settings.llm_model, "gemini-legacy-test")
+        self.assertEqual(settings.llm_model, "gemini-generic-test")
         self.assertEqual(settings.llm_temperature, 0.4)
         self.assertTrue(settings.llm_http_trust_env)
-        self.assertEqual(settings.pending_action_parser_model, "gemini-legacy-test")
+        self.assertEqual(settings.pending_action_parser_model, "gemini-generic-test")
         self.assertEqual(settings.pending_action_parser_temperature, 0.0)
 
     def test_minimax_provider_uses_expected_defaults(self) -> None:
@@ -144,10 +145,10 @@ class LLMFactoryTests(unittest.TestCase):
             client_args={"trust_env": False},
         )
 
-    def test_minimax_factory_builds_chat_anthropic_client(self) -> None:
+    def test_minimax_factory_builds_chat_openai_client(self) -> None:
         built = object()
         settings = replace(self.settings, llm_provider="minimax")
-        with patch("app.llm_factory.ChatAnthropic", return_value=built) as constructor:
+        with patch("app.llm_factory.ChatOpenAI", return_value=built) as constructor:
             result = build_chat_model(
                 settings,
                 model="MiniMax-M2.7-highspeed",
@@ -159,7 +160,7 @@ class LLMFactoryTests(unittest.TestCase):
             model="MiniMax-M2.7-highspeed",
             temperature=0.2,
             api_key="test-minimax-api-key",
-            base_url="https://api.minimaxi.com/anthropic",
+            base_url="https://api.minimaxi.com/v1",
         )
 
     def test_openai_factory_builds_chat_openai_client(self) -> None:

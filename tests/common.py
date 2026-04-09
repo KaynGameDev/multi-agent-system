@@ -45,7 +45,7 @@ def make_settings(runtime_dir: Path) -> Settings:
         llm_temperature=0.2,
         google_api_key="test-google-api-key",
         minimax_api_key="test-minimax-api-key",
-        minimax_base_url="https://api.minimaxi.com/anthropic",
+        minimax_base_url="https://api.minimaxi.com/v1",
         openai_api_key="test-openai-api-key",
         openai_base_url="https://api.openai.com/v1",
         pending_action_parser_model="gemini-parser-test",

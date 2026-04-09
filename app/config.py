@@ -9,7 +9,7 @@ DEFAULT_GOOGLE_MODEL = "gemini-3-flash-preview"
 DEFAULT_MINIMAX_MODEL = "MiniMax-M2.7-highspeed"
 DEFAULT_OPENAI_MODEL = "gpt-5-mini"
 DEFAULT_LLM_TEMPERATURE = 0.2
-DEFAULT_MINIMAX_BASE_URL = "https://api.minimaxi.com/anthropic"
+DEFAULT_MINIMAX_BASE_URL = "https://api.minimaxi.com/v1"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
 
 DEFAULT_PROJECT_KEYWORDS = (
@@ -103,13 +103,13 @@ def load_settings(force_reload: bool = False) -> Settings:
     ) or DEFAULT_KNOWLEDGE_FILE_TYPES
     llm_provider = normalize_llm_provider(os.getenv("LLM_PROVIDER", DEFAULT_LLM_PROVIDER))
     llm_model = resolve_llm_model(llm_provider)
-    llm_temperature = resolve_llm_temperature(llm_provider)
+    llm_temperature = resolve_llm_temperature()
     pending_action_parser_model = (
         os.getenv("PENDING_ACTION_PARSER_MODEL", "").strip()
         or llm_model
     )
     pending_action_parser_temperature = resolve_pending_action_parser_temperature(llm_provider)
-    llm_http_trust_env = resolve_llm_http_trust_env(llm_provider)
+    llm_http_trust_env = resolve_llm_http_trust_env()
 
     _cached_settings = Settings(
         slack_enabled=parse_bool_env("SLACK_ENABLED", True),
@@ -265,18 +265,12 @@ def default_pending_action_parser_temperature(provider: str) -> float:
 
 def resolve_llm_model(provider: str) -> str:
     generic_model = os.getenv("LLM_MODEL", "").strip()
-    legacy_google_model = os.getenv("GEMINI_MODEL", "").strip() if normalize_llm_provider(provider) == "google" else ""
-    return generic_model or legacy_google_model or default_llm_model_for_provider(provider)
+    return generic_model or default_llm_model_for_provider(provider)
 
 
-def resolve_llm_temperature(provider: str) -> float:
+def resolve_llm_temperature() -> float:
     generic_temperature = os.getenv("LLM_TEMPERATURE", "").strip()
-    legacy_google_temperature = (
-        os.getenv("GEMINI_TEMPERATURE", "").strip()
-        if normalize_llm_provider(provider) == "google"
-        else ""
-    )
-    return float(generic_temperature or legacy_google_temperature or str(DEFAULT_LLM_TEMPERATURE))
+    return float(generic_temperature or str(DEFAULT_LLM_TEMPERATURE))
 
 
 def resolve_pending_action_parser_temperature(provider: str) -> float:
@@ -286,13 +280,8 @@ def resolve_pending_action_parser_temperature(provider: str) -> float:
     return float(raw_value)
 
 
-def resolve_llm_http_trust_env(provider: str) -> bool:
-    generic = os.getenv("LLM_HTTP_TRUST_ENV")
-    if generic is not None:
-        return parse_bool_env("LLM_HTTP_TRUST_ENV", False)
-    if normalize_llm_provider(provider) == "google":
-        return parse_bool_env("GEMINI_HTTP_TRUST_ENV", False)
-    return False
+def resolve_llm_http_trust_env() -> bool:
+    return parse_bool_env("LLM_HTTP_TRUST_ENV", False)
 
 
 def parse_bool_env(name: str, default: bool) -> bool:

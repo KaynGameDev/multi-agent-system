@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from langchain_core.messages import SystemMessage
+from pydantic import BaseModel, Field
+from langchain_core.messages import AIMessage, SystemMessage
 
 from app.contracts import build_assistant_response
 from app.messages import stringify_message_content
@@ -12,9 +13,18 @@ from app.state import AgentState
 PROMPT_PATH = "agents/general_chat/AGENT.md"
 
 
+class GeneralChatReply(BaseModel):
+    final_answer: str = Field(
+        default="",
+        description="User-facing final reply in Markdown. Return only the answer, with no analysis or role labels.",
+    )
+
+
 class GeneralChatAgentNode:
     def __init__(self, llm, *, skill_registry: SkillRegistry | None = None, agent_name: str = "") -> None:
         self.llm = llm
+        structured_output = getattr(llm, "with_structured_output", None)
+        self.response_llm = structured_output(GeneralChatReply) if callable(structured_output) else llm
         self.skill_registry = skill_registry
         self.agent_name = agent_name
 
@@ -29,12 +39,12 @@ class GeneralChatAgentNode:
             ),
             *state["messages"],
         ]
-        response = self.llm.invoke(messages)
-        assistant_text = stringify_message_content(getattr(response, "content", ""))
+        response = self.response_llm.invoke(messages)
+        assistant_text = extract_general_chat_reply_text(response)
         return {
-            "messages": [response],
+            "messages": [AIMessage(content=assistant_text)],
             "assistant_response": build_assistant_response(
-                kind="text" if assistant_text else "invoke_tool",
+                kind="text",
                 content=assistant_text,
             ),
         }
@@ -52,6 +62,7 @@ def build_general_chat_prompt(
             "role",
             "responsibilities",
             "boundaries",
+            "output_contract",
             "slack_output",
             "web_output",
             "default_output",
@@ -74,5 +85,17 @@ def build_general_chat_prompt(
         sections["responsibilities"],
         skill_prompt,
         sections["boundaries"],
+        sections["output_contract"],
         format_prompt,
     )
+
+
+def extract_general_chat_reply_text(response) -> str:
+    final_answer = getattr(response, "final_answer", None)
+    if isinstance(final_answer, str) and final_answer.strip():
+        return final_answer.strip()
+    if isinstance(response, dict):
+        dict_answer = response.get("final_answer")
+        if isinstance(dict_answer, str) and dict_answer.strip():
+            return dict_answer.strip()
+    return stringify_message_content(getattr(response, "content", response))

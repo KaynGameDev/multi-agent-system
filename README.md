@@ -117,7 +117,7 @@ Optional:
 - `LLM_TEMPERATURE` (default: `0.2`)
 - `GOOGLE_API_KEY` (required only when `LLM_PROVIDER=google`)
 - `MINIMAX_API_KEY` (required only when `LLM_PROVIDER=minimax`)
-- `MINIMAX_BASE_URL` (default: `https://api.minimaxi.com/anthropic`)
+- `MINIMAX_BASE_URL` (default: `https://api.minimaxi.com/v1`; use `https://api.minimax.io/v1` outside China if needed)
 - `OPENAI_API_KEY` (required only when `LLM_PROVIDER=openai`)
 - `OPENAI_BASE_URL` (default: `https://api.openai.com/v1`)
 - `PENDING_ACTION_PARSER_MODEL` (default: `LLM_MODEL`)
@@ -134,11 +134,6 @@ Optional:
 - `KNOWLEDGE_GOOGLE_SHEETS_CACHE_TTL_SECONDS` (default: `120`)
 - `CONVERSION_WORK_DIR` (default: `runtime/conversion`)
 
-Legacy Google compatibility aliases:
-- `GEMINI_MODEL` is still honored as a fallback for `LLM_MODEL` when `LLM_PROVIDER=google`
-- `GEMINI_TEMPERATURE` is still honored as a fallback for `LLM_TEMPERATURE` when `LLM_PROVIDER=google`
-- `GEMINI_HTTP_TRUST_ENV` is still honored as a fallback for `LLM_HTTP_TRUST_ENV` when `LLM_PROVIDER=google`
-
 Provider examples:
 
 ```bash
@@ -151,7 +146,7 @@ GOOGLE_API_KEY=...
 LLM_PROVIDER=minimax
 LLM_MODEL=MiniMax-M2.7-highspeed
 MINIMAX_API_KEY=...
-MINIMAX_BASE_URL=https://api.minimaxi.com/anthropic
+MINIMAX_BASE_URL=https://api.minimaxi.com/v1
 
 # OpenAI
 LLM_PROVIDER=openai
