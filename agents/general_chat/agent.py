@@ -64,8 +64,6 @@ class GeneralChatAgentNode:
                 "General chat structured output failed validation; falling back to plain-text invocation. error=%s",
                 exc,
             )
-            self.response_llm = self.llm
-            self.uses_structured_output = False
             return self.llm.invoke(messages)
 
 

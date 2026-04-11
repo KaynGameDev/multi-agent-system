@@ -5,7 +5,7 @@ import unittest
 from pydantic import BaseModel
 from langchain_core.messages import AIMessage
 
-from agents.general_chat.agent import GeneralChatAgentNode
+from agents.general_chat.agent import GeneralChatAgentNode, build_general_chat_prompt
 
 
 class StructuredContentLLM:
@@ -54,6 +54,30 @@ class FallbackStructuredOutputLLM:
 
 
 class GeneralChatAgentTests(unittest.TestCase):
+    def test_general_chat_prompt_forbids_claiming_persistent_save_without_real_action(self) -> None:
+        prompt = build_general_chat_prompt(
+            {
+                "messages": [],
+                "interface_name": "web",
+            },
+            agent_name="general_chat_agent",
+        )
+
+        self.assertIn("Do not claim that content was saved", prompt)
+        self.assertIn("not that it has been saved to a file or knowledge base", prompt)
+
+    def test_general_chat_prompt_redirects_kb_write_requests_to_builder_flow(self) -> None:
+        prompt = build_general_chat_prompt(
+            {
+                "messages": [],
+                "interface_name": "web",
+            },
+            agent_name="general_chat_agent",
+        )
+
+        self.assertIn("write, save, sync, capture, update, or record new company knowledge", prompt)
+        self.assertIn("knowledge-base-builder flow", prompt)
+
     def test_general_chat_normalizes_structured_content_blocks(self) -> None:
         node = GeneralChatAgentNode(StructuredContentLLM(), agent_name="general_chat_agent")
 
@@ -105,7 +129,7 @@ class GeneralChatAgentTests(unittest.TestCase):
 
         self.assertEqual(first_result["assistant_response"]["content"], "Hello from the plain-text fallback.")
         self.assertEqual(second_result["assistant_response"]["content"], "Hello from the plain-text fallback.")
-        self.assertEqual(llm.structured_calls, 1)
+        self.assertEqual(llm.structured_calls, 2)
         self.assertEqual(llm.raw_calls, 2)
 
 
