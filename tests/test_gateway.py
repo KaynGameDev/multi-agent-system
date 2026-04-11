@@ -950,6 +950,11 @@ class GatewayTests(unittest.TestCase):
         self.assertEqual(result["route"], "general_chat_agent")
         self.assertTrue(any("Pending action owner `missing_agent`" in item for item in result["selection_warnings"]))
         self.assertEqual(result["route_policy_step"], "pending_action_owner_fallback")
+        # Pending action must be expired so the user is not stuck
+        self.assertEqual(result["pending_action"]["status"], "expired")
+        # An expiry message must be injected so the user is informed
+        expiry_messages = [m for m in result["messages"] if hasattr(m, "type") and m.type == "ai"]
+        self.assertTrue(any("cancelled" in m.content.lower() for m in expiry_messages))
 
     def test_unrelated_pending_action_reply_allows_fresh_routing(self) -> None:
         registrations = (

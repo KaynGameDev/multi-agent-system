@@ -2,28 +2,24 @@ from __future__ import annotations
 
 import hashlib
 import json
-import re
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
+
+from pydantic import ValidationError
 
 from app.contracts import (
     ExecutionContract,
     ExecutionContractValidation,
     ExecutionDecision,
     PendingAction,
+    PendingActionDecision,
     PendingActionSelectionOption,
     PendingActionStatus,
     PendingActionTargetScope,
     RuntimeAction,
-)
-from app.pending_action_parser import (
-    DEFAULT_UNAVAILABLE_REASON,
-    INTERPRETATION_SOURCE_DETERMINISTIC_SELECTION,
-    INTERPRETATION_SOURCE_LLM_PARSER,
-    PendingActionReplyInterpreter,
-    build_unclear_pending_action_parse,
+    validate_pending_action_decision,
 )
 
 ACTIVE_PENDING_ACTION_STATUSES = {"awaiting_confirmation", "request_revision", "ask_clarification"}
@@ -32,6 +28,7 @@ LEGACY_PENDING_ACTION_STATUS_ALIASES = {
     "cancelled": "rejected",
 }
 ALLOWED_EXECUTION_DECISIONS = {"approve", "reject", "modify", "select", "unclear"}
+ALLOWED_REQUESTED_OUTPUTS = {"diff", "preview", "plan", "summary", "details"}
 
 
 def build_pending_action(
@@ -84,15 +81,38 @@ def get_execution_contract(state: dict[str, Any]) -> ExecutionContract | None:
     return None
 
 
-def resolve_pending_action_reply(
+def get_pending_action_decision(state: dict[str, Any]) -> PendingActionDecision | None:
+    raw_decision = state.get("pending_action_decision")
+    if raw_decision is None:
+        return None
+    try:
+        return validate_pending_action_decision(raw_decision)
+    except ValidationError:
+        return None
+
+
+def resolve_pending_action_decision(
     action: PendingAction,
-    user_text: str,
+    decision: PendingActionDecision | dict[str, Any],
     *,
-    interpreter: PendingActionReplyInterpreter | None = None,
+    user_text: str = "",
 ) -> dict[str, Any]:
-    contract = interpret_pending_action_reply(action, user_text, interpreter=interpreter)
+    validated_decision = validate_pending_action_decision(decision)
+    if validated_decision.decision == "unrelated":
+        return {
+            "decision": validated_decision,
+            "contract": None,
+            "validation": None,
+        }
+
+    contract = build_execution_contract_from_pending_action_decision(
+        action,
+        validated_decision,
+        user_text=user_text,
+    )
     validation = validate_execution_contract(action, contract)
     return {
+        "decision": validated_decision,
         "contract": contract,
         "validation": validation,
     }
@@ -145,145 +165,45 @@ def get_pending_action_approval_payload_hash(action: PendingAction | None) -> st
     return str(metadata.get("approval_payload_hash", "")).strip()
 
 
-def extract_selection_index(normalized_text: str) -> int | None:
-    if normalized_text.isdigit():
-        return max(int(normalized_text) - 1, 0)
-
-    patterns = (
-        r"^第\s*(\d+)\s*(?:个|篇|份|条|项)?$",
-        r"^(?:option|doc|document|task)\s*(\d+)$",
-        r"^(\d+)[\).]$",
-    )
-    for pattern in patterns:
-        match = re.match(pattern, normalized_text)
-        if match:
-            return max(int(match.group(1)) - 1, 0)
-    return None
-
-
-def match_pending_action_selection_option(
-    options: list[PendingActionSelectionOption],
-    normalized_text: str,
-) -> dict[str, Any] | None:
-    selected_index = extract_selection_index(normalized_text)
-    if selected_index is not None and 0 <= selected_index < len(options):
-        option = options[selected_index]
-        return {"option": option, "index": selected_index}
-
-    for index, option in enumerate(options):
-        labels = [option.get("label", ""), option.get("value", ""), *option.get("aliases", [])]
-        normalized_labels = {
-            normalize_pending_action_text(label)
-            for label in labels
-            if normalize_pending_action_text(label)
-        }
-        if normalized_text in normalized_labels:
-            return {"option": option, "index": index}
-    return None
-
-
-def interpret_pending_action_reply(
+def build_execution_contract_from_pending_action_decision(
     action: PendingAction,
-    user_text: str,
+    decision: PendingActionDecision,
     *,
-    interpreter: PendingActionReplyInterpreter | None = None,
+    user_text: str = "",
 ) -> ExecutionContract:
-    prepared_input = prepare_pending_action_reply_input(action, user_text)
-    exact_selection_match = prepared_input.get("exact_selection_match")
-    if isinstance(exact_selection_match, dict):
-        return build_selection_execution_contract(action, user_text, exact_selection_match)
+    normalized_scope, requested_outputs, unparsed_constraints = parse_pending_action_constraints(decision.constraints)
+    resolved_selection = None
+    if decision.selected_item_id:
+        resolved_selection = resolve_selection_option_by_item_id(action, decision.selected_item_id)
 
-    parsed_reply = build_unclear_pending_action_parse(DEFAULT_UNAVAILABLE_REASON)
-    if interpreter is not None:
-        try:
-            parsed_reply = interpreter.parse_pending_action_reply(action, prepared_input)
-        except Exception:
-            parsed_reply = build_unclear_pending_action_parse(DEFAULT_UNAVAILABLE_REASON)
-    return build_interpreted_execution_contract(action, user_text, parsed_reply=parsed_reply)
+    selected_option = resolved_selection[0] if resolved_selection is not None else None
+    selected_index = resolved_selection[1] if resolved_selection is not None else None
+    should_execute = decision.decision in {"approve", "select"}
+    if decision.decision == "modify":
+        should_execute = bool(normalized_scope) and not requested_outputs and not unparsed_constraints
+    if decision.decision in {"reject", "unclear"}:
+        should_execute = False
 
-
-def prepare_pending_action_reply_input(action: PendingAction, user_text: str) -> dict[str, Any]:
-    normalized_user_text = normalize_pending_action_text(user_text)
-    selection_options = get_pending_action_selection_options(action)
-    exact_selection_match = None
-    if selection_options and normalized_user_text:
-        exact_selection_match = match_pending_action_selection_option(selection_options, normalized_user_text)
-
-    return {
-        "user_reply": str(user_text or "").strip(),
-        "normalized_user_reply": normalized_user_text,
-        "summary": str(action.get("summary", "")).strip(),
-        "action_type": str(action.get("type", "")).strip(),
-        "target_scope": dict(action.get("target_scope") or {}),
-        "selection_options": [dict(option) for option in selection_options],
-        "exact_selection_match": exact_selection_match,
-    }
-
-
-def build_selection_execution_contract(
-    action: PendingAction,
-    user_text: str,
-    selection_match: dict[str, Any],
-) -> ExecutionContract:
-    selected_option = selection_match["option"]
-    selected_index = int(selection_match["index"])
     return ExecutionContract(
-        pending_action_id=str(action.get("id", "")).strip(),
+        pending_action_id=str(decision.pending_action_id).strip(),
         session_id=str(action.get("session_id", "")).strip(),
         action_type=str(action.get("type", "")).strip(),
         requested_by_agent=str(action.get("requested_by_agent", "")).strip(),
-        decision="select",
-        summary="The user selected one of the pending options.",
-        reply_text=str(user_text or "").strip(),
-        target_scope={},
-        selected_option=selected_option,
-        selected_index=selected_index,
-        requested_outputs=[],
-        constraints={},
-        should_execute=True,
-        interpretation_source=INTERPRETATION_SOURCE_DETERMINISTIC_SELECTION,
-        confidence=1.0,
-    )
-
-
-def build_interpreted_execution_contract(
-    action: PendingAction,
-    user_text: str,
-    *,
-    parsed_reply: dict[str, Any],
-) -> ExecutionContract:
-    decision = normalize_execution_decision(parsed_reply.get("decision"))
-    interpretation_source = normalize_interpretation_source(parsed_reply.get("interpretation_source"))
-    normalized_confidence = normalize_contract_confidence(parsed_reply.get("confidence", 0.0))
-    normalized_scope = dict(parsed_reply.get("target_scope") or {}) if isinstance(parsed_reply.get("target_scope"), dict) else {}
-    requested_outputs = normalize_contract_requested_outputs(parsed_reply.get("requested_outputs"))
-    selected_index = normalize_contract_selected_index(parsed_reply.get("selected_index"))
-    should_execute = parsed_reply.get("should_execute") is True
-
-    if decision == "reject":
-        should_execute = False
-    if decision == "unclear":
-        normalized_scope = {}
-        requested_outputs = []
-        selected_index = None
-        should_execute = False
-
-    summary = str(parsed_reply.get("reason", "")).strip() or default_execution_summary(decision)
-    return ExecutionContract(
-        pending_action_id=str(action.get("id", "")).strip(),
-        session_id=str(action.get("session_id", "")).strip(),
-        action_type=str(action.get("type", "")).strip(),
-        requested_by_agent=str(action.get("requested_by_agent", "")).strip(),
-        decision=decision,
-        summary=summary,
+        decision=normalize_execution_decision(decision.decision),
+        summary=str(decision.notes or "").strip() or default_execution_summary(decision.decision),
         reply_text=str(user_text or "").strip(),
         target_scope=normalized_scope,
+        selected_option=selected_option,
         selected_index=selected_index,
         requested_outputs=requested_outputs,
-        constraints={},
+        constraints={
+            "raw_constraints": list(decision.constraints),
+            "selected_item_id": str(decision.selected_item_id or "").strip(),
+            "unparsed_constraints": list(unparsed_constraints),
+        },
         should_execute=should_execute,
-        interpretation_source=interpretation_source,
-        confidence=normalized_confidence,
+        interpretation_source="pending_action_decision",
+        confidence=1.0 if decision.decision != "unclear" else 0.0,
     )
 
 
@@ -294,6 +214,8 @@ def default_execution_summary(decision: str) -> str:
         return "The user rejected the pending action."
     if decision == "modify":
         return "The user requested a modified version of the pending action."
+    if decision == "select":
+        return "The user selected one of the pending options."
     return "The reply did not clearly approve, reject, or modify the pending action."
 
 
@@ -302,33 +224,6 @@ def normalize_execution_decision(value: Any) -> str:
     if decision in ALLOWED_EXECUTION_DECISIONS:
         return decision
     return "unclear"
-
-
-def normalize_interpretation_source(value: Any) -> str:
-    source = str(value or "").strip()
-    if source:
-        return source
-    return INTERPRETATION_SOURCE_LLM_PARSER
-
-
-def normalize_contract_confidence(value: Any) -> float:
-    try:
-        resolved = float(value)
-    except (TypeError, ValueError):
-        return 0.0
-    return max(0.0, min(resolved, 1.0))
-
-
-def normalize_contract_requested_outputs(value: Any) -> list[str]:
-    if not isinstance(value, list):
-        return []
-    return [str(item).strip().lower() for item in value if str(item).strip()]
-
-
-def normalize_contract_selected_index(value: Any) -> int | None:
-    if isinstance(value, int) and value >= 0:
-        return value
-    return None
 
 
 def validate_execution_contract(
@@ -349,6 +244,20 @@ def validate_execution_contract(
     requested_outputs = list(contract.get("requested_outputs") or [])
     should_execute = contract.get("should_execute") is True
     selected_index = contract.get("selected_index")
+    raw_constraints = contract.get("constraints") if isinstance(contract.get("constraints"), dict) else {}
+    unparsed_constraints = list(raw_constraints.get("unparsed_constraints") or [])
+    if unparsed_constraints:
+        return ExecutionContractValidation(
+            valid=False,
+            runtime_action="ask_clarification",
+            next_status="ask_clarification",
+            reason=(
+                "The pending-action decision included unsupported constraints: "
+                f"{', '.join(str(item) for item in unparsed_constraints if str(item).strip())}."
+            ),
+            normalized_scope={},
+        )
+
     if decision == "reject":
         return ExecutionContractValidation(
             valid=True,
@@ -516,7 +425,13 @@ def resolve_contract_selection(
 
     selected_option = contract.get("selected_option")
     if not isinstance(selected_option, dict):
-        return None
+        selected_item_id = ""
+        constraints = contract.get("constraints")
+        if isinstance(constraints, dict):
+            selected_item_id = str(constraints.get("selected_item_id", "")).strip()
+        if not selected_item_id:
+            return None
+        return resolve_selection_option_by_item_id(action, selected_item_id)
     for index, option in enumerate(options):
         if option == selected_option:
             return option, index
@@ -540,6 +455,10 @@ def update_pending_action(
         updated_metadata.update(metadata_updates)
         updated["metadata"] = updated_metadata
     return updated
+
+
+def expire_pending_action(action: PendingAction) -> PendingAction:
+    return update_pending_action(action, status="expired")
 
 
 def action_allows_execution(
@@ -570,11 +489,6 @@ def action_allows_execution(
         approval_payload=approval_payload,
         approval_payload_hash=approval_payload_hash,
     )
-
-
-def normalize_pending_action_text(text: str) -> str:
-    normalized = re.sub(r"\s+", " ", (text or "").strip().casefold())
-    return normalized.strip("`'\"“”‘’.,!?，。！？")
 
 
 def normalize_requested_scope(
@@ -616,16 +530,88 @@ def normalize_requested_scope(
     return normalized_scope, errors
 
 
-def scope_item_matches_text(item: str, normalized_text: str) -> bool:
-    normalized_item = normalize_pending_action_text(item)
-    if not normalized_item:
-        return False
-    if normalized_item in normalized_text:
-        return True
+def parse_pending_action_constraints(
+    constraints: list[str] | tuple[str, ...] | None,
+) -> tuple[PendingActionTargetScope, list[str], list[str]]:
+    normalized_scope: PendingActionTargetScope = {}
+    requested_outputs: list[str] = []
+    unparsed_constraints: list[str] = []
 
-    basename = normalized_item.rsplit("/", 1)[-1]
-    stem = basename.rsplit(".", 1)[0]
-    return any(candidate and candidate in normalized_text for candidate in {basename, stem})
+    for raw_constraint in constraints or ():
+        cleaned_constraint = str(raw_constraint or "").strip()
+        if not cleaned_constraint:
+            continue
+        key, separator, raw_value = cleaned_constraint.partition(":")
+        constraint_key = key.strip().lower()
+        constraint_value = raw_value.strip()
+        if not separator or not constraint_key or not constraint_value:
+            unparsed_constraints.append(cleaned_constraint)
+            continue
+
+        if constraint_key in {"file", "files"}:
+            normalized_scope.setdefault("files", [])
+            normalized_scope["files"].append(constraint_value)
+            continue
+        if constraint_key in {"module", "modules"}:
+            normalized_scope.setdefault("modules", [])
+            normalized_scope["modules"].append(constraint_value)
+            continue
+        if constraint_key in {"skill", "skill_name"}:
+            normalized_scope["skill_name"] = constraint_value
+            continue
+        if constraint_key == "output":
+            normalized_output = constraint_value.lower()
+            if normalized_output in ALLOWED_REQUESTED_OUTPUTS:
+                requested_outputs.append(normalized_output)
+                continue
+        unparsed_constraints.append(cleaned_constraint)
+
+    if "files" in normalized_scope:
+        normalized_scope["files"] = list(dict.fromkeys(normalized_scope["files"]))
+    if "modules" in normalized_scope:
+        normalized_scope["modules"] = list(dict.fromkeys(normalized_scope["modules"]))
+    requested_outputs = list(dict.fromkeys(requested_outputs))
+    return normalized_scope, requested_outputs, unparsed_constraints
+
+
+def resolve_selection_option_by_item_id(
+    action: PendingAction,
+    selected_item_id: str,
+) -> tuple[PendingActionSelectionOption, int] | None:
+    normalized_target = normalize_selection_item_id(selected_item_id)
+    if not normalized_target:
+        return None
+
+    options = get_pending_action_selection_options(action)
+    for index, option in enumerate(options):
+        if normalized_target in build_selection_option_identifiers(option, fallback_index=index + 1):
+            return option, index
+    return None
+
+
+def build_selection_option_identifiers(
+    option: PendingActionSelectionOption,
+    *,
+    fallback_index: int,
+) -> set[str]:
+    payload = option.get("payload")
+    payload_id = payload.get("id") if isinstance(payload, dict) else None
+    raw_candidates = (
+        option.get("id"),
+        option.get("value"),
+        option.get("label"),
+        payload_id,
+        str(fallback_index),
+    )
+    return {
+        normalize_selection_item_id(candidate)
+        for candidate in raw_candidates
+        if normalize_selection_item_id(candidate)
+    }
+
+
+def normalize_selection_item_id(value: Any) -> str:
+    return " ".join(str(value or "").strip().casefold().split())
 
 
 def approval_payload_matches_action(
