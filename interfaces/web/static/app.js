@@ -229,9 +229,10 @@ function openConversationContextMenu(conversationId, conversationTitle, clientX,
 
   const menu = elements.conversationContextMenu;
   menu.hidden = false;
+  void menu.offsetHeight;
 
-  const menuWidth = menu.offsetWidth || 180;
-  const menuHeight = menu.offsetHeight || 48;
+  const menuWidth = menu.offsetWidth;
+  const menuHeight = menu.offsetHeight;
   const maxLeft = Math.max(12, window.innerWidth - menuWidth - 12);
   const maxTop = Math.max(12, window.innerHeight - menuHeight - 12);
   const left = Math.min(clientX, maxLeft);
@@ -456,7 +457,9 @@ function renderMessages(conversation, routeMeta = null) {
 
     const meta = document.createElement("div");
     meta.className = "message__meta";
-    meta.textContent = message.role === "user" ? "You" : "Jade Agent";
+    const roleName = message.role === "user" ? "You" : "Jade Agent";
+    const timeStr = message.created_at ? formatRelativeTime(message.created_at) : "";
+    meta.textContent = timeStr ? `${roleName} \u00b7 ${timeStr}` : roleName;
 
     const card = document.createElement("div");
     card.className = "message__card";
@@ -478,8 +481,45 @@ function renderMessages(conversation, routeMeta = null) {
     elements.messages.appendChild(wrapper);
   });
 
+  injectCodeCopyButtons();
+
   requestAnimationFrame(() => {
-    elements.chatStage.scrollTop = elements.chatStage.scrollHeight;
+    elements.chatStage.scrollTo({ top: elements.chatStage.scrollHeight, behavior: "smooth" });
+  });
+}
+
+function injectCodeCopyButtons() {
+  elements.messages.querySelectorAll("pre").forEach((pre) => {
+    if (pre.querySelector(".code-copy-button")) {
+      return;
+    }
+    const wrapper = document.createElement("div");
+    wrapper.className = "code-block";
+    pre.parentNode.insertBefore(wrapper, pre);
+    wrapper.appendChild(pre);
+
+    const button = document.createElement("button");
+    button.type = "button";
+    button.className = "code-copy-button";
+    button.textContent = "Copy";
+    button.setAttribute("aria-label", "Copy code to clipboard");
+    button.addEventListener("click", async () => {
+      const code = pre.querySelector("code");
+      const text = (code || pre).textContent;
+      try {
+        await navigator.clipboard.writeText(text);
+        button.textContent = "Copied!";
+        button.classList.add("is-copied");
+        setTimeout(() => {
+          button.textContent = "Copy";
+          button.classList.remove("is-copied");
+        }, 2000);
+      } catch (_err) {
+        button.textContent = "Failed";
+        setTimeout(() => { button.textContent = "Copy"; }, 2000);
+      }
+    });
+    wrapper.appendChild(button);
   });
 }
 
@@ -519,12 +559,16 @@ function appendPendingAssistant() {
   wrapper.id = "pendingAssistant";
   wrapper.innerHTML = `
     <div class="message__meta">Jade Agent</div>
-    <div class="message__card"><p>Thinking…</p></div>
+    <div class="message__card">
+      <div class="thinking-dots" aria-label="Thinking">
+        <span></span><span></span><span></span>
+      </div>
+    </div>
   `;
   elements.messages.appendChild(wrapper);
   elements.emptyState.classList.add("is-hidden");
   requestAnimationFrame(() => {
-    elements.chatStage.scrollTop = elements.chatStage.scrollHeight;
+    elements.chatStage.scrollTo({ top: elements.chatStage.scrollHeight, behavior: "smooth" });
   });
 }
 
@@ -577,17 +621,12 @@ async function handleSubmit(event) {
   } catch (error) {
     const pending = document.getElementById("pendingAssistant");
     if (pending) {
-      pending.remove();
+      const card = pending.querySelector(".message__card");
+      if (card) {
+        card.innerHTML = `<p class="message__error">${escapeHtml(error.message || "Something went wrong. Please try again.")}</p>`;
+      }
+      pending.removeAttribute("id");
     }
-    const failureConversation = await api(`/api/conversations/${state.activeConversationId}`);
-    failureConversation.messages.push({
-      id: crypto.randomUUID(),
-      role: "assistant",
-      html: `<p>${escapeHtml(error.message)}</p>`,
-      markdown: error.message,
-      created_at: new Date().toISOString(),
-    });
-    renderMessages(failureConversation);
   } finally {
     state.sending = false;
     elements.sendButton.disabled = false;
@@ -669,8 +708,6 @@ document.addEventListener("contextmenu", (event) => {
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     logContextMenuDebug("document-keydown-escape", event);
-  }
-  if (event.key === "Escape") {
     closeConversationContextMenu();
   }
 });
@@ -712,6 +749,7 @@ document.querySelectorAll(".starter-card").forEach((button) => {
   button.addEventListener("click", () => {
     elements.messageInput.value = button.dataset.prompt || "";
     autoResizeTextarea();
+    closeSidebar();
     elements.messageInput.focus();
   });
 });

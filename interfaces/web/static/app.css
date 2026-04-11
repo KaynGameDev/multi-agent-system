@@ -612,17 +612,31 @@ button {
 }
 
 .composer button {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
   border: 0;
   border-radius: 0.95rem;
-  padding: 0.8rem 1rem;
+  padding: 0.8rem;
   color: #ffffff;
   background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
   box-shadow: 0 12px 24px rgba(15, 118, 110, 0.24);
+  transition: opacity 140ms ease, transform 140ms ease;
+}
+
+.composer button:hover:not(:disabled) {
+  transform: translateY(-1px);
 }
 
 .composer button:disabled {
   cursor: progress;
   opacity: 0.65;
+}
+
+.composer textarea:focus {
+  outline: none;
+  box-shadow: 0 0 0 2px rgba(15, 118, 110, 0.18);
+  border-radius: 0.6rem;
 }
 
 .composer-shell__hint {
@@ -633,6 +647,82 @@ button {
 
 .sidebar-overlay {
   display: none;
+}
+
+.thinking-dots {
+  display: flex;
+  align-items: center;
+  gap: 0.35rem;
+  padding: 0.25rem 0;
+}
+
+.thinking-dots span {
+  width: 0.5rem;
+  height: 0.5rem;
+  border-radius: 50%;
+  background: var(--accent);
+  opacity: 0.4;
+  animation: thinking-pulse 1.4s ease-in-out infinite;
+}
+
+.thinking-dots span:nth-child(2) {
+  animation-delay: 0.2s;
+}
+
+.thinking-dots span:nth-child(3) {
+  animation-delay: 0.4s;
+}
+
+.message__error {
+  margin: 0;
+  color: #a11d2a;
+  font-weight: 500;
+}
+
+.code-block {
+  position: relative;
+  margin: 1rem 0;
+}
+
+.code-block pre {
+  margin: 0;
+}
+
+.code-copy-button {
+  position: absolute;
+  top: 0.55rem;
+  right: 0.55rem;
+  border: 1px solid rgba(255, 255, 255, 0.15);
+  border-radius: 0.5rem;
+  padding: 0.3rem 0.6rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  color: rgba(255, 255, 255, 0.7);
+  background: rgba(255, 255, 255, 0.08);
+  cursor: pointer;
+  transition: color 140ms ease, background 140ms ease, border-color 140ms ease;
+}
+
+.code-copy-button:hover {
+  color: #ffffff;
+  background: rgba(255, 255, 255, 0.15);
+  border-color: rgba(255, 255, 255, 0.25);
+}
+
+.code-copy-button.is-copied {
+  color: #34d399;
+  border-color: rgba(52, 211, 153, 0.3);
+}
+
+@keyframes thinking-pulse {
+  0%, 80%, 100% {
+    opacity: 0.25;
+    transform: scale(0.85);
+  }
+  40% {
+    opacity: 1;
+    transform: scale(1);
+  }
 }
 
 @keyframes fade-slide {

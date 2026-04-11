@@ -87,7 +87,11 @@
               maxlength="8000"
               placeholder="Message Jade Agent"
             ></textarea>
-            <button id="sendButton" type="submit">Send</button>
+            <button id="sendButton" type="submit" aria-label="Send message">
+              <svg width="20" height="20" viewBox="0 0 20 20" fill="none" xmlns="http://www.w3.org/2000/svg">
+                <path d="M3.5 10H16.5M16.5 10L11 4.5M16.5 10L11 15.5" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"/>
+              </svg>
+            </button>
           </form>
           <p class="composer-shell__hint">Google Docs and Sheets links can be converted here. Raw file uploads still happen in Slack for now.</p>
         </footer>
