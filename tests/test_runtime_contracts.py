@@ -119,6 +119,44 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(envelope["arguments"]["document_name"], "SetupGuide")
         self.assertEqual(envelope["execution_backend"], "langgraph_tool_node")
 
+    def test_tool_runtime_adapter_prefers_matched_request_name_over_group_alias(self) -> None:
+        request = AIMessage(
+            content="",
+            tool_calls=[
+                {
+                    "name": "search_knowledge_documents",
+                    "args": {"query": "setup", "limit": 5},
+                    "id": "call_search_setup",
+                }
+            ],
+        )
+        result_message = ToolMessage(
+            content=json.dumps(
+                {
+                    "ok": True,
+                    "query": "setup",
+                    "documents": [{"name": "SetupGuide"}],
+                    "match_count": 1,
+                }
+            ),
+            tool_call_id="call_search_setup",
+        )
+
+        envelope = extract_tool_result_from_message(
+            result_message,
+            messages=[request, result_message],
+            tool_name="knowledge_documents",
+            source="knowledge_agent",
+            reason="Grouped knowledge tool alias should not override the matched tool request name.",
+        )
+
+        self.assertIsNotNone(envelope)
+        assert envelope is not None
+        self.assertEqual(envelope["tool_name"], "search_knowledge_documents")
+        self.assertEqual(envelope["tool_id"], "knowledge.search_documents")
+        self.assertEqual(envelope["arguments"]["query"], "setup")
+        self.assertEqual(envelope["arguments"]["limit"], 5)
+
     def test_skill_runtime_state_tracks_active_contracts_for_selected_agent(self) -> None:
         contracts = [
             build_skill_invocation_contract(

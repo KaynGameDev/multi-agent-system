@@ -19,7 +19,13 @@ from app.pending_actions import (
     resolve_pending_action_decision,
 )
 from app.contracts import validate_pending_action_decision
-from tools.knowledge_base import resolve_knowledge_markdown_path, write_knowledge_markdown_document
+from tools.knowledge_base import (
+    read_knowledge_document,
+    resolve_knowledge_markdown_path,
+    retrieve_knowledge_context,
+    search_knowledge_documents,
+    write_knowledge_markdown_document,
+)
 
 
 def build_execution_contract(
@@ -258,6 +264,77 @@ class KnowledgeBaseBuilderToolTests(unittest.TestCase):
         self.assertFalse(overwrite_mismatch["ok"])
         self.assertTrue(overwrite_mismatch["requires_confirmation"])
 
+    def test_search_knowledge_documents_returns_chunk_retrieval_metadata(self) -> None:
+        docs_root = self.kb_root / "Docs" / "00_Shared" / "Standards"
+        docs_root.mkdir(parents=True, exist_ok=True)
+        (docs_root / "RAGGuide.md").write_text(
+            "# RAG Guide\n\n## Retrieval Pipeline\n\n"
+            "Chunk documents before ranking them.\n"
+            "Use overlap between adjacent chunks.\n"
+            "Return grounded excerpts for synthesis.\n",
+            encoding="utf-8",
+        )
+        (docs_root / "OtherDoc.md").write_text(
+            "# Other Doc\n\n## Notes\n\nThis document is unrelated.\n",
+            encoding="utf-8",
+        )
+
+        result = search_knowledge_documents.invoke({"query": "grounded excerpts for synthesis", "limit": 3})
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["retrieval_mode"], "chunked_rag")
+        self.assertGreaterEqual(result["retrieved_chunk_count"], 1)
+        self.assertEqual(result["documents"][0]["title"], "RAG Guide")
+        self.assertIn("grounded excerpts", result["documents"][0]["snippet"].lower())
+        self.assertIn("retrieved_chunks", result)
+
+    def test_read_knowledge_document_uses_chunk_match_for_late_section_hits(self) -> None:
+        docs_root = self.kb_root / "Docs" / "00_Shared" / "Standards"
+        docs_root.mkdir(parents=True, exist_ok=True)
+        repeated_lines = "\n".join(f"Line {index}: filler context." for index in range(1, 25))
+        target_document = (
+            "# Setup Guide\n\n"
+            "## Installation\n\n"
+            f"{repeated_lines}\n"
+            "Needle line: vector retrieval should be grounded.\n"
+            "Needle detail: rerank the chunk before answering.\n"
+            "Needle outcome: cite the relevant section.\n"
+        )
+        (docs_root / "SetupGuide.md").write_text(target_document, encoding="utf-8")
+
+        result = read_knowledge_document.invoke(
+            {
+                "document_name": "SetupGuide",
+                "section_query": "rerank the chunk before answering",
+                "max_lines": 3,
+            }
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["retrieval_mode"], "chunked_rag")
+        self.assertIn("Needle detail", result["content"])
+        self.assertNotIn("Line 1: filler context.", result["content"])
+
+    def test_retrieve_knowledge_context_builds_prompt_ready_bundle(self) -> None:
+        docs_root = self.kb_root / "Docs" / "00_Shared" / "Standards"
+        docs_root.mkdir(parents=True, exist_ok=True)
+        (docs_root / "ArchitectureOverview.md").write_text(
+            "# Architecture Overview\n\n## Knowledge Answers\n\n"
+            "Use retrieved context to answer repository questions.\n"
+            "Mention the document title when it helps the user verify the source.\n",
+            encoding="utf-8",
+        )
+
+        result = retrieve_knowledge_context.invoke(
+            {"query": "How should we answer repository questions from docs?", "limit": 2}
+        )
+
+        self.assertTrue(result["ok"])
+        self.assertEqual(result["retrieval_mode"], "chunked_rag")
+        self.assertGreaterEqual(result["retrieved_chunk_count"], 1)
+        self.assertIn("Architecture Overview", result["retrieved_context"])
+        self.assertIn("answer repository questions", result["retrieved_context"].lower())
+
     def test_builder_agent_gets_write_tools_but_reader_does_not(self) -> None:
         registrations = {registration.name: registration for registration in build_default_agent_registrations()}
 
@@ -266,7 +343,12 @@ class KnowledgeBaseBuilderToolTests(unittest.TestCase):
 
         self.assertEqual(
             knowledge_tool_names,
-            {"list_knowledge_documents", "search_knowledge_documents", "read_knowledge_document"},
+            {
+                "list_knowledge_documents",
+                "search_knowledge_documents",
+                "read_knowledge_document",
+                "retrieve_knowledge_context",
+            },
         )
         self.assertEqual(
             builder_tool_names,
@@ -274,6 +356,7 @@ class KnowledgeBaseBuilderToolTests(unittest.TestCase):
                 "list_knowledge_documents",
                 "search_knowledge_documents",
                 "read_knowledge_document",
+                "retrieve_knowledge_context",
                 "resolve_knowledge_markdown_path",
                 "write_knowledge_markdown_document",
             },

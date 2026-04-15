@@ -55,6 +55,27 @@ class KnowledgeDocumentIndex:
 
 
 @dataclass(frozen=True)
+class KnowledgeChunk:
+    chunk_id: str
+    document_path: str
+    document_title: str
+    source_type: str
+    section_title: str
+    block_type: str
+    start_line: int
+    end_line: int
+    text: str
+    char_count: int
+
+
+@dataclass(frozen=True)
+class KnowledgeChunkMatch:
+    score: int
+    chunk: KnowledgeChunk
+    document_metadata: dict[str, str]
+
+
+@dataclass(frozen=True)
 class GoogleSheetsKnowledgeCatalogEntry:
     spreadsheet_id: str
     title: str
@@ -70,6 +91,13 @@ class KnowledgeIndexCacheEntry:
 
 
 _google_sheet_index_cache: dict[str, KnowledgeIndexCacheEntry] = {}
+
+KNOWLEDGE_CHUNK_MAX_LINES = 18
+KNOWLEDGE_CHUNK_OVERLAP_LINES = 3
+KNOWLEDGE_CHUNK_MAX_CHARS = 2_200
+KNOWLEDGE_RETRIEVAL_LIMIT = 6
+KNOWLEDGE_RETRIEVAL_MAX_CHUNKS_PER_DOCUMENT = 3
+KNOWLEDGE_RETRIEVED_CONTEXT_MAX_CHARS = 12_000
 
 
 def get_knowledge_base_root() -> Path:
@@ -654,6 +682,276 @@ def build_document_excerpt(
     }
 
 
+def build_knowledge_chunks(document_index: KnowledgeDocumentIndex) -> list[KnowledgeChunk]:
+    document_title = document_index.metadata.get("title", document_index.path)
+    source_type = document_index.metadata.get("source_type", "local_file")
+
+    if document_index.blocks:
+        chunks: list[KnowledgeChunk] = []
+        for block_index, block in enumerate(document_index.blocks, start=1):
+            chunks.extend(
+                chunk_lines_into_records(
+                    lines=block.content.splitlines(),
+                    chunk_prefix=f"{document_index.path}:block:{block_index}",
+                    document_path=document_index.path,
+                    document_title=document_title,
+                    source_type=source_type,
+                    section_title=block.title,
+                    block_type=block.kind,
+                    base_start_line=block.start_line,
+                )
+            )
+        if chunks:
+            return chunks
+
+    return chunk_lines_into_records(
+        lines=document_index.lines,
+        chunk_prefix=f"{document_index.path}:document",
+        document_path=document_index.path,
+        document_title=document_title,
+        source_type=source_type,
+        section_title=document_title,
+        block_type="document",
+        base_start_line=1,
+    )
+
+
+def chunk_lines_into_records(
+    *,
+    lines: list[str],
+    chunk_prefix: str,
+    document_path: str,
+    document_title: str,
+    source_type: str,
+    section_title: str,
+    block_type: str,
+    base_start_line: int,
+    max_lines: int = KNOWLEDGE_CHUNK_MAX_LINES,
+    max_chars: int = KNOWLEDGE_CHUNK_MAX_CHARS,
+    overlap_lines: int = KNOWLEDGE_CHUNK_OVERLAP_LINES,
+) -> list[KnowledgeChunk]:
+    if not lines:
+        return []
+
+    chunks: list[KnowledgeChunk] = []
+    start_index = 0
+    chunk_index = 1
+
+    while start_index < len(lines):
+        current_lines: list[str] = []
+        current_chars = 0
+        end_index = start_index
+
+        while end_index < len(lines):
+            line = lines[end_index].rstrip()
+            projected_chars = current_chars + len(line) + (1 if current_lines else 0)
+            if current_lines and (
+                end_index - start_index >= max_lines or projected_chars > max_chars
+            ):
+                break
+            current_lines.append(line)
+            current_chars = projected_chars
+            end_index += 1
+
+        if not current_lines:
+            current_lines = [lines[start_index].rstrip()[:max_chars]]
+            end_index = start_index + 1
+
+        chunk_text = "\n".join(current_lines).strip()
+        if chunk_text:
+            chunks.append(
+                KnowledgeChunk(
+                    chunk_id=f"{chunk_prefix}:{chunk_index}",
+                    document_path=document_path,
+                    document_title=document_title,
+                    source_type=source_type,
+                    section_title=section_title.strip() or document_title,
+                    block_type=block_type,
+                    start_line=base_start_line + start_index,
+                    end_line=base_start_line + end_index - 1,
+                    text=chunk_text,
+                    char_count=len(chunk_text),
+                )
+            )
+            chunk_index += 1
+
+        if end_index >= len(lines):
+            break
+        start_index = max(end_index - overlap_lines, start_index + 1)
+
+    return chunks
+
+
+def score_knowledge_chunk(chunk: KnowledgeChunk, query: str, terms: list[str]) -> int:
+    metadata_text = " ".join(
+        part
+        for part in (
+            chunk.document_title,
+            chunk.document_path,
+            chunk.section_title,
+            chunk.block_type,
+            chunk.source_type,
+        )
+        if part
+    ).lower()
+    content_text = chunk.text.lower()
+    normalized_query = query.strip().lower()
+
+    score = 0
+    if normalized_query and normalized_query in content_text:
+        score += max(10, len(terms) * 3)
+    if normalized_query and normalized_query in metadata_text:
+        score += max(12, len(terms) * 4)
+
+    for term in terms:
+        score += content_text.count(term)
+        score += metadata_text.count(term) * 3
+
+    if score > 0 and chunk.block_type in {"section", "table"}:
+        score += 1
+    return score
+
+
+def rank_knowledge_chunk_matches(
+    query: str,
+    *,
+    sources: list[KnowledgeSource],
+) -> list[KnowledgeChunkMatch]:
+    terms = normalize_query_terms(query)
+    matches: list[KnowledgeChunkMatch] = []
+
+    for source in sources:
+        document_index = build_document_index(source)
+        for chunk in build_knowledge_chunks(document_index):
+            score = score_knowledge_chunk(chunk, query, terms)
+            if score <= 0:
+                continue
+            matches.append(
+                KnowledgeChunkMatch(
+                    score=score,
+                    chunk=chunk,
+                    document_metadata=dict(document_index.metadata),
+                )
+            )
+
+    matches.sort(
+        key=lambda match: (
+            -match.score,
+            match.chunk.document_title.lower(),
+            match.chunk.document_path,
+            match.chunk.start_line,
+            match.chunk.chunk_id,
+        )
+    )
+    return matches
+
+
+def select_top_chunk_matches(
+    matches: list[KnowledgeChunkMatch],
+    *,
+    limit: int,
+    max_chunks_per_document: int = KNOWLEDGE_RETRIEVAL_MAX_CHUNKS_PER_DOCUMENT,
+) -> list[KnowledgeChunkMatch]:
+    selected: list[KnowledgeChunkMatch] = []
+    counts_by_document: dict[str, int] = {}
+
+    for match in matches:
+        document_path = match.chunk.document_path
+        if counts_by_document.get(document_path, 0) >= max_chunks_per_document:
+            continue
+        selected.append(match)
+        counts_by_document[document_path] = counts_by_document.get(document_path, 0) + 1
+        if len(selected) >= limit:
+            break
+    return selected
+
+
+def serialize_knowledge_chunk_match(
+    match: KnowledgeChunkMatch,
+    *,
+    include_content: bool = False,
+) -> dict[str, object]:
+    payload: dict[str, object] = {
+        **match.document_metadata,
+        "score": match.score,
+        "path": match.chunk.document_path,
+        "title": match.chunk.document_title,
+        "section_title": match.chunk.section_title,
+        "block_type": match.chunk.block_type,
+        "source_type": match.chunk.source_type,
+        "start_line": match.chunk.start_line,
+        "end_line": match.chunk.end_line,
+        "snippet": build_chunk_snippet(match.chunk),
+    }
+    if include_content:
+        payload["content"] = match.chunk.text
+    return payload
+
+
+def build_chunk_snippet(chunk: KnowledgeChunk, *, max_lines: int = 5) -> str:
+    lines = [line.rstrip() for line in chunk.text.splitlines() if line.strip()]
+    return "\n".join(lines[:max_lines]).strip()
+
+
+def build_retrieved_knowledge_context(
+    query: str,
+    matches: list[KnowledgeChunkMatch],
+    *,
+    max_chars: int = KNOWLEDGE_RETRIEVED_CONTEXT_MAX_CHARS,
+) -> str:
+    if not matches:
+        return ""
+
+    header = f"Retrieved knowledge for: {query.strip()}"
+    parts = [header]
+    current_length = len(header)
+
+    for index, match in enumerate(matches, start=1):
+        section_title = match.chunk.section_title.strip() or match.chunk.document_title
+        entry = "\n".join(
+            [
+                f"### {index}. {match.chunk.document_title}",
+                f"Path: {match.chunk.document_path}",
+                f"Section: {section_title}",
+                f"Lines: {match.chunk.start_line}-{match.chunk.end_line}",
+                match.chunk.text.strip(),
+            ]
+        ).strip()
+        projected_length = current_length + 2 + len(entry)
+        if len(parts) > 1 and projected_length > max_chars:
+            break
+        parts.append(entry)
+        current_length = projected_length
+
+    return "\n\n".join(parts).strip()
+
+
+def build_search_document_results(
+    matches: list[KnowledgeChunkMatch],
+    *,
+    limit: int,
+) -> list[dict[str, object]]:
+    best_by_document: dict[str, KnowledgeChunkMatch] = {}
+    for match in matches:
+        document_path = match.chunk.document_path
+        if document_path in best_by_document:
+            continue
+        best_by_document[document_path] = match
+
+    ordered_matches = sorted(
+        best_by_document.values(),
+        key=lambda match: (
+            -match.score,
+            match.chunk.document_title.lower(),
+            match.chunk.document_path,
+        ),
+    )
+    return [
+        serialize_knowledge_chunk_match(match)
+        for match in ordered_matches[:limit]
+    ]
+
+
 def normalize_query_terms(query: str) -> list[str]:
     return [term for term in re.findall(r"[\w\u4e00-\u9fff]+", query.lower()) if len(term) >= 2]
 
@@ -1072,9 +1370,6 @@ def search_knowledge_documents(query: str, limit: int = 5) -> dict[str, object]:
             "documents": [],
         }
 
-    terms = normalize_query_terms(query)
-    matches: list[dict[str, object]] = []
-
     try:
         sources = get_knowledge_sources()
     except Exception as exc:
@@ -1087,31 +1382,24 @@ def search_knowledge_documents(query: str, limit: int = 5) -> dict[str, object]:
             "documents": [],
         }
 
-    for source in sources:
-        document_index = build_document_index(source)
-        best_block = find_best_matching_block(document_index.blocks, query, terms)
-        if best_block is None:
-            continue
-        score = score_block(best_block, query, terms)
-        matches.append(
-            {
-                **document_index.metadata,
-                "score": score,
-                "line_number": best_block.start_line,
-                "end_line": best_block.end_line,
-                "snippet": build_block_snippet(best_block),
-                "block_type": best_block.kind,
-                "section_title": best_block.title,
-            }
-        )
-
-    matches.sort(key=lambda item: (-int(item["score"]), str(item["path"])))
+    chunk_matches = rank_knowledge_chunk_matches(query, sources=sources)
+    documents = build_search_document_results(chunk_matches, limit=normalized_limit)
+    retrieved_matches = select_top_chunk_matches(
+        chunk_matches,
+        limit=max(normalized_limit, KNOWLEDGE_RETRIEVAL_LIMIT),
+    )
     return {
         "ok": True,
         **context,
         "query": query,
-        "match_count": len(matches),
-        "documents": matches[:normalized_limit],
+        "match_count": len(documents),
+        "documents": documents,
+        "retrieval_mode": "chunked_rag",
+        "retrieved_chunk_count": len(retrieved_matches),
+        "retrieved_chunks": [
+            serialize_knowledge_chunk_match(match)
+            for match in retrieved_matches
+        ],
     }
 
 
@@ -1139,23 +1427,136 @@ def read_knowledge_document(document_name: str, section_query: str = "", max_lin
 
     normalized_max_lines = max(max_lines, 1)
     document_index = build_document_index(source)
-    excerpt = build_document_excerpt(
-        document_index=document_index,
-        section_query=section_query,
-        max_lines=normalized_max_lines,
-    )
+    normalized_section_query = section_query.strip()
+    excerpt = None
+    if normalized_section_query:
+        chunk_matches = rank_knowledge_chunk_matches(
+            normalized_section_query,
+            sources=[source],
+        )
+        if chunk_matches:
+            top_match = chunk_matches[0]
+            chunk_lines = top_match.chunk.text.splitlines()
+            chunk_terms = normalize_query_terms(normalized_section_query)
+            match_index = find_best_match_line(chunk_lines, normalized_section_query, chunk_terms)
+            window_radius = max((normalized_max_lines - 1) // 2, 0)
+            window_start = max(match_index - window_radius, 0)
+            window_end = min(window_start + normalized_max_lines, len(chunk_lines))
+            if window_end - window_start < normalized_max_lines:
+                window_start = max(window_end - normalized_max_lines, 0)
+            excerpt_lines = chunk_lines[window_start:window_end]
+            excerpt = {
+                "start_line": top_match.chunk.start_line + window_start,
+                "end_line": top_match.chunk.start_line + window_end - 1,
+                "content": "\n".join(excerpt_lines).strip(),
+                "truncated": len(chunk_lines) > normalized_max_lines,
+                "block_type": top_match.chunk.block_type,
+                "section_title": top_match.chunk.section_title,
+            }
+
+    if excerpt is None:
+        excerpt = build_document_excerpt(
+            document_index=document_index,
+            section_query=normalized_section_query,
+            max_lines=normalized_max_lines,
+        )
 
     return {
         "ok": True,
         **context,
         "document": document_index.metadata,
-        "section_query": section_query.strip(),
+        "section_query": normalized_section_query,
         "start_line": excerpt["start_line"],
         "end_line": excerpt["end_line"],
         "content": excerpt["content"],
         "truncated": excerpt["truncated"],
         "block_type": excerpt["block_type"],
         "section_title": excerpt["section_title"],
+        "retrieval_mode": "chunked_rag" if normalized_section_query else "document_excerpt",
+    }
+
+
+@tool
+def retrieve_knowledge_context(
+    query: str,
+    limit: int = KNOWLEDGE_RETRIEVAL_LIMIT,
+    document_name: str = "",
+    max_chars: int = KNOWLEDGE_RETRIEVED_CONTEXT_MAX_CHARS,
+) -> dict[str, object]:
+    """Retrieve grounded knowledge chunks for answering a question with RAG."""
+    normalized_limit = max(limit, 1)
+    normalized_max_chars = max(max_chars, 1_000)
+    normalized_document_name = str(document_name or "").strip()
+    context = build_knowledge_base_context()
+    if not query.strip():
+        return {
+            "ok": False,
+            **context,
+            "error": "Query cannot be empty.",
+            "query": query,
+            "match_count": 0,
+            "documents": [],
+            "retrieved_chunks": [],
+            "retrieved_context": "",
+        }
+
+    try:
+        if normalized_document_name:
+            source = resolve_document(normalized_document_name)
+            if source is None:
+                return {
+                    "ok": False,
+                    **context,
+                    "error": f"Document not found: {normalized_document_name}",
+                    "query": query,
+                    "document_name": normalized_document_name,
+                    "match_count": 0,
+                    "documents": [],
+                    "retrieved_chunks": [],
+                    "retrieved_context": "",
+                }
+            sources = [source]
+        else:
+            sources = get_knowledge_sources()
+    except Exception as exc:
+        return {
+            "ok": False,
+            **context,
+            "error": str(exc),
+            "query": query,
+            "document_name": normalized_document_name,
+            "match_count": 0,
+            "documents": [],
+            "retrieved_chunks": [],
+            "retrieved_context": "",
+        }
+
+    chunk_matches = rank_knowledge_chunk_matches(query, sources=sources)
+    selected_matches = select_top_chunk_matches(
+        chunk_matches,
+        limit=normalized_limit,
+    )
+    retrieved_context = build_retrieved_knowledge_context(
+        query,
+        selected_matches,
+        max_chars=normalized_max_chars,
+    )
+    documents = build_search_document_results(chunk_matches, limit=normalized_limit)
+
+    return {
+        "ok": True,
+        **context,
+        "query": query,
+        "document_name": normalized_document_name,
+        "match_count": len(selected_matches),
+        "documents": documents,
+        "retrieval_mode": "chunked_rag",
+        "retrieved_chunk_count": len(selected_matches),
+        "retrieved_chunks": [
+            serialize_knowledge_chunk_match(match, include_content=True)
+            for match in selected_matches
+        ],
+        "retrieved_context": retrieved_context,
     }
 
 

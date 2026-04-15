@@ -3,7 +3,7 @@ from typing import Any
 
 from langchain_core.messages import AIMessage, SystemMessage
 
-from agents.knowledge.rendering import first_non_empty, is_search_payload
+from agents.knowledge.rendering import first_non_empty, is_retrieval_payload, is_search_payload
 from app.contracts import (
     build_assistant_response,
     tool_invocation_to_tool_call,
@@ -32,6 +32,7 @@ from app.tool_runtime import (
 from app.tool_registry import (
     TOOL_KNOWLEDGE_LIST_DOCUMENTS,
     TOOL_KNOWLEDGE_READ_DOCUMENT,
+    TOOL_KNOWLEDGE_RETRIEVE_CONTEXT,
     TOOL_KNOWLEDGE_SEARCH_DOCUMENTS,
     build_agent_tool_prompt,
 )
@@ -148,7 +149,16 @@ def build_knowledge_response(
         if follow_up_result is not None:
             return follow_up_result
 
-    return None
+    latest_tool_result = get_latest_tool_result(state)
+    if latest_tool_result is None:
+        return None
+
+    payload = latest_tool_result.get("payload") if isinstance(latest_tool_result.get("payload"), dict) else {}
+    if payload.get("ok") is False:
+        return render_knowledge_update(state, latest_tool_result, preferred_language=preferred_language)
+    if is_retrieval_payload(payload):
+        return None
+    return render_knowledge_update(state, latest_tool_result, preferred_language=preferred_language)
 
 
 def get_tool_result(message, *, messages: list[Any] | None = None) -> dict[str, Any] | None:
@@ -493,6 +503,8 @@ def resolve_knowledge_source_tool_id(tool_result: dict[str, Any], payload: dict[
         return TOOL_KNOWLEDGE_READ_DOCUMENT
     if is_search_payload(payload):
         return TOOL_KNOWLEDGE_SEARCH_DOCUMENTS
+    if is_retrieval_payload(payload):
+        return TOOL_KNOWLEDGE_RETRIEVE_CONTEXT
     return TOOL_KNOWLEDGE_LIST_DOCUMENTS
 
 

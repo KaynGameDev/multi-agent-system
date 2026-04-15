@@ -21,6 +21,7 @@ class ToolMetadata:
 TOOL_KNOWLEDGE_LIST_DOCUMENTS = "knowledge.list_documents"
 TOOL_KNOWLEDGE_SEARCH_DOCUMENTS = "knowledge.search_documents"
 TOOL_KNOWLEDGE_READ_DOCUMENT = "knowledge.read_document"
+TOOL_KNOWLEDGE_RETRIEVE_CONTEXT = "knowledge.retrieve_context"
 TOOL_KNOWLEDGE_RESOLVE_MARKDOWN_PATH = "knowledge.resolve_markdown_path"
 TOOL_KNOWLEDGE_WRITE_MARKDOWN = "knowledge.write_markdown"
 TOOL_PROJECT_READ_TASKS = "project.read_tasks"
@@ -34,6 +35,7 @@ KNOWLEDGE_TOOL_IDS = (
     TOOL_KNOWLEDGE_LIST_DOCUMENTS,
     TOOL_KNOWLEDGE_SEARCH_DOCUMENTS,
     TOOL_KNOWLEDGE_READ_DOCUMENT,
+    TOOL_KNOWLEDGE_RETRIEVE_CONTEXT,
 )
 KNOWLEDGE_BUILDER_TOOL_IDS = (
     *KNOWLEDGE_TOOL_IDS,
@@ -120,6 +122,34 @@ _TOOL_REGISTRY = (
         examples=(
             "can you read the setup document",
             "open that architecture doc",
+        ),
+    ),
+    ToolMetadata(
+        tool_id=TOOL_KNOWLEDGE_RETRIEVE_CONTEXT,
+        runtime_tool_name="retrieve_knowledge_context",
+        display_name="Retrieve Knowledge Context",
+        description=(
+            "Retrieve the best grounded chunks across the knowledge base for answering a question. "
+            "Prefer this for doc-grounded answers; use browse tools when the user explicitly wants a document list or raw excerpt."
+        ),
+        tool_family="knowledge_read",
+        follow_up_hint="answer",
+        semantic_aliases=(
+            "retrieve knowledge",
+            "retrieve context",
+            "knowledge context",
+            "rag",
+            "grounded answer",
+            "answer from docs",
+            "知识检索",
+            "检索上下文",
+            "检索知识",
+            "基于文档回答",
+            "RAG",
+        ),
+        examples=(
+            "answer this using the docs",
+            "retrieve the knowledge context for our setup process",
         ),
     ),
     ToolMetadata(

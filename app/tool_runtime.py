@@ -205,8 +205,6 @@ def find_matching_tool_call_request(
             current_name = safe_get_str(tool_call, "name")
             current_id = safe_get_str(tool_call, "id")
             if normalized_tool_call_id and current_id == normalized_tool_call_id:
-                if normalized_tool_name and current_name != normalized_tool_name:
-                    continue
                 return tool_call
             if not normalized_tool_call_id and normalized_tool_name and current_name == normalized_tool_name and fallback_match is None:
                 fallback_match = tool_call
@@ -237,7 +235,7 @@ def extract_tool_result_from_message(
         tool_call_id,
         tool_name=tool_name,
     )
-    resolved_tool_name = str(tool_name or (matched_request or {}).get("name", "")).strip()
+    resolved_tool_name = str((matched_request or {}).get("name", "") or tool_name).strip()
     resolved_arguments = arguments
     if not isinstance(resolved_arguments, dict):
         matched_arguments = (matched_request or {}).get("args")

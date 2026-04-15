@@ -311,6 +311,53 @@ class AgentRuntimeMigrationTests(unittest.TestCase):
         self.assertEqual(result["messages"][-1].content, "llm fallback")
         self.assertNotIn("pending_action", result)
 
+    def test_knowledge_agent_continues_to_llm_after_retrieval_context_tool(self) -> None:
+        payload = {
+            "ok": True,
+            "query": "How does the setup work?",
+            "retrieval_mode": "chunked_rag",
+            "retrieved_chunk_count": 1,
+            "documents": [
+                {
+                    "name": "SetupGuide",
+                    "title": "Setup Guide",
+                    "path": "knowledge/Docs/00_Shared/SetupGuide.md",
+                }
+            ],
+            "retrieved_chunks": [
+                {
+                    "title": "Setup Guide",
+                    "path": "knowledge/Docs/00_Shared/SetupGuide.md",
+                    "section_title": "Installation",
+                    "start_line": 10,
+                    "end_line": 15,
+                    "content": "Install dependencies before starting the service.",
+                }
+            ],
+            "retrieved_context": (
+                "Retrieved knowledge for: How does the setup work?\n\n"
+                "### 1. Setup Guide\n"
+                "Path: knowledge/Docs/00_Shared/SetupGuide.md\n"
+                "Section: Installation\n"
+                "Lines: 10-15\n"
+                "Install dependencies before starting the service."
+            ),
+        }
+        node = KnowledgeAgentNode(FallbackLLM("Grounded answer from retrieved context."), [], agent_name="knowledge_agent")
+
+        result = node(
+            {
+                "thread_id": "thread-1",
+                "messages": [
+                    HumanMessage(content="How does the setup work?"),
+                    ToolMessage(content=json.dumps(payload), tool_call_id="call_retrieve"),
+                ],
+            }
+        )
+
+        self.assertEqual(result["messages"][-1].content, "Grounded answer from retrieved context.")
+        self.assertNotIn("pending_action", result)
+
     def test_knowledge_agent_ambiguous_follow_up_blocks_execution_deterministically(self) -> None:
         payload = {
             "ok": True,

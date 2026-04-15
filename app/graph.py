@@ -21,6 +21,7 @@ from app.state import AgentState
 from tools.knowledge_base import (
     list_knowledge_documents,
     read_knowledge_document,
+    retrieve_knowledge_context,
     resolve_knowledge_markdown_path,
     search_knowledge_documents,
     write_knowledge_markdown_document,
@@ -39,6 +40,7 @@ def build_default_agent_registrations(
         list_knowledge_documents,
         search_knowledge_documents,
         read_knowledge_document,
+        retrieve_knowledge_context,
     )
     knowledge_read_tool_ids = KNOWLEDGE_TOOL_IDS
     knowledge_builder_tools = (
