@@ -10,7 +10,6 @@ from app.contracts import (
 )
 from app.language import detect_response_language
 from app.messages import extract_latest_human_text, stringify_message_content
-from app.pending_action_parser import PendingActionReplyInterpreter
 from app.pending_actions import (
     PendingActionSelectionOption,
     build_pending_action,
@@ -18,10 +17,10 @@ from app.pending_actions import (
     get_pending_action_metadata,
     get_pending_action_selection_phase,
     is_pending_action_active,
-    resolve_pending_action_reply,
     update_pending_action,
 )
 from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
+from app.routing.pending_action_router import PendingActionRouter, PendingActionTurnResult, resolve_owned_pending_action_turn
 from app.skill_runtime import build_skill_prompt_context
 from app.skills import SkillRegistry
 from app.tool_runtime import (
@@ -49,13 +48,13 @@ class KnowledgeAgentNode:
         tools: list,
         *,
         skill_registry: SkillRegistry | None = None,
-        pending_action_interpreter: PendingActionReplyInterpreter | None = None,
+        pending_action_router: PendingActionRouter | None = None,
         agent_name: str = "",
         tool_ids: tuple[str, ...] = (),
     ) -> None:
         self.llm = llm.bind_tools(tools)
         self.skill_registry = skill_registry
-        self.pending_action_interpreter = pending_action_interpreter
+        self.pending_action_router = pending_action_router
         self.agent_name = agent_name
         self.tool_ids = tuple(tool_ids)
 
@@ -63,7 +62,7 @@ class KnowledgeAgentNode:
         rendered_response = build_knowledge_response(
             state,
             agent_name=self.agent_name,
-            pending_action_interpreter=self.pending_action_interpreter,
+            pending_action_router=self.pending_action_router,
         )
         if rendered_response is not None:
             return rendered_response
@@ -132,24 +131,23 @@ def build_knowledge_response(
     state: AgentState,
     *,
     agent_name: str,
-    pending_action_interpreter: PendingActionReplyInterpreter | None = None,
+    pending_action_router: PendingActionRouter | None = None,
 ) -> dict[str, Any] | None:
     latest_user_text = extract_latest_human_text(state)
     preferred_language = detect_response_language(latest_user_text)
-    pending_action = get_pending_action(state)
-    if pending_action and pending_action.get("requested_by_agent") == agent_name and is_pending_action_active(pending_action):
+    pending_action, pending_action_turn = resolve_owned_pending_action_turn(
+        state, agent_name=agent_name, pending_action_router=pending_action_router,
+    )
+    if pending_action is not None:
         follow_up_result = build_knowledge_pending_action_response(
             state,
             pending_action=pending_action,
+            pending_action_turn=pending_action_turn,
             preferred_language=preferred_language,
-            pending_action_interpreter=pending_action_interpreter,
         )
         if follow_up_result is not None:
             return follow_up_result
 
-    latest_tool_result = get_latest_tool_result(state)
-    if latest_tool_result is not None:
-        return render_knowledge_update(state, latest_tool_result, preferred_language=preferred_language)
     return None
 
 
@@ -305,10 +303,9 @@ def build_knowledge_pending_action_response(
     state: AgentState,
     *,
     pending_action: dict[str, Any],
+    pending_action_turn: PendingActionTurnResult,
     preferred_language: str,
-    pending_action_interpreter: PendingActionReplyInterpreter | None = None,
 ) -> dict[str, Any] | None:
-    latest_user_text = extract_latest_human_text(state)
     selection_phase = get_pending_action_selection_phase(pending_action)
     if selection_phase == "render_after_tool_result":
         latest_tool_result = get_latest_tool_result(state)
@@ -330,13 +327,24 @@ def build_knowledge_pending_action_response(
             }
         return render_knowledge_update(state, latest_tool_result, preferred_language=preferred_language)
 
-    resolution = resolve_pending_action_reply(
-        pending_action,
-        latest_user_text,
-        interpreter=pending_action_interpreter,
-    )
-    contract = resolution["contract"]
-    validation = resolution["validation"]
+    contract = pending_action_turn.execution_contract
+    validation = pending_action_turn.validation
+    if contract is None or validation is None:
+        fallback_validation = {"reason": "The pending-action decision could not be validated."}
+        content = build_knowledge_clarification_text(
+            pending_action=pending_action,
+            validation=fallback_validation,
+            preferred_language=preferred_language,
+        )
+        return {
+            "messages": [AIMessage(content=content)],
+            "assistant_response": build_assistant_response(
+                kind="await_confirmation",
+                content=content,
+                pending_action=pending_action,
+            ),
+            "pending_action": pending_action,
+        }
 
     if validation.get("runtime_action") == "cancel":
         content = translate_knowledge_text("Cancelled the pending document follow-up.", preferred_language)
@@ -506,6 +514,7 @@ def build_document_option(
     if include_referential_aliases:
         aliases.extend(["that one", "this one", "details", "detail", "那个", "这个", "详情"])
     return PendingActionSelectionOption(
+        id=title or path or str(index),
         label=title or path or f"Document {index}",
         aliases=list(dict.fromkeys(alias for alias in aliases if alias)),
         value=title or path,
