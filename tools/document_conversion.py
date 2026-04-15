@@ -992,6 +992,7 @@ def load_source_bundle_text(
         try:
             content = load_knowledge_document(source_path)
         except Exception:
+            logger.debug("load_knowledge_document failed for %s; falling back to plaintext", source_path, exc_info=True)
             content = source_path.read_text(encoding="utf-8", errors="replace")
         parts.append(
             "\n".join(

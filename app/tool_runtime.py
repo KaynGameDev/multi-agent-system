@@ -19,6 +19,7 @@ from app.contracts import (
     tool_invocation_to_tool_call,
 )
 from app.tool_registry import get_tool_metadata_by_runtime_name
+from app.utils import safe_get_str
 
 LANGGRAPH_TOOL_NODE_BACKEND = "langgraph_tool_node"
 INTERNAL_WORKFLOW_BACKEND = "internal_workflow"
@@ -139,12 +140,12 @@ def enrich_runtime_tool_envelope(
     execution_backend: str = LANGGRAPH_TOOL_NODE_BACKEND,
 ) -> ToolInvocationEnvelope:
     normalized = dict(envelope)
-    tool_name = str(normalized.get("tool_name", "")).strip()
+    tool_name = safe_get_str(normalized, "tool_name")
     metadata = resolve_tool_metadata_fields(tool_name)
     for key, value in metadata.items():
-        if value and not str(normalized.get(key, "")).strip():
+        if value and not safe_get_str(normalized, key):
             normalized[key] = value
-    backend_value = str(normalized.get("execution_backend", execution_backend)).strip().lower()
+    backend_value = safe_get_str(normalized, "execution_backend", execution_backend).lower()
     if backend_value:
         normalized["execution_backend"] = backend_value
     return normalized  # type: ignore[return-value]
@@ -156,12 +157,12 @@ def enrich_runtime_tool_result(
     execution_backend: str = LANGGRAPH_TOOL_NODE_BACKEND,
 ) -> ToolResultEnvelope:
     normalized = dict(result)
-    tool_name = str(normalized.get("tool_name", "")).strip()
+    tool_name = safe_get_str(normalized, "tool_name")
     metadata = resolve_tool_metadata_fields(tool_name)
     for key, value in metadata.items():
-        if value and not str(normalized.get(key, "")).strip():
+        if value and not safe_get_str(normalized, key):
             normalized[key] = value
-    backend_value = str(normalized.get("execution_backend", execution_backend)).strip().lower()
+    backend_value = safe_get_str(normalized, "execution_backend", execution_backend).lower()
     if backend_value:
         normalized["execution_backend"] = backend_value
     return normalized  # type: ignore[return-value]
@@ -201,8 +202,8 @@ def find_matching_tool_call_request(
         for tool_call in getattr(message, "tool_calls", []) or []:
             if not isinstance(tool_call, dict):
                 continue
-            current_name = str(tool_call.get("name", "")).strip()
-            current_id = str(tool_call.get("id", "")).strip()
+            current_name = safe_get_str(tool_call, "name")
+            current_id = safe_get_str(tool_call, "id")
             if normalized_tool_call_id and current_id == normalized_tool_call_id:
                 if normalized_tool_name and current_name != normalized_tool_name:
                     continue
@@ -250,7 +251,7 @@ def extract_tool_result_from_message(
         reason=reason,
         execution_backend=execution_backend,
     )
-    if tool_call_id and not str(result.get("tool_call_id", "")).strip():
+    if tool_call_id and not safe_get_str(result, "tool_call_id"):
         result["tool_call_id"] = tool_call_id
     return result
 
@@ -275,7 +276,7 @@ def build_tool_execution_record_for_message(
     if result is None:
         return None
 
-    tool_call_id = str(result.get("tool_call_id", "")).strip()
+    tool_call_id = safe_get_str(result, "tool_call_id")
     matched_request = find_matching_tool_call_request(list(messages or ()), tool_call_id, tool_name=tool_name)
     invocation = None
     if matched_request is not None:
@@ -285,7 +286,7 @@ def build_tool_execution_record_for_message(
             reason=reason,
             execution_backend=execution_backend,
         )
-        if tool_call_id and not str(invocation.get("tool_call_id", "")).strip():
+        if tool_call_id and not safe_get_str(invocation, "tool_call_id"):
             invocation["tool_call_id"] = tool_call_id
     return build_tool_execution_record(invocation=invocation, result=result)
 
@@ -310,7 +311,7 @@ def get_pending_action_tool_invocation(
             execution_backend=execution_backend,
         )
 
-    tool_name = str(metadata.get("tool_name", "")).strip()
+    tool_name = safe_get_str(metadata, "tool_name")
     tool_args = metadata.get("tool_args")
     if not tool_name or not isinstance(tool_args, dict):
         return None
@@ -319,7 +320,7 @@ def get_pending_action_tool_invocation(
         dict(tool_args),
         source=source,
         reason=reason,
-        tool_call_id=str(metadata.get("tool_call_id", "")).strip(),
+        tool_call_id=safe_get_str(metadata, "tool_call_id"),
         execution_backend=execution_backend,
     )
 
@@ -344,7 +345,7 @@ def build_pending_action_retry_tool_call(
     tool_call = tool_invocation_to_tool_call(tool_invocation)
     if not tool_call.get("name"):
         return None
-    tool_call["id"] = str(tool_call.get("id", "")).strip() or str(fallback_tool_call_id).strip()
+    tool_call["id"] = safe_get_str(tool_call, "id") or str(fallback_tool_call_id).strip()
     if not str(tool_call["id"]).strip():
         return None
     return AIMessage(content="", tool_calls=[tool_call]), tool_invocation
@@ -377,7 +378,7 @@ def run_internal_tool_operation(
             error=str(exc),
             source=source,
             reason=reason,
-            tool_call_id=str(invocation.get("tool_call_id", "")).strip(),
+            tool_call_id=safe_get_str(invocation, "tool_call_id"),
             execution_backend=INTERNAL_WORKFLOW_BACKEND,
         )
         return invocation, result, None, exc
@@ -390,7 +391,7 @@ def run_internal_tool_operation(
         payload=payload,
         source=source,
         reason=reason,
-        tool_call_id=str(invocation.get("tool_call_id", "")).strip(),
+        tool_call_id=safe_get_str(invocation, "tool_call_id"),
         execution_backend=INTERNAL_WORKFLOW_BACKEND,
     )
     return invocation, result, raw_result, None

@@ -301,6 +301,7 @@ class SlackListener:
                 response = auth_test()
                 return str(response.get("user_id", "")).strip()
         except Exception:
+            logger.debug("Failed to load bot user ID via auth_test", exc_info=True)
             return ""
         return ""
 

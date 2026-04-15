@@ -5,6 +5,7 @@ from typing import Any
 from app.contracts import SkillInvocationContract, normalize_skill_invocation_contract
 from app.prompt_loader import join_prompt_layers
 from app.skills import SkillDefinition, SkillRegistry
+from app.utils import safe_get_str
 
 def get_active_skill_invocation_contracts(
     state: dict[str, Any] | None,
@@ -27,9 +28,9 @@ def get_active_skill_invocation_contracts(
         if not is_skill_contract_active_for_agent(contract, agent_name=agent_name):
             continue
         contract_key = (
-            str(contract.get("skill_id", "")).strip(),
-            str(contract.get("mode", "")).strip(),
-            str(contract.get("target_agent", "")).strip() or agent_name,
+            safe_get_str(contract, "skill_id"),
+            safe_get_str(contract, "mode"),
+            safe_get_str(contract, "target_agent") or agent_name,
         )
         if contract_key in seen_keys:
             continue
@@ -46,7 +47,7 @@ def is_skill_contract_active_for_agent(
     if not agent_name:
         return False
 
-    target_agent = str(contract.get("target_agent", "")).strip()
+    target_agent = safe_get_str(contract, "target_agent")
     if target_agent:
         return target_agent == agent_name
 
@@ -70,12 +71,12 @@ def build_skill_execution_diagnostics(
         diagnostics.append(
             {
                 "kind": "skill_execution_contract",
-                "skill_id": str(contract.get("skill_id", "")).strip(),
-                "mode": str(contract.get("mode", "")).strip() or "inline",
-                "target_agent": str(contract.get("target_agent", "")).strip() or agent_name,
+                "skill_id": safe_get_str(contract, "skill_id"),
+                "mode": safe_get_str(contract, "mode") or "inline",
+                "target_agent": safe_get_str(contract, "target_agent") or agent_name,
                 "executed_by_agent": agent_name,
-                "source": str(contract.get("source", "")).strip(),
-                "reason": str(contract.get("reason", "")).strip(),
+                "source": safe_get_str(contract, "source"),
+                "reason": safe_get_str(contract, "reason"),
             }
         )
     return diagnostics
@@ -128,13 +129,13 @@ def render_skill_prompt_context(
     agent_name: str,
 ) -> str:
     normalized = normalize_skill_invocation_contract(contract)
-    skill_id = str(normalized.get("skill_id", "")).strip()
-    skill_name = str(normalized.get("name", "")).strip() or skill_id
-    skill_description = str(normalized.get("description", "")).strip()
-    mode = str(normalized.get("mode", "")).strip() or "inline"
-    target_agent = str(normalized.get("target_agent", "")).strip() or agent_name
-    source = str(normalized.get("source", "")).strip()
-    reason = str(normalized.get("reason", "")).strip()
+    skill_id = safe_get_str(normalized, "skill_id")
+    skill_name = safe_get_str(normalized, "name") or skill_id
+    skill_description = safe_get_str(normalized, "description")
+    mode = safe_get_str(normalized, "mode") or "inline"
+    target_agent = safe_get_str(normalized, "target_agent") or agent_name
+    source = safe_get_str(normalized, "source")
+    reason = safe_get_str(normalized, "reason")
 
     lines = [
         "## Active Skill Runtime",
@@ -179,7 +180,7 @@ def resolve_skill_definition_for_contract(
     skill_registry: SkillRegistry,
     contract: SkillInvocationContract,
 ) -> SkillDefinition | None:
-    skill_id = str(contract.get("skill_id", "")).strip()
+    skill_id = safe_get_str(contract, "skill_id")
     if not skill_id:
         return None
 

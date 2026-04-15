@@ -2,12 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 from uuid import uuid4
 
 from pydantic import ValidationError
+
+logger = logging.getLogger(__name__)
 
 from app.contracts import (
     ExecutionContract,
@@ -42,7 +45,7 @@ def build_pending_action(
     requires_explicit_approval: bool = True,
     metadata: dict[str, Any] | None = None,
 ) -> PendingAction:
-    return PendingAction(
+    action = PendingAction(
         id=f"pending_{uuid4().hex}",
         session_id=session_id.strip(),
         type=action_type.strip(),
@@ -55,6 +58,13 @@ def build_pending_action(
         status="awaiting_confirmation",
         metadata=dict(metadata or {}),
     )
+    logger.info(
+        "Pending action created. action_id=%s type=%s owner=%s",
+        action["id"],
+        action_type.strip(),
+        requested_by_agent.strip(),
+    )
+    return action
 
 
 def get_pending_action(state: dict[str, Any]) -> PendingAction | None:
@@ -447,7 +457,15 @@ def update_pending_action(
 ) -> PendingAction:
     updated: PendingAction = dict(action)
     normalized_status = normalize_pending_action_status(str(status).strip())
-    updated["status"] = normalized_status or str(status).strip()
+    previous_status = str(action.get("status", "")).strip()
+    new_status = normalized_status or str(status).strip()
+    updated["status"] = new_status
+    logger.info(
+        "Pending action status change. action_id=%s new_status=%s previous_status=%s",
+        str(action.get("id", "")).strip(),
+        new_status,
+        previous_status,
+    )
     if target_scope is not None:
         updated["target_scope"] = dict(target_scope)
     if metadata_updates:

@@ -307,6 +307,7 @@ def load_conversion_source_text(source: ConversionSourceRecord) -> str:
     try:
         return load_knowledge_document(source_path)
     except Exception:
+        logger.debug("load_knowledge_document failed for %s; falling back to plaintext", source_path, exc_info=True)
         return source_path.read_text(encoding="utf-8", errors="replace")
 
 
