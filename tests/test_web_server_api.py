@@ -2,11 +2,13 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from dataclasses import replace
 from pathlib import Path
 
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage
 
+from app.config import WebAuthCredential
 from interfaces.web.server import WebServer
 from tests.common import make_settings
 
@@ -103,6 +105,103 @@ class WebServerApiTests(unittest.TestCase):
             static_response.headers.get("cache-control"),
             "no-store, no-cache, must-revalidate, max-age=0",
         )
+
+    def test_web_auth_redirects_browser_requests_to_login(self) -> None:
+        settings = replace(
+            self.settings,
+            web_auth_enabled=True,
+            web_auth_credentials=(WebAuthCredential(username="jade", password="secret-pass"),),
+            web_auth_session_secret="session-secret",
+            web_auth_cookie_secure=False,
+        )
+        client = TestClient(WebServer(agent_graph=DummyGraph(), settings=settings).app)
+
+        response = client.get("/", follow_redirects=False)
+
+        self.assertEqual(response.status_code, 303)
+        self.assertEqual(response.headers.get("location"), "/login")
+
+    def test_web_auth_blocks_api_until_login(self) -> None:
+        settings = replace(
+            self.settings,
+            web_auth_enabled=True,
+            web_auth_credentials=(WebAuthCredential(username="jade", password="secret-pass"),),
+            web_auth_session_secret="session-secret",
+            web_auth_cookie_secure=False,
+        )
+        client = TestClient(WebServer(agent_graph=DummyGraph(), settings=settings).app)
+
+        response = client.get("/api/conversations")
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["detail"], "Authentication required.")
+
+    def test_web_auth_login_session_and_logout_flow(self) -> None:
+        settings = replace(
+            self.settings,
+            web_auth_enabled=True,
+            web_auth_credentials=(WebAuthCredential(username="jade", password="secret-pass"),),
+            web_auth_session_secret="session-secret",
+            web_auth_cookie_secure=False,
+        )
+        client = TestClient(WebServer(agent_graph=DummyGraph(), settings=settings).app)
+
+        session_before = client.get("/api/auth/session")
+        self.assertEqual(
+            session_before.json(),
+            {"enabled": True, "authenticated": False, "username": ""},
+        )
+
+        login_response = client.post(
+            "/api/auth/login",
+            json={"username": "jade", "password": "secret-pass"},
+        )
+        self.assertEqual(login_response.status_code, 200)
+        self.assertEqual(
+            login_response.json(),
+            {"enabled": True, "authenticated": True, "username": "jade"},
+        )
+
+        session_after = client.get("/api/auth/session")
+        self.assertEqual(
+            session_after.json(),
+            {"enabled": True, "authenticated": True, "username": "jade"},
+        )
+
+        index_response = client.get("/")
+        self.assertEqual(index_response.status_code, 200)
+        self.assertIn("Signed in", index_response.text)
+
+        conversations_response = client.get("/api/conversations")
+        self.assertEqual(conversations_response.status_code, 200)
+
+        logout_response = client.post("/api/auth/logout")
+        self.assertEqual(logout_response.status_code, 200)
+        self.assertEqual(
+            logout_response.json(),
+            {"enabled": True, "authenticated": False, "username": ""},
+        )
+
+        after_logout = client.get("/api/conversations")
+        self.assertEqual(after_logout.status_code, 401)
+
+    def test_web_auth_rejects_invalid_credentials(self) -> None:
+        settings = replace(
+            self.settings,
+            web_auth_enabled=True,
+            web_auth_credentials=(WebAuthCredential(username="jade", password="secret-pass"),),
+            web_auth_session_secret="session-secret",
+            web_auth_cookie_secure=False,
+        )
+        client = TestClient(WebServer(agent_graph=DummyGraph(), settings=settings).app)
+
+        response = client.post(
+            "/api/auth/login",
+            json={"username": "jade", "password": "wrong-pass"},
+        )
+
+        self.assertEqual(response.status_code, 401)
+        self.assertEqual(response.json()["detail"], "Invalid username or password.")
 
 
 if __name__ == "__main__":

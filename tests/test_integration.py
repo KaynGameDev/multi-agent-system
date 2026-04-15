@@ -66,21 +66,62 @@ class FakeRoutingLLM:
     def __init__(self, decisions=None) -> None:
         self.decisions = dict(decisions or {})
 
-    def with_structured_output(self, _schema):
-        return self
+    def with_structured_output(self, schema):
+        return FakeStructuredLLM(self, schema)
 
     def invoke(self, messages):
         latest_user_text = ""
-        for message in reversed(messages):
-            if isinstance(message, HumanMessage):
-                latest_user_text = str(message.content)
-                break
+        if isinstance(messages, list):
+            for message in reversed(messages):
+                if isinstance(message, HumanMessage):
+                    latest_user_text = str(message.content)
+                    break
+        else:
+            latest_user_text = extract_latest_user_text_from_prompt(str(messages))
         return dict(
             self.decisions.get(
                 latest_user_text,
                 {"selected_agent": "", "reason": ""},
             )
         )
+
+
+class FakeStructuredLLM:
+    def __init__(self, parent: FakeRoutingLLM, schema) -> None:
+        self.parent = parent
+        self.schema = schema
+
+    def invoke(self, messages):
+        decision = self.parent.invoke(messages)
+        schema_name = getattr(self.schema, "__name__", "")
+        if schema_name in {"AssistantRequest", "AssistantRequestCandidate"}:
+            likely_domain = domain_for_selected_agent(str(decision.get("selected_agent", "")).strip())
+            return {
+                "type": "assistant_request",
+                "user_goal": str(decision.get("reason", "") or "Handle the request.").strip() or "Handle the request.",
+                "likely_domain": likely_domain,
+                "confidence": 0.95,
+                "notes": str(decision.get("reason", "")).strip() or None,
+            }
+        return decision
+
+
+def domain_for_selected_agent(agent_name: str) -> str:
+    mapping = {
+        "general_chat_agent": "general",
+        "knowledge_agent": "knowledge",
+        "project_task_agent": "project_task",
+        "knowledge_base_builder_agent": "knowledge_base_builder",
+        "document_conversion_agent": "document_conversion",
+    }
+    return mapping.get(agent_name, "general")
+
+
+def extract_latest_user_text_from_prompt(prompt: str) -> str:
+    marker = "Latest user message:"
+    if marker in prompt:
+        return prompt.rsplit(marker, 1)[-1].strip().splitlines()[-1].strip()
+    return prompt.strip().splitlines()[-1].strip() if prompt.strip() else ""
 
 
 class DeterministicIntegrationTests(unittest.TestCase):
@@ -153,7 +194,7 @@ class DeterministicIntegrationTests(unittest.TestCase):
                 return {
                     **initial_state,
                     "route": "general_chat_agent",
-                    "route_reason": "No specialist matcher applied; used GeneralAssistant fallback.",
+                    "route_reason": "Fallback to `general_chat_agent` because the request could not be classified safely.",
                     "skill_resolution_diagnostics": [{"kind": "resolved", "skill_id": "none"}],
                     "agent_selection_diagnostics": [{"kind": "fallback", "selected_agent": "general_chat_agent"}],
                     "selection_warnings": ["test warning"],
@@ -199,8 +240,8 @@ class DeterministicIntegrationTests(unittest.TestCase):
                 build_node=lambda _llm=None, skill_registry=None: StaticAgentNode(),
             ),
             build_registration(
-                "beta_agent",
-                namespace="beta",
+                "knowledge_agent",
+                namespace="knowledge",
                 selection_order=20,
                 build_node=lambda _llm=None, skill_registry=None: StaticAgentNode(),
             ),
@@ -219,9 +260,9 @@ class DeterministicIntegrationTests(unittest.TestCase):
         graph = build_graph(
             FakeRoutingLLM(
                 {
-                    "please beta": {
-                        "selected_agent": "beta_agent",
-                        "reason": "This turn should go to beta.",
+                    "please explain the docs": {
+                        "selected_agent": "knowledge_agent",
+                        "reason": "This turn should go to knowledge.",
                     }
                 }
             ),
@@ -243,7 +284,7 @@ class DeterministicIntegrationTests(unittest.TestCase):
         )
         second_state = graph.invoke(
             {
-                "messages": [HumanMessage(content="please beta")],
+                "messages": [HumanMessage(content="please explain the docs")],
                 "requested_agent": "",
                 "requested_skill_ids": [],
                 "context_paths": [],
@@ -253,7 +294,7 @@ class DeterministicIntegrationTests(unittest.TestCase):
 
         self.assertEqual(first_state["route"], "alpha_agent")
         self.assertEqual(first_state["resolved_skill_ids"], ["alpha-skill"])
-        self.assertEqual(second_state["route"], "beta_agent")
+        self.assertEqual(second_state["route"], "knowledge_agent")
         self.assertEqual(second_state["requested_skill_ids"], [])
         self.assertEqual(second_state["resolved_skill_ids"], [])
         self.assertNotIn("Explicit requested agent", second_state["route_reason"])

@@ -8,7 +8,10 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from agents.knowledge.agent import KnowledgeAgentNode
 from agents.knowledge_base_builder.agent import KnowledgeBaseBuilderAgentNode
 from agents.project_task.agent import ProjectTaskAgentNode
+from app.contracts import validate_pending_action_decision
 from app.graph import build_default_agent_registrations
+from app.pending_actions import get_pending_action_selection_options
+from app.routing.pending_action_router import PendingActionRouter
 from app.tool_registry import resolve_tool_ids_for_runtime_tools
 
 
@@ -38,19 +41,86 @@ class ReplyMapInterpreter:
             default
             or {
                 "decision": "unclear",
-                "requested_outputs": [],
-                "target_scope": {},
-                "selected_index": None,
-                "should_execute": False,
                 "reason": "The reply was ambiguous.",
-                "confidence": 0.0,
-                "interpretation_source": "llm_parser",
+                "constraints": [],
+                "selected_item_id": None,
             }
         )
 
-    def parse_pending_action_reply(self, _action, prepared_input):
-        normalized_reply = str(prepared_input.get("normalized_user_reply", "")).strip().casefold()
-        return dict(self.mapping.get(normalized_reply, self.default))
+    def parse_pending_action_decision(self, action, user_message):
+        normalized_reply = str(user_message or "").strip().casefold()
+        payload = dict(self.mapping.get(normalized_reply, self.default))
+        return validate_pending_action_decision(
+            {
+                "type": "pending_action_decision",
+                "pending_action_id": str(payload.get("pending_action_id") or action.get("id") or "").strip(),
+                "decision": str(payload.get("decision", "unclear")).strip().lower() or "unclear",
+                "notes": str(payload.get("notes") or payload.get("reason") or "").strip() or None,
+                "selected_item_id": resolve_selected_item_id(action, payload),
+                "constraints": normalize_constraints(payload),
+            }
+        )
+
+
+def build_pending_action_router(mapping: dict[str, dict], *, default: dict | None = None) -> PendingActionRouter:
+    return PendingActionRouter(ReplyMapInterpreter(mapping, default=default))
+
+
+def normalize_constraints(payload: dict[str, object]) -> list[str]:
+    raw_constraints = payload.get("constraints")
+    if isinstance(raw_constraints, list):
+        return [str(item).strip() for item in raw_constraints if str(item).strip()]
+
+    constraints: list[str] = []
+    requested_outputs = payload.get("requested_outputs")
+    if isinstance(requested_outputs, list):
+        constraints.extend(
+            f"output:{str(item).strip()}"
+            for item in requested_outputs
+            if str(item).strip()
+        )
+
+    target_scope = payload.get("target_scope")
+    if isinstance(target_scope, dict):
+        for field_name in ("files", "modules"):
+            raw_items = target_scope.get(field_name)
+            if isinstance(raw_items, list):
+                constraints.extend(
+                    f"{field_name}:{str(item).strip()}"
+                    for item in raw_items
+                    if str(item).strip()
+                )
+        skill_name = str(target_scope.get("skill_name", "")).strip()
+        if skill_name:
+            constraints.append(f"skill_name:{skill_name}")
+    return constraints
+
+
+def resolve_selected_item_id(action, payload: dict[str, object]) -> str | None:
+    selected_item_id = str(payload.get("selected_item_id", "")).strip()
+    if selected_item_id:
+        return selected_item_id
+
+    selected_index = payload.get("selected_index")
+    if not isinstance(selected_index, int) or selected_index < 0:
+        return None
+
+    options = get_pending_action_selection_options(action)
+    if selected_index >= len(options):
+        return None
+    option = options[selected_index]
+    payload_dict = option.get("payload")
+    for candidate in (
+        option.get("id"),
+        option.get("value"),
+        option.get("label"),
+        payload_dict.get("id") if isinstance(payload_dict, dict) else None,
+        str(selected_index + 1),
+    ):
+        cleaned = str(candidate or "").strip()
+        if cleaned:
+            return cleaned
+    return None
 
 
 class AgentRuntimeMigrationTests(unittest.TestCase):
@@ -71,7 +141,20 @@ class AgentRuntimeMigrationTests(unittest.TestCase):
                 },
             ],
         }
-        node = KnowledgeAgentNode(NoopLLM(), [], agent_name="knowledge_agent")
+        node = KnowledgeAgentNode(
+            NoopLLM(),
+            [],
+            pending_action_router=build_pending_action_router(
+                {
+                    "第2个": {
+                        "decision": "select",
+                        "selected_index": 1,
+                        "reason": "The user selected the second document.",
+                    }
+                }
+            ),
+            agent_name="knowledge_agent",
+        )
 
         first_result = node(
             {
@@ -146,7 +229,30 @@ class AgentRuntimeMigrationTests(unittest.TestCase):
                 }
             ],
         }
-        node = KnowledgeAgentNode(NoopLLM(), [], agent_name="knowledge_agent")
+        node = KnowledgeAgentNode(
+            NoopLLM(),
+            [],
+            pending_action_router=build_pending_action_router(
+                {
+                    "details": {
+                        "decision": "select",
+                        "selected_index": 0,
+                        "reason": "The user selected the only document.",
+                    },
+                    "that one": {
+                        "decision": "select",
+                        "selected_index": 0,
+                        "reason": "The user selected the only document.",
+                    },
+                    "详情": {
+                        "decision": "select",
+                        "selected_index": 0,
+                        "reason": "The user selected the only document.",
+                    },
+                }
+            ),
+            agent_name="knowledge_agent",
+        )
 
         first_result = node(
             {
@@ -267,7 +373,20 @@ class AgentRuntimeMigrationTests(unittest.TestCase):
                 "assignee": "Tester",
             },
         }
-        node = ProjectTaskAgentNode(NoopLLM(), [], agent_name="project_task_agent")
+        node = ProjectTaskAgentNode(
+            NoopLLM(),
+            [],
+            pending_action_router=build_pending_action_router(
+                {
+                    "details": {
+                        "decision": "select",
+                        "selected_index": 0,
+                        "reason": "The user selected the only task.",
+                    }
+                }
+            ),
+            agent_name="project_task_agent",
+        )
 
         first_result = node(
             {
@@ -487,7 +606,7 @@ class AgentRuntimeMigrationTests(unittest.TestCase):
         node = KnowledgeBaseBuilderAgentNode(
             NoopLLM(),
             [],
-            pending_action_interpreter=confirmation_interpreter,
+            pending_action_router=PendingActionRouter(confirmation_interpreter),
             agent_name="knowledge_base_builder_agent",
         )
 
@@ -561,7 +680,7 @@ class AgentRuntimeMigrationTests(unittest.TestCase):
         node = KnowledgeBaseBuilderAgentNode(
             NoopLLM(),
             [],
-            pending_action_interpreter=diff_interpreter,
+            pending_action_router=PendingActionRouter(diff_interpreter),
             agent_name="knowledge_base_builder_agent",
         )
 
@@ -631,7 +750,7 @@ class AgentRuntimeMigrationTests(unittest.TestCase):
         node = KnowledgeBaseBuilderAgentNode(
             NoopLLM(),
             [],
-            pending_action_interpreter=summary_interpreter,
+            pending_action_router=PendingActionRouter(summary_interpreter),
             agent_name="knowledge_base_builder_agent",
         )
 
@@ -702,7 +821,7 @@ class AgentRuntimeMigrationTests(unittest.TestCase):
         node = KnowledgeBaseBuilderAgentNode(
             NoopLLM(),
             [],
-            pending_action_interpreter=cancel_interpreter,
+            pending_action_router=PendingActionRouter(cancel_interpreter),
             agent_name="knowledge_base_builder_agent",
         )
 
@@ -772,7 +891,7 @@ class AgentRuntimeMigrationTests(unittest.TestCase):
         node = KnowledgeBaseBuilderAgentNode(
             NoopLLM(),
             [],
-            pending_action_interpreter=cancel_interpreter,
+            pending_action_router=PendingActionRouter(cancel_interpreter),
             agent_name="knowledge_base_builder_agent",
         )
         first_result = node(

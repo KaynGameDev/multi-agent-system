@@ -104,6 +104,27 @@ class IntentParserTests(unittest.TestCase):
         self.assertEqual(result.user_goal, "Summarize repository docs.")
         self.assertEqual(result.notes, "Documentation request.")
 
+    def test_parse_assistant_request_accepts_pascal_case_contract_type(self) -> None:
+        parser = IntentParser(
+            StructuredOutputLLM(
+                [
+                    {
+                        "type": "AssistantRequest",
+                        "user_goal": "Record new knowledge into the knowledge base.",
+                        "likely_domain": "knowledge_base_builder",
+                        "confidence": 0.97,
+                        "notes": "The user wants to sync new company knowledge.",
+                    }
+                ]
+            )
+        )
+
+        result = parser.parse_assistant_request("我想记录新知识")
+
+        self.assertEqual(result.likely_domain, "knowledge_base_builder")
+        self.assertEqual(result.user_goal, "Record new knowledge into the knowledge base.")
+        self.assertEqual(result.notes, "The user wants to sync new company knowledge.")
+
     def test_parse_assistant_request_recovers_when_model_omits_user_goal(self) -> None:
         parser = IntentParser(
             StructuredOutputLLM(
@@ -207,6 +228,34 @@ The user wants to write the discussed content into the knowledge base.
         self.assertEqual(result.pending_action_id, action["id"])
         self.assertEqual(result.decision, "select")
         self.assertEqual(result.selected_item_id, "doc_setup")
+
+    def test_parse_pending_action_decision_accepts_pascal_case_contract_type(self) -> None:
+        action = build_pending_action(
+            session_id="thread-1",
+            action_type="apply_edit",
+            requested_by_agent="general_chat_agent",
+            summary="Apply the proposed edits.",
+        )
+        parser = IntentParser(
+            StructuredOutputLLM(
+                [
+                    {
+                        "type": "PendingActionDecision",
+                        "pending_action_id": action["id"],
+                        "decision": "approve",
+                        "notes": "The user approved the pending action.",
+                        "selected_item_id": None,
+                        "constraints": [],
+                        "confidence": 0.98,
+                    }
+                ]
+            )
+        )
+
+        result = parser.parse_pending_action_decision(action, "继续")
+
+        self.assertEqual(result.decision, "approve")
+        self.assertEqual(result.pending_action_id, action["id"])
 
     def test_parse_pending_action_decision_recovers_from_raw_llm_after_structured_validation_error(self) -> None:
         action = build_pending_action(
@@ -322,6 +371,21 @@ The user approved the pending action.
         self.assertIn("我希望跟你同步一下公司知识", prompt)
         self.assertIn("请把这些内容录入到知识库", prompt)
         self.assertIn("不是记录到对话中，我要你写入知识库", prompt)
+
+    def test_assistant_request_prompt_mentions_natural_chinese_routing_examples(self) -> None:
+        prompt = build_assistant_request_prompt(
+            "知识库里目前都知道什么，我想补充还没有的部分",
+            recent_messages=["user: 关于我们公司的知识，你能教我些什么"],
+            routing_context={
+                "interface_name": "web",
+                "uploaded_files_count": 0,
+                "conversion_session_active": False,
+            },
+        )
+
+        self.assertIn("关于我们公司的知识，你能教我些什么", prompt)
+        self.assertIn("好的，请问你还需要我同步哪方面的知识呢", prompt)
+        self.assertIn("知识库里目前都知道什么，我想补充还没有的部分", prompt)
 
 
 if __name__ == "__main__":

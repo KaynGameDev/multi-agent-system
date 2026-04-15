@@ -85,6 +85,36 @@ button {
   box-shadow: 0 10px 28px rgba(15, 118, 110, 0.24);
 }
 
+.sidebar-auth {
+  margin-top: 0.65rem;
+  border-top: 1px solid var(--border);
+  padding: 0.8rem 0.3rem 0.2rem;
+}
+
+.sidebar-auth__label {
+  font-size: 0.72rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--text-soft);
+}
+
+.sidebar-auth__user {
+  margin-top: 0.35rem;
+  font-size: 0.88rem;
+  font-weight: 600;
+  color: var(--text);
+}
+
+.sidebar-auth__button {
+  margin-top: 0.65rem;
+  border: 1px solid var(--border);
+  border-radius: 0.8rem;
+  padding: 0.62rem 0.85rem;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.88);
+}
+
 .sidebar__section {
   display: flex;
   flex: 1;

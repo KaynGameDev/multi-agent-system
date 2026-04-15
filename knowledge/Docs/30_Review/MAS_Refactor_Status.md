@@ -1,164 +1,88 @@
 # MAS Refactor Status
 
-## Part 1 - Confirmation / Waiting Cleanup
+## Current Status
 
-Removed:
-- Legacy `pending_interaction` routing from the gateway and agent follow-up paths.
-- Raw-text approval regex fallback from the knowledge-base write gate.
-- Local approval/cancel regex handling from document conversion.
+The Part 2 routing refactor is complete and live.
 
-Added:
-- Shared pending-action selection and confirmation resolution in `app/pending_actions.py`.
-- Pending-action follow-up handling for knowledge, project task, KB builder, and document conversion.
-- Updated tests covering pending-action selection, KB write approval, and document conversion approve/cancel/clarification flows.
+The codebase now has one production routing story:
 
-Remains:
-- Runtime contract foundation.
-- Skill system refactor.
-- Tool-calling standardization.
-- Gateway routing cleanup.
-- Agent migration and deletion.
-- Docs, tests, and cutoff cleanup.
+- one worker agent per turn
+- `pending_action` has priority over fresh-request routing
+- fresh requests go through `AssistantRequest`
+- pending-action replies go through `PendingActionDecision`
+- the runtime emits `AgentRouteDecision`
+- top-level fallback is deterministic to `general_chat_agent`
 
-## Part 2 - Runtime Contracts Foundation
+## Completed In Part 2
 
-Removed:
-- Builder-local assumptions for pending-action and execution-contract typing.
-- Direct final-output dependence on the last message `.content` when a shared assistant response is present.
-- Some raw tool payload trust in the knowledge, project task, KB builder, and gateway follow-up paths.
+### Part 2A - Contracts and Lightweight Parser Foundation
 
-Added:
-- Shared runtime contract vocabulary in `app/contracts.py` for assistant responses, pending actions, execution contracts, skill invocations, tool invocation/result envelopes, and routing decisions.
-- Contract-aware state fields in `app/state.py`.
-- Contract-aware extraction in `app/messages.py`.
-- Registry support for skill invocation contracts in `app/skills.py`.
-- Assistant response and envelope emission in the general chat, knowledge, project task, KB builder, and document conversion agents.
-- Normalized tool-result adapters and new contract tests in `tests/test_runtime_contracts.py`.
+Completed:
 
-Remains:
-- Skill system refactor.
-- Tool-calling standardization.
-- Gateway routing cleanup.
-- Agent migration and deletion.
-- Docs, tests, and cutoff cleanup.
+- shared routing contracts in [app/contracts/](/Users/kayngame/jade_ai_core/app/contracts)
+- lightweight parser prompts in [app/interpretation/prompts/](/Users/kayngame/jade_ai_core/app/interpretation/prompts)
+- parser service in [app/interpretation/intent_parser.py](/Users/kayngame/jade_ai_core/app/interpretation/intent_parser.py)
+- schema and malformed-output tests
 
-## Part 3 - Skill System Refactor
+### Part 2B - Pending Action Routing
 
-Removed:
-- Direct agent-side `SKILL.md` body injection as the primary live execution path.
-- Hidden prompt-only skill execution semantics spread across general chat, knowledge, project task, KB builder, and document conversion prompt assembly.
+Completed:
 
-Added:
-- Shared skill runtime adapter in `app/skill_runtime.py` for active-skill filtering, runtime diagnostics, and runtime-selected `SKILL.md` instruction attachment.
-- Richer `SkillInvocationContract` metadata in `app/contracts.py` and `app/skills.py`, including skill name, description, source path, explicit invocation source, and explicit invocation reason.
-- Gateway-emitted active skill runtime state in `gateway/agent.py`, including `active_skill_invocation_contracts` and `skill_execution_diagnostics`.
-- Prompt builders that consume runtime-selected skill contracts instead of `resolved_skill_ids`.
-- Regression coverage proving prompts now read runtime contracts and that skill execution state survives routing and tool loops.
+- all active pending-action replies route through `PendingActionDecision`
+- `app/pending_actions.py` resolves validated contracts instead of raw text matching
+- ambiguous pending replies do not silently continue execution
 
-Remains:
-- Tool-calling standardization.
-- Gateway routing cleanup.
-- Agent migration and deletion.
-- Docs, tests, and cutoff cleanup.
+### Part 2C - Top-Level Request Routing
 
-## Part 4 - Tool Calling Standardization
+Completed:
 
-Removed:
-- More agent-local `ToolMessage` parsing assumptions spread across knowledge, project task, and KB builder.
-- The document-conversion path fully bypassing shared tool invocation/result envelopes for its main internal workflow steps.
+- fresh requests route through `AssistantRequest`
+- domains map through [app/routing/domain_map.py](/Users/kayngame/jade_ai_core/app/routing/domain_map.py)
+- the gateway emits `AgentRouteDecision`
 
-Added:
-- Shared tool runtime adapter in `app/tool_runtime.py` for:
-  - normalizing model-emitted tool invocations
-  - reconstructing `ToolNode` results from `ToolMessage` plus prior tool-call context
-  - wrapping internal workflow operations with the same invocation/result envelope model
-- Richer tool envelopes in `app/contracts.py`, including tool metadata, execution backend, and tool execution trace records.
-- Tool metadata entries for internal document-conversion operations in `app/tool_registry.py`.
-- Standardized tool-result consumption in:
-  - `agents/knowledge/agent.py`
-  - `agents/project_task/agent.py`
-  - `agents/knowledge_base_builder/agent.py`
-- Internal tool-envelope wrapping for document conversion ingestion, draft extraction, staging, and publishing in `agents/document_conversion/agent.py`.
-- Runtime tool execution trace state in `app/state.py`.
-- Regression coverage for ToolMessage adaptation and internal publish envelopes in `tests/test_runtime_contracts.py` and `tests/test_document_conversion_confirmation.py`.
+### Part 2D - Shadow Mode
 
-Remains:
-- Gateway routing cleanup.
-- Agent migration and deletion.
-- Docs, tests, and cutoff cleanup.
+Completed and removed:
 
-## Part 5 - Gateway Routing Cleanup
+- parser-vs-legacy shadow comparison ran during the migration
+- shadow-only comparison code has been deleted after switchover
 
-Removed:
-- The single-file gateway hotspot carrying normalization, routing precedence, tool-intent parsing, matcher orchestration, and skill-selection helpers all in `gateway/agent.py`.
-- Any remaining live gateway routing dependence on legacy `pending_interaction`.
+### Part 2E - Production Switchover
 
-Added:
-- Focused gateway policy modules:
-  - `gateway/routing_policy.py` for routing-order execution, fallback handling, and policy-step diagnostics
-  - `gateway/skill_policy.py` for explicit skill resolution, skill eligibility, and deterministic auto-skill selection
-  - `gateway/tool_intent.py` for tool-intent metadata detection and routing
-  - `gateway/matchers.py` for agent matcher definitions and matcher execution helpers
-  - `gateway/text_utils.py` for shared normalization and greeting detection
-- Explicit routing policy-step diagnostics via `route_policy_step` state and `routing_decision.policy_step`.
-- Regression coverage in `tests/test_gateway.py` that freezes the audited precedence order across:
-  - requested agent
-  - explicit forked-skill delegates
-  - forked-skill fallback
-  - explicit inline-skill-compatible routing
-  - pending-action owner short-circuit
-  - tool-intent routing
-  - deterministic matcher routing
-  - general fallback
-- Contract support for structured routing policy-step reporting in `app/contracts.py`.
+Completed:
 
-Remains:
-- Agent migration and deletion.
-- Docs, tests, and cutoff cleanup.
+- parser-based routing is the only production top-level text route-selection path
+- legacy heuristic text routing is no longer used by the gateway
+- deterministic fallback remains explicit and logged
 
-## Part 6 - Agent Migration and Legacy Deletion
+### Part 2F - Docs, Tests, and Hardening
 
-Removed:
-- The unused legacy pending-interaction compatibility module at `app/pending_interactions.py`.
-- The legacy-named `tests/test_pending_interactions.py` suite in favor of current-runtime migration coverage.
-- Builder-local retry-tool reconstruction helpers and duplicate latest-user-text parsing now superseded by shared runtime helpers.
-- The project-task agent's model-dependent tool-result summarization path for task-list results.
+Completed:
 
-Added:
-- Shared pending-action tool reconstruction helpers in `app/tool_runtime.py` so agents can replay confirmed tool calls without private adapters.
-- Shared message-content extraction usage across knowledge, KB builder, project task, and document conversion via `app/messages.py`.
-- Deterministic tool-result rendering for `agents/project_task/agent.py`, including pending-action setup from shared tool envelopes before any LLM fallback path.
-- Migration regression coverage in `tests/test_agent_runtime_migration.py` for:
-  - knowledge selection follow-ups
-  - deterministic project-task rendering and follow-up selection
-  - KB builder pending-action confirmation / diff / cancel behavior
-  - default registration tool-id consistency
+- architecture docs updated to match live routing
+- routing README added
+- parser failure logging added
+- confidence thresholds centralized through parser config
+- routing regression coverage kept for knowledge, project task, KB builder, document conversion, pending actions, and fallback paths
 
-Remains:
-- Docs, tests, and cutoff cleanup.
+## Current Runtime Notes
 
-## Part 7 - Docs, Tests, and Legacy Cutoff
+The parser is allowed to:
 
-Removed:
-- Migration-era wording that still described runtime-selected skill instructions as a temporary legacy compatibility adapter.
-- Final live references that implied old waiting or prompt-only routing models were still supported runtime behavior.
+- interpret user intent into a routing contract
+- interpret pending-action replies into a pending-action contract
+- express uncertainty through confidence and notes
 
-Added:
-- A rewritten [ARCHITECTURE.md](/Users/kayngame/jade_ai_core/ARCHITECTURE.md) that documents:
-  - user turn flow
-  - routing order
-  - pending actions and execution contracts
-  - skill invocation contracts
-  - tool invocation/result envelopes
-  - agent boundaries
-  - explicit legacy cutoff
-- README runtime-model updates in [README.md](/Users/kayngame/jade_ai_core/README.md).
-- Additional regression coverage for:
-  - ambiguous knowledge follow-ups blocking execution deterministically
-  - ambiguous project-task follow-ups blocking execution deterministically
-  - ambiguous KB-builder confirmations blocking execution deterministically
-  - finalized skill prompt wording in `tests/test_skills.py`
-- Explicit legacy cutoff notes stating that `pending_interaction`, regex-only approval paths, and prompt-only skill routing are no longer supported live runtime systems.
+The parser is not allowed to:
 
-Remains:
-- No remaining refactor parts in this execution plan.
+- call tools
+- execute actions
+- choose arbitrary workflows
+- bypass contract validation
+
+## Follow-On Work
+
+Likely future work after Part 2:
+
+- skill/tool standardization on top of the stabilized routing model
+- cleanup of any remaining dead heuristic-era helper modules outside the live path

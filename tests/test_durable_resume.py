@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import os
+import sqlite3
 import tempfile
 import unittest
 from pathlib import Path
@@ -15,6 +16,8 @@ from agents.project_task.agent import ProjectTaskAgentNode
 from app.checkpoints import build_checkpoint_store
 from app.graph import build_graph
 from app.main import bootstrap_system
+from app.routing.agent_router import AgentRouter
+from app.routing.pending_action_router import PendingActionRouter
 from interfaces.web.server import WebServer
 from tests.common import build_registration, make_settings
 
@@ -177,15 +180,23 @@ class DurableResumeTests(unittest.TestCase):
             "GOOGLE_APPLICATION_CREDENTIALS": "/tmp/credentials.json",
             "JADE_PROJECT_SHEET_ID": "sheet-id",
             "CONVERSION_WORK_DIR": str(runtime_dir),
+            "ASSISTANT_REQUEST_PARSER_CONFIDENCE_THRESHOLD": "0.60",
+            "PENDING_ACTION_PARSER_CONFIDENCE_THRESHOLD": "0.75",
         }
         captured_checkpointers = []
+        captured_agent_routers = []
+        captured_pending_action_routers = []
+        primary_llm = object()
+        parser_llm = object()
 
         def fake_build_agent_graph(_llm, **kwargs):
             captured_checkpointers.append(kwargs["checkpointer"])
+            captured_agent_routers.append(kwargs["agent_router"])
+            captured_pending_action_routers.append(kwargs["pending_action_router"])
             return object()
 
         with patch.dict(os.environ, env, clear=False):
-            with patch("app.main.build_runtime_llms", return_value=(object(), object())):
+            with patch("app.main.build_runtime_llms", return_value=(primary_llm, parser_llm)):
                 with patch("app.main.build_agent_graph", side_effect=fake_build_agent_graph):
                     with patch("app.main.build_web_agent_registrations", return_value=()):
                         with patch("app.main.WebServer", side_effect=lambda *args, **kwargs: DummyListener()):
@@ -195,6 +206,16 @@ class DurableResumeTests(unittest.TestCase):
         self.assertEqual(len(captured_checkpointers), 2)
         self.assertTrue(all(isinstance(checkpointer, SqliteSaver) for checkpointer in captured_checkpointers))
         self.assertIs(captured_checkpointers[0], captured_checkpointers[1])
+        self.assertEqual(len(captured_agent_routers), 2)
+        self.assertTrue(all(isinstance(router, AgentRouter) for router in captured_agent_routers))
+        self.assertIs(captured_agent_routers[0], captured_agent_routers[1])
+        self.assertIs(captured_agent_routers[0].parser.llm, parser_llm)
+        self.assertEqual(len(captured_pending_action_routers), 2)
+        self.assertTrue(all(isinstance(router, PendingActionRouter) for router in captured_pending_action_routers))
+        self.assertIs(captured_pending_action_routers[0], captured_pending_action_routers[1])
+        self.assertIs(captured_pending_action_routers[0].parser.llm, parser_llm)
+        self.assertEqual(captured_agent_routers[0].parser.config.confidence_threshold, 0.60)
+        self.assertEqual(captured_pending_action_routers[0].parser.config.confidence_threshold, 0.75)
 
     def test_web_resume_persists_across_restart(self) -> None:
         checkpoint_store = self._track_resource(build_checkpoint_store(self.settings))
@@ -283,6 +304,38 @@ class DurableResumeTests(unittest.TestCase):
         )
         self.assertEqual(len(resumed_graph.last_state["messages"]), 3)
 
+    def test_web_recovers_when_checkpoint_write_reports_sqlite_corruption(self) -> None:
+        checkpoint_store = self._track_resource(build_checkpoint_store(self.settings))
+        graph = self._build_counting_graph(checkpoint_store.saver)
+        client = self._create_client(graph, checkpoint_store=checkpoint_store)
+        conversation = client.post("/api/conversations", json={"title": "Corrupted checkpoint write"}).json()
+
+        original_put = SqliteSaver.put
+        put_call_count = {"count": 0}
+
+        def flaky_put(self, config, checkpoint, metadata, new_versions):
+            if put_call_count["count"] == 0:
+                put_call_count["count"] += 1
+                raise sqlite3.DatabaseError("database disk image is malformed")
+            put_call_count["count"] += 1
+            return original_put(self, config, checkpoint, metadata, new_versions)
+
+        with patch.object(SqliteSaver, "put", new=flaky_put):
+            response = client.post(
+                f"/api/conversations/{conversation['conversation_id']}/messages",
+                json={"message": "hello", "display_name": "Tester", "email": "tester@example.com"},
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("human_count=1", response.json()["assistant_message"]["markdown"])
+        self.assertGreaterEqual(put_call_count["count"], 2)
+        quarantined = list(
+            checkpoint_store.database_path.parent.glob(
+                f"{checkpoint_store.database_path.name}.corrupt.*"
+            )
+        )
+        self.assertTrue(quarantined)
+
     def test_persistent_checkpoint_preserves_tool_state_across_restart(self) -> None:
         checkpoint_store = self._track_resource(build_checkpoint_store(self.settings))
         registrations = (
@@ -318,7 +371,8 @@ class DurableResumeTests(unittest.TestCase):
             },
             config=thread_config,
         )
-        self.assertIn("short task summary", first_state["messages"][-1].content.lower())
+        self.assertIn("Tasks due today for Tester", first_state["messages"][-1].content)
+        self.assertIn("Ship durable memory", first_state["messages"][-1].content)
 
         checkpoint_store.close()
         self._resources_to_close.remove(checkpoint_store)
@@ -342,8 +396,7 @@ class DurableResumeTests(unittest.TestCase):
             config=thread_config,
         )
 
-        self.assertIn("Ship durable memory", second_state["messages"][-1].content)
-        self.assertIn("Tasks due today for Tester", second_state["messages"][-1].content)
+        self.assertIn("short task summary", second_state["messages"][-1].content.lower())
 
     def test_slack_style_thread_id_resumes_after_restart(self) -> None:
         checkpoint_store = self._track_resource(build_checkpoint_store(self.settings))

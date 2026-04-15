@@ -9,6 +9,9 @@ from unittest.mock import patch
 from langchain_core.messages import AIMessage, HumanMessage
 
 from agents.document_conversion.agent import DocumentConversionAgentNode, build_conversion_pending_action
+from app.contracts import validate_pending_action_decision
+from app.pending_actions import get_pending_action_selection_options
+from app.routing.pending_action_router import PendingActionRouter
 from tests.common import make_settings
 
 
@@ -23,12 +26,73 @@ class ConversionLLM:
         return AIMessage(content="rendered")
 
 
-class StaticInterpreter:
+class StaticDecisionParser:
     def __init__(self, parsed_reply: dict) -> None:
         self.parsed_reply = dict(parsed_reply)
 
-    def parse_pending_action_reply(self, _action, _prepared_input):
-        return dict(self.parsed_reply)
+    def parse_pending_action_decision(self, action, _user_message):
+        return validate_pending_action_decision(
+            {
+                "type": "pending_action_decision",
+                "pending_action_id": str(self.parsed_reply.get("pending_action_id") or action.get("id") or "").strip(),
+                "decision": str(self.parsed_reply.get("decision", "unclear")).strip().lower() or "unclear",
+                "notes": str(self.parsed_reply.get("notes") or self.parsed_reply.get("reason") or "").strip() or None,
+                "selected_item_id": resolve_selected_item_id(action, self.parsed_reply),
+                "constraints": normalize_constraints(self.parsed_reply),
+            }
+        )
+
+
+def normalize_constraints(parsed_reply: dict) -> list[str]:
+    raw_constraints = parsed_reply.get("constraints")
+    if isinstance(raw_constraints, list):
+        return [str(item).strip() for item in raw_constraints if str(item).strip()]
+
+    constraints: list[str] = []
+    requested_outputs = parsed_reply.get("requested_outputs")
+    if isinstance(requested_outputs, list):
+        constraints.extend(
+            f"output:{str(item).strip()}"
+            for item in requested_outputs
+            if str(item).strip()
+        )
+
+    target_scope = parsed_reply.get("target_scope")
+    if isinstance(target_scope, dict):
+        for field_name in ("files", "modules"):
+            raw_items = target_scope.get(field_name)
+            if isinstance(raw_items, list):
+                constraints.extend(
+                    f"{field_name}:{str(item).strip()}"
+                    for item in raw_items
+                    if str(item).strip()
+                )
+    return constraints
+
+
+def resolve_selected_item_id(action, parsed_reply: dict) -> str | None:
+    selected_item_id = str(parsed_reply.get("selected_item_id", "")).strip()
+    if selected_item_id:
+        return selected_item_id
+
+    selected_index = parsed_reply.get("selected_index")
+    if not isinstance(selected_index, int) or selected_index < 0:
+        return None
+
+    options = get_pending_action_selection_options(action)
+    if selected_index >= len(options):
+        return None
+    option = options[selected_index]
+    for candidate in (
+        option.get("id"),
+        option.get("value"),
+        option.get("label"),
+        str(selected_index + 1),
+    ):
+        cleaned = str(candidate or "").strip()
+        if cleaned:
+            return cleaned
+    return None
 
 
 class DocumentConversionConfirmationTests(unittest.TestCase):
@@ -77,7 +141,8 @@ class DocumentConversionConfirmationTests(unittest.TestCase):
 
     def test_document_conversion_pending_action_publishes_on_approval(self) -> None:
         node, session = self._build_node_and_session()
-        node.pending_action_interpreter = StaticInterpreter(
+        node.pending_action_router = PendingActionRouter(
+            StaticDecisionParser(
             {
                 "decision": "approve",
                 "requested_outputs": [],
@@ -88,6 +153,7 @@ class DocumentConversionConfirmationTests(unittest.TestCase):
                 "confidence": 0.97,
                 "interpretation_source": "llm_parser",
             }
+            )
         )
         pending_action = self._build_pending_action(session)
 
@@ -108,6 +174,12 @@ class DocumentConversionConfirmationTests(unittest.TestCase):
                     },
                     session=session,
                     pending_action=pending_action,
+                    pending_action_turn=node.pending_action_router.resolve_turn(
+                        {
+                            "messages": [HumanMessage(content="approve")],
+                            "pending_action": pending_action,
+                        }
+                    ),
                     preferred_language="en",
                 )
 
@@ -126,7 +198,8 @@ class DocumentConversionConfirmationTests(unittest.TestCase):
 
     def test_document_conversion_pending_action_cancels(self) -> None:
         node, session = self._build_node_and_session()
-        node.pending_action_interpreter = StaticInterpreter(
+        node.pending_action_router = PendingActionRouter(
+            StaticDecisionParser(
             {
                 "decision": "reject",
                 "requested_outputs": [],
@@ -137,6 +210,7 @@ class DocumentConversionConfirmationTests(unittest.TestCase):
                 "confidence": 0.97,
                 "interpretation_source": "llm_parser",
             }
+            )
         )
         pending_action = self._build_pending_action(session)
 
@@ -147,6 +221,12 @@ class DocumentConversionConfirmationTests(unittest.TestCase):
                 },
                 session=session,
                 pending_action=pending_action,
+                pending_action_turn=node.pending_action_router.resolve_turn(
+                    {
+                        "messages": [HumanMessage(content="cancel")],
+                        "pending_action": pending_action,
+                    }
+                ),
                 preferred_language="en",
             )
 
@@ -168,6 +248,12 @@ class DocumentConversionConfirmationTests(unittest.TestCase):
             },
             session=session,
             pending_action=pending_action,
+            pending_action_turn=PendingActionRouter().resolve_turn(
+                {
+                    "messages": [HumanMessage(content="maybe later")],
+                    "pending_action": pending_action,
+                }
+            ),
             preferred_language="en",
         )
 
@@ -179,7 +265,8 @@ class DocumentConversionConfirmationTests(unittest.TestCase):
 
     def test_document_conversion_pending_action_requires_reapproval_when_staged_package_changes(self) -> None:
         node, session = self._build_node_and_session()
-        node.pending_action_interpreter = StaticInterpreter(
+        node.pending_action_router = PendingActionRouter(
+            StaticDecisionParser(
             {
                 "decision": "approve",
                 "requested_outputs": [],
@@ -190,6 +277,7 @@ class DocumentConversionConfirmationTests(unittest.TestCase):
                 "confidence": 0.97,
                 "interpretation_source": "llm_parser",
             }
+            )
         )
         pending_action = self._build_pending_action(session)
         staged_package = Path(session.staged_package_path)
@@ -203,6 +291,12 @@ class DocumentConversionConfirmationTests(unittest.TestCase):
                     },
                     session=session,
                     pending_action=pending_action,
+                    pending_action_turn=node.pending_action_router.resolve_turn(
+                        {
+                            "messages": [HumanMessage(content="approve")],
+                            "pending_action": pending_action,
+                        }
+                    ),
                     preferred_language="en",
                 )
 

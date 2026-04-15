@@ -67,7 +67,6 @@ data/knowledge/*
 
 # Conversion workflow state
 data/conversion/
-data/monitoring/
 
 # PyInstaller
 *.manifest

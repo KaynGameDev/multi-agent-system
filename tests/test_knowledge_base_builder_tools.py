@@ -8,6 +8,7 @@ from pathlib import Path
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
+from agents.knowledge_base_builder.agent import KnowledgeBaseBuilderAgentNode, build_knowledge_base_builder_prompt
 from app.config import load_settings
 from app.graph import build_default_agent_registrations
 from app.knowledge_paths import build_knowledge_markdown_relative_path
@@ -15,17 +16,35 @@ from app.pending_actions import (
     build_pending_action,
     build_write_knowledge_approval_payload,
     compute_approval_payload_hash,
-    resolve_pending_action_reply,
+    resolve_pending_action_decision,
 )
+from app.contracts import validate_pending_action_decision
 from tools.knowledge_base import resolve_knowledge_markdown_path, write_knowledge_markdown_document
 
 
-class StaticInterpreter:
-    def __init__(self, parsed_reply: dict) -> None:
-        self.parsed_reply = dict(parsed_reply)
-
-    def parse_pending_action_reply(self, _action, _prepared_input):
-        return dict(self.parsed_reply)
+def build_execution_contract(
+    pending_action: dict[str, object],
+    *,
+    decision: str = "approve",
+    notes: str = "The user approved the write.",
+) -> dict[str, object]:
+    resolved = resolve_pending_action_decision(
+        pending_action,
+        validate_pending_action_decision(
+            {
+                "type": "pending_action_decision",
+                "pending_action_id": str(pending_action["id"]),
+                "decision": decision,
+                "notes": notes,
+                "selected_item_id": None,
+                "constraints": [],
+            }
+        ),
+        user_text="approve",
+    )
+    contract = resolved["contract"]
+    assert contract is not None
+    return contract
 
 
 class KnowledgeBaseBuilderToolTests(unittest.TestCase):
@@ -124,22 +143,7 @@ class KnowledgeBaseBuilderToolTests(unittest.TestCase):
             relative_path=resolved["relative_path"],
             content="# 射击塔防组概览\n\n测试内容。\n",
         )
-        execution_contract = resolve_pending_action_reply(
-            pending_action,
-            "approve",
-            interpreter=StaticInterpreter(
-                {
-                    "decision": "approve",
-                    "requested_outputs": [],
-                    "target_scope": {},
-                    "selected_index": None,
-                    "should_execute": True,
-                    "reason": "The user approved the write.",
-                    "confidence": 0.99,
-                    "interpretation_source": "llm_parser",
-                }
-            ),
-        )["contract"]
+        execution_contract = build_execution_contract(pending_action)
 
         written = write_knowledge_markdown_document.func(
             relative_path=resolved["relative_path"],
@@ -199,22 +203,7 @@ class KnowledgeBaseBuilderToolTests(unittest.TestCase):
             relative_path=relative_path,
             content="# Contract\n\nApproved.\n",
         )
-        execution_contract = resolve_pending_action_reply(
-            pending_action,
-            "continue",
-            interpreter=StaticInterpreter(
-                {
-                    "decision": "approve",
-                    "requested_outputs": [],
-                    "target_scope": {},
-                    "selected_index": None,
-                    "should_execute": True,
-                    "reason": "The user approved the write.",
-                    "confidence": 0.99,
-                    "interpretation_source": "llm_parser",
-                }
-            ),
-        )["contract"]
+        execution_contract = build_execution_contract(pending_action)
 
         written = write_knowledge_markdown_document.func(
             relative_path=relative_path,
@@ -250,22 +239,7 @@ class KnowledgeBaseBuilderToolTests(unittest.TestCase):
             content=approved_content,
             overwrite=False,
         )
-        execution_contract = resolve_pending_action_reply(
-            pending_action,
-            "continue",
-            interpreter=StaticInterpreter(
-                {
-                    "decision": "approve",
-                    "requested_outputs": [],
-                    "target_scope": {},
-                    "selected_index": None,
-                    "should_execute": True,
-                    "reason": "The user approved the write.",
-                    "confidence": 0.99,
-                    "interpretation_source": "llm_parser",
-                }
-            ),
-        )["contract"]
+        execution_contract = build_execution_contract(pending_action)
 
         changed_path = write_knowledge_markdown_document.func(
             relative_path="Docs/10_GameLines/BuYuDaLuanDou/LineOverview/Different.md",
@@ -303,6 +277,70 @@ class KnowledgeBaseBuilderToolTests(unittest.TestCase):
                 "resolve_knowledge_markdown_path",
                 "write_knowledge_markdown_document",
             },
+        )
+
+    def test_builder_prompt_requires_distinguishing_recorded_context_from_real_file_write(self) -> None:
+        prompt = build_knowledge_base_builder_prompt(
+            {
+                "messages": [],
+                "interface_name": "web",
+            },
+            agent_name="knowledge_base_builder_agent",
+        )
+
+        self.assertIn("不要说“已保存”", prompt)
+        self.assertIn("已记录在当前会话", prompt)
+
+    def test_builder_normalizes_structured_content_blocks_from_model(self) -> None:
+        class StructuredContentLLM:
+            def bind_tools(self, _tools):
+                return self
+
+            def invoke(self, _messages):
+                return AIMessage(
+                    content=[
+                        {
+                            "type": "text",
+                            "text": "没问题，我已准备好。",
+                            "extras": {"signature": "signed-block"},
+                        },
+                        {
+                            "type": "text",
+                            "text": "请告诉我这次要同步的主题。",
+                        },
+                    ]
+                )
+
+        node = KnowledgeBaseBuilderAgentNode(
+            StructuredContentLLM(),
+            [],
+            agent_name="knowledge_base_builder_agent",
+        )
+
+        result = node(
+            {
+                "messages": [HumanMessage(content="我希望跟你同步一下公司知识")],
+                "interface_name": "web",
+            }
+        )
+
+        self.assertEqual(
+            result["assistant_response"]["content"],
+            "没问题，我已准备好。\n请告诉我这次要同步的主题。",
+        )
+        self.assertEqual(
+            result["messages"][-1].content,
+            [
+                {
+                    "type": "text",
+                    "text": "没问题，我已准备好。",
+                    "extras": {"signature": "signed-block"},
+                },
+                {
+                    "type": "text",
+                    "text": "请告诉我这次要同步的主题。",
+                },
+            ],
         )
 
 

@@ -15,6 +15,7 @@ from app.config import (
     DEFAULT_OPENAI_MODEL,
     load_settings,
     validate_core_settings,
+    validate_interface_settings,
 )
 from app.llm_factory import build_chat_model, build_runtime_llms
 from tests.common import make_settings
@@ -48,6 +49,8 @@ class LLMConfigTests(unittest.TestCase):
         self.assertTrue(settings.llm_http_trust_env)
         self.assertEqual(settings.pending_action_parser_model, "gemini-generic-test")
         self.assertEqual(settings.pending_action_parser_temperature, 0.0)
+        self.assertEqual(settings.assistant_request_parser_confidence_threshold, 0.6)
+        self.assertEqual(settings.pending_action_parser_confidence_threshold, 0.75)
 
     def test_minimax_provider_uses_expected_defaults(self) -> None:
         with patch.dict(
@@ -91,6 +94,45 @@ class LLMConfigTests(unittest.TestCase):
         self.assertEqual(settings.openai_base_url, DEFAULT_OPENAI_BASE_URL)
         self.assertEqual(settings.pending_action_parser_model, DEFAULT_OPENAI_MODEL)
         self.assertEqual(settings.pending_action_parser_temperature, 0.0)
+
+    def test_web_auth_settings_parse_credentials_and_allowed_hosts(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "WEB_ENABLED": "true",
+                "SLACK_ENABLED": "false",
+                "WEB_ALLOWED_HOSTS": "jade.example.com,chat.internal.example.com",
+                "WEB_AUTH_ENABLED": "true",
+                "WEB_AUTH_SESSION_SECRET": "session-secret",
+                "WEB_AUTH_CREDENTIALS": "jade:secret-pass,ops:other-pass",
+                "WEB_AUTH_COOKIE_SECURE": "false",
+                "GOOGLE_API_KEY": "test-google-key",
+                "GOOGLE_APPLICATION_CREDENTIALS": "/tmp/credentials.json",
+                "JADE_PROJECT_SHEET_ID": "sheet-id",
+            },
+            clear=True,
+        ):
+            settings = load_settings(force_reload=True)
+
+        self.assertEqual(settings.web_allowed_hosts, ("jade.example.com", "chat.internal.example.com"))
+        self.assertTrue(settings.web_auth_enabled)
+        self.assertFalse(settings.web_auth_cookie_secure)
+        self.assertEqual(
+            tuple(credential.username for credential in settings.web_auth_credentials),
+            ("jade", "ops"),
+        )
+
+    def test_validate_interface_settings_requires_auth_secret_when_web_auth_enabled(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            settings = replace(
+                make_settings(Path(tempdir)),
+                web_auth_enabled=True,
+                web_auth_credentials=(),
+                web_auth_session_secret="",
+            )
+
+        with self.assertRaisesRegex(RuntimeError, "WEB_AUTH_SESSION_SECRET"):
+            validate_interface_settings(settings)
 
     def test_validate_core_settings_requires_only_selected_provider_key(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

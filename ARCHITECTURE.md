@@ -2,403 +2,212 @@
 
 ## Overview
 
-Jade is a deterministic multi-agent assistant built on LangGraph. It serves internal company users through Slack and web chat, routes each turn through an explicit gateway policy, and standardizes confirmations, skill execution, tool execution, and final responses through shared runtime contracts.
+Jade is a LangGraph-based multi-agent assistant with one production routing story:
 
-The supported runtime model is:
+1. Interfaces add the user turn into state.
+2. The gateway selects exactly one worker agent for the turn.
+3. If an active `pending_action` exists, it has priority over fresh-request routing.
+4. Otherwise, a lightweight parser converts the user turn into an `AssistantRequest`.
+5. The gateway maps that contract to one worker agent and falls back deterministically to `general_chat_agent` when needed.
+6. The selected worker agent handles the turn and may enter a tool loop, but the gateway is not re-run inside that same turn.
 
-1. Interfaces collect request context and append messages.
-2. The gateway chooses the worker agent deterministically.
-3. The worker agent either handles a pending action, renders a standardized tool result, or invokes the model.
-4. Tool execution flows through one shared envelope model.
-5. The final user-visible answer is emitted through `assistant_response`.
+The runtime no longer uses legacy top-level heuristic text matching for production routing.
 
-The runtime no longer relies on legacy waiting models or prompt-only routing semantics.
+## Runtime Model
 
-## Core Layers
+### One Worker Agent Per Turn
 
-### Interfaces
+Every turn executes exactly one worker agent after the gateway finishes route selection.
 
-Interfaces are delivery boundaries only.
+- The gateway writes `route`, `route_reason`, `route_policy_step`, `agent_route_decision`, and `routing_decision`.
+- The graph dispatches to the selected worker node once.
+- If that worker uses LangGraph tools, the tool loop returns to the same worker agent.
 
-- Slack: `interfaces/slack/listener.py`
-- Web: `interfaces/web/server.py`
+### Pending-Action Priority
 
-Interface responsibilities:
+`PendingAction` is the only waiting/confirmation model.
 
-- receive inbound events
-- resolve user and thread metadata
-- append user messages to graph state
-- invoke the graph
-- format the final response for the target channel
+At turn start:
 
-Interfaces do not force worker routes. They pass request context to the gateway and return gateway diagnostics to the caller.
+1. The gateway checks for an active `pending_action`.
+2. If present, `PendingActionRouter` parses the reply into `PendingActionDecision`.
+3. If the decision continues the pending action, the gateway routes back to the owning agent.
+4. If the decision is `unrelated`, the gateway stops the pending-action path and treats the turn as a fresh request.
 
-### Graph
+This keeps confirmation, selection, clarification, and cancellation flows deterministic across agents.
 
-The orchestration graph is defined in `app/graph.py`.
+### Fresh-Request Parser Flow
 
-Current flow:
+When there is no active pending-action continuation to honor:
 
-```text
-START
-  -> gateway
-  -> selected worker agent
-  -> optional ToolNode loop
-  -> END
-```
+1. `IntentParser.parse_assistant_request(...)` produces an `AssistantRequest`.
+2. The contract is validated.
+3. `AgentRouter` maps `likely_domain` through the shared domain map.
+4. The gateway emits `AgentRouteDecision`.
+5. The selected worker agent executes.
 
-Agents with LangGraph tools loop through their `ToolNode` and then return to the same agent. The gateway is not rerun inside the same tool loop.
+Supported top-level domains:
 
-### Gateway
+- `general`
+- `knowledge`
+- `project_task`
+- `knowledge_base_builder`
+- `document_conversion`
 
-The gateway is a deterministic policy layer implemented across:
+Domain mapping lives in [app/routing/domain_map.py](/Users/kayngame/jade_ai_core/app/routing/domain_map.py).
 
-- `gateway/agent.py`
-- `gateway/routing_policy.py`
-- `gateway/skill_policy.py`
-- `gateway/tool_intent.py`
-- `gateway/matchers.py`
-- `gateway/text_utils.py`
+### Deterministic Fallback
 
-The gateway owns:
+If the top-level parser output is invalid, low-confidence, missing a supported domain, or maps to an unavailable agent, the runtime falls back to `general_chat_agent`.
 
-- agent routing order
-- requested-agent handling
-- skill-based delegation
-- pending-action owner short-circuits
-- tool-intent routing
-- deterministic matcher routing
-- fallback policy
-- routing diagnostics
-
-### Shared Runtime
-
-Shared runtime modules define the supported control model:
-
-- `app/contracts.py`
-- `app/state.py`
-- `app/messages.py`
-- `app/pending_actions.py`
-- `app/skill_runtime.py`
-- `app/tool_runtime.py`
-- `app/skills.py`
-- `app/tool_registry.py`
-
-Agents are expected to differ by prompt, tools, and business purpose, not by private confirmation or tool-result semantics.
-
-## Turn Flow
-
-### 1. Request enters state
-
-Interfaces populate graph state with:
-
-- `messages`
-- thread and user metadata
-- uploaded file metadata when present
-- optional `requested_agent`
-- optional `requested_skill_ids`
-- optional `context_paths`
-
-### 2. Gateway resolves the route
-
-The gateway preserves this routing order:
-
-1. explicit requested agent
-2. explicit forked-skill delegates
-3. forked-skill fallback to `GeneralAssistant`
-4. explicit inline-skill-compatible agents
-5. active pending-action owner
-6. tool-intent metadata match
-7. deterministic matcher scores
-8. general-assistant fallback
-
-The gateway records:
+Fallback is explicit in:
 
 - `route`
 - `route_reason`
 - `route_policy_step`
-- `routing_decision`
-- `skill_resolution_diagnostics`
+- `agent_route_decision.fallback_used`
 - `agent_selection_diagnostics`
-- `selection_warnings`
 
-### 3. Gateway emits active skill contracts
+## Core Contracts
 
-The gateway resolves explicit and automatic skill matches into `SkillInvocationContract` entries and stores:
+Contracts live in [app/contracts/](/Users/kayngame/jade_ai_core/app/contracts).
 
-- `skill_invocation_contracts`
-- `active_skill_invocation_contracts`
-- `skill_execution_diagnostics`
-- `resolved_skill_ids`
+### `AssistantRequest`
 
-The contract is the source of truth for what skill ran, why it ran, and which agent executes it.
+Used only for fresh top-level requests.
 
-### 4. Worker agent handles the turn
+Fields:
 
-Each worker agent follows the same runtime shape:
+- `type = "assistant_request"`
+- `user_goal`
+- `likely_domain`
+- `confidence`
+- `notes`
 
-1. if this agent owns an active `pending_action`, resolve the user's reply through the shared pending-action interpreter
-2. else, if the latest message is a standardized tool result, render it deterministically when appropriate
-3. else, build the prompt and invoke the model
+### `PendingActionDecision`
 
-### 5. Tool execution uses one envelope model
+Used only when an active `pending_action` exists.
 
-Tool calls are normalized into `ToolInvocationEnvelope`.
+Fields:
 
-Tool results are normalized into `ToolResultEnvelope`.
+- `type = "pending_action_decision"`
+- `pending_action_id`
+- `decision`
+- `notes`
+- `selected_item_id`
+- `constraints`
 
-Both LangGraph `ToolNode` results and internal document-conversion workflow steps use the same envelope fields, including:
+Supported `decision` values:
 
-- tool name
-- tool id
-- display name
-- tool family
-- execution backend
-- arguments
-- status
-- payload
-- diagnostics
-- source
-- reason
-- tool call id
-
-The runtime also records `tool_execution_trace` so the final state can explain which tool-like operations ran during the turn.
-
-### 6. Final answer is emitted through `assistant_response`
-
-The final state may still contain raw messages, but `assistant_response` is the canonical structured output. `app/messages.py` prefers `assistant_response` content over the last raw message when extracting the final answer.
-
-## Shared Runtime Contracts
-
-The contract vocabulary lives in `app/contracts.py`.
-
-### Assistant response
-
-`AssistantResponse` is the final structured output container. It may carry:
-
-- final text content
-- active `pending_action`
-- `execution_contract`
-- selected `skill_invocation`
-- `tool_invocation`
-- `tool_result`
-- `routing_decision`
-
-### Pending action
-
-`PendingAction` is the only supported waiting/confirmation model.
-
-It describes:
-
-- what the system wants to do
-- which agent requested it
-- the scoped target
-- the risk level
-- any selection options or follow-up metadata
-
-### Execution contract
-
-When the user replies to a pending action, the runtime interprets that reply into an `ExecutionContract` and validates it into one of these runtime actions:
-
-- `execute`
-- `cancel`
-- `request_revision`
-- `ask_clarification`
+- `approve`
+- `reject`
+- `modify`
 - `select`
+- `unrelated`
+- `unclear`
 
-This lets all agents share the same deterministic confirmation model.
+### `AgentRouteDecision`
 
-### Skill invocation contract
+Produced by the runtime router after parsing.
 
-`SkillInvocationContract` captures:
+Fields:
 
-- skill id and name
-- description
-- source path
-- mode (`inline` or `fork`)
-- target agent
-- invocation source
-- invocation reason
-- context paths
+- `selected_agent`
+- `reason`
+- `fallback_used`
+- `diagnostics`
 
-The prompt consumes runtime-selected skill instructions. The prompt does not decide routing or delegation.
+### Other Shared Contracts
 
-### Tool invocation and result envelopes
+The runtime also standardizes:
 
-`ToolInvocationEnvelope` and `ToolResultEnvelope` standardize both normal tool-node work and internal workflow operations.
+- `PendingAction`
+- `ExecutionContract`
+- `SkillInvocationContract`
+- `ToolInvocationEnvelope`
+- `ToolResultEnvelope`
+- `AssistantResponse`
 
-## Pending Actions and Confirmation
+## Parser Responsibilities
 
-Pending-action logic lives in `app/pending_actions.py`.
+The lightweight parser is allowed to:
 
-Supported flows:
+- interpret the user turn into a routing or pending-action contract
+- summarize intent into a normalized `user_goal`
+- classify into the supported schema fields
+- report low confidence through the contract
 
-- explicit approval
-- rejection
-- narrowing or modification requests
-- request-for-preview or diff before execution
-- deterministic option selection
-- ambiguity detection
+The lightweight parser is not allowed to:
 
-Current agent usage:
+- call tools
+- execute workflows
+- choose tools directly
+- branch outside the supported schema
+- bypass pending-action rules
+- emit arbitrary runtime actions that are not represented by the contracts
 
-- `knowledge_agent`: document selection and document follow-up
-- `project_task_agent`: task selection and task-detail follow-up
-- `knowledge_base_builder_agent`: confirmation-gated KB writes
-- `document_conversion_agent`: approval-gated package publishing
+## Routing Modules
 
-The gateway routes active pending actions back to the owning agent before normal matcher routing runs.
+### Active Runtime Path
 
-## Skills
+- [gateway/agent.py](/Users/kayngame/jade_ai_core/gateway/agent.py): production gateway entrypoint
+- [app/routing/agent_router.py](/Users/kayngame/jade_ai_core/app/routing/agent_router.py): top-level parser route resolution
+- [app/routing/domain_map.py](/Users/kayngame/jade_ai_core/app/routing/domain_map.py): domain-to-agent mapping
+- [app/routing/pending_action_router.py](/Users/kayngame/jade_ai_core/app/routing/pending_action_router.py): pending-action routing entry
+- [app/routing/routing_diagnostics.py](/Users/kayngame/jade_ai_core/app/routing/routing_diagnostics.py): structured diagnostics builders
+- [app/interpretation/intent_parser.py](/Users/kayngame/jade_ai_core/app/interpretation/intent_parser.py): lightweight parser service
+- [app/interpretation/model_config.py](/Users/kayngame/jade_ai_core/app/interpretation/model_config.py): parser thresholds and prompt configuration
 
-Skill discovery and normalization are implemented in `app/skills.py`.
+### Still Active But Not Top-Level Text Routing
 
-Supported skill scopes:
+- [gateway/skill_policy.py](/Users/kayngame/jade_ai_core/gateway/skill_policy.py): explicit and automatic skill selection
 
-- path-scoped project skills
-- agent-local skills
-- project-shared skills
+Skill logic can still influence which instructions run for the selected agent, and explicit internal overrides can still select an agent deterministically, but free-form top-level route selection is contract-based.
 
-Precedence:
+## Diagnostics and Hardening
 
-`path-scoped > agent-local > project-shared`
+Routing diagnostics are emitted for every turn.
 
-Execution modes:
+Fresh-request routing diagnostics include:
 
-- `inline`: stays in the current agent
-- `fork`: routes to the delegate agent
+- parsed `AssistantRequest`
+- selected agent
+- `policy_step`
+- `fallback_used`
+- route reason
 
-If a forked skill has no active delegate agent, the gateway falls back to `GeneralAssistant`.
+Pending-action routing diagnostics include:
 
-The skill runtime is implemented in `app/skill_runtime.py`. It filters active contracts for the executing agent and attaches the selected skill's instruction body to the prompt as runtime-selected context.
+- pending-action owner
+- pending-action id
+- pending-action decision
+- fallback details when the owner is unavailable
 
-## Tools
+Parser hardening includes:
 
-Tool metadata and routing hints live in `app/tool_registry.py`.
+- confidence thresholds configured in one place via [app/interpretation/model_config.py](/Users/kayngame/jade_ai_core/app/interpretation/model_config.py)
+- validation of parser output before execution
+- logged parser failures and malformed output fallback
+- deterministic fallback to `general_chat_agent`
 
-Runtime normalization lives in `app/tool_runtime.py`.
+## Current Worker Agents
 
-Standard tool families currently include:
+- `general_chat_agent`
+- `knowledge_agent`
+- `project_task_agent`
+- `knowledge_base_builder_agent`
+- `document_conversion_agent`
 
-- knowledge read
-- knowledge write
-- project tracker
-- document conversion internal operations
+## Current Routing Story
 
-Tool metadata powers:
+The live routing order is:
 
-- gateway tool-intent routing
-- normalized tool ids
-- display labels
-- runtime tracing
-
-## Agents
-
-### `general_chat_agent`
-
-Purpose:
-
-- greetings
-- general chat
-- fallback conversational help
-
-It has no business-specific tools and acts as the `GeneralAssistant` fallback in gateway policy.
-
-### `knowledge_agent`
-
-Purpose:
-
-- repository guidance
-- setup and architecture questions
-- internal document lookup and reading
-
-It uses knowledge read tools and shared pending-action selection for follow-up document selection.
-
-### `knowledge_base_builder_agent`
-
-Purpose:
-
-- knowledge elicitation
-- KB review
-- layer-placement guidance
-- feature-spec skeleton support
-- KB file drafting
-
-It uses read tools plus builder-only path resolution and KB write tools. KB file mutation is always confirmation-gated.
-
-### `project_task_agent`
-
-Purpose:
-
-- task lookup
-- assignee and deadline questions
-- tracker overviews
-
-It uses project tracker tools, renders task results deterministically, and uses shared pending-action selection for task-detail follow-ups.
-
-### `document_conversion_agent`
-
-Purpose:
-
-- ingest uploaded files and Google document references
-- extract structured draft packages
-- ask for missing required conversion details
-- stage packages
-- publish only after approval
-
-It uses the same shared pending-action confirmation model as the other agents, but its internal workflow steps are wrapped as standardized internal tool envelopes.
-
-## State Model
-
-The shared graph state is defined in `app/state.py`.
-
-Important runtime fields include:
-
-- `messages`
-- `route`
-- `route_reason`
-- `route_policy_step`
-- `pending_action`
-- `execution_contract`
-- `assistant_response`
-- `routing_decision`
-- `skill_invocation_contracts`
-- `active_skill_invocation_contracts`
-- `skill_execution_diagnostics`
-- `tool_invocation`
-- `tool_result`
-- `tool_execution_trace`
-- `requested_agent`
-- `requested_skill_ids`
-- `resolved_skill_ids`
-- `context_paths`
-
-## Knowledge and Data Sources
-
-Knowledge-base content is organized under `knowledge/`.
-
-Current major areas:
-
-- `knowledge/Docs/00_Shared/`
-- `knowledge/Docs/10_GameLines/`
-- `knowledge/Docs/20_Deployments/`
-- `knowledge/Docs/30_Review/`
-- `knowledge/Docs/40_Legacy/`
-- `knowledge/Docs/50_Templates/`
-
-The project tracker source is Google Sheets, via `tools/project_tracker_google_sheets.py`.
-
-Document conversion can also ingest Google document references through:
-
-- `tools/conversion_google_sources.py`
-- `tools/google_workspace_services.py`
-
-## Legacy Cutoff
-
-The following systems are no longer supported as live runtime behavior:
-
-- `pending_interaction`
-- regex-only approval or cancel parsing as an agent-local control path
-- prompt-only skill routing or delegation
-
-Historical web transcripts may still be normalized on load for readability, but that is history cleanup only and not part of the live runtime control model.
+1. continue active pending action if applicable
+2. otherwise honor explicit internal overrides that are already structured state:
+   requested agent
+   explicit forked-skill delegate/fallback
+   explicit inline-skill compatibility
+3. otherwise route through `AssistantRequest`
+4. otherwise fall back deterministically to `general_chat_agent`
+
+There is no longer a shadow-mode comparison path or a legacy heuristic top-level text router in production.

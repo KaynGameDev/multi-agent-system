@@ -2,183 +2,155 @@ from __future__ import annotations
 
 import unittest
 
-from langchain_core.messages import AIMessage
+from langchain_core.messages import HumanMessage
 
-from app.pending_action_parser import LLMPendingActionInterpreter
+from app.contracts import validate_pending_action_decision
 from app.pending_actions import (
     build_pending_action,
-    interpret_pending_action_reply,
-    prepare_pending_action_reply_input,
-    validate_execution_contract,
+    resolve_pending_action_decision,
+)
+from app.routing.pending_action_router import (
+    PendingActionRouter,
+    build_pending_action_resolution_key,
+    resolve_pending_action_turn_from_state,
 )
 
 
-class FailIfCalledInterpreter:
-    def parse_pending_action_reply(self, _action, _prepared_input):
-        raise AssertionError("The LLM interpreter should not run for exact deterministic selections.")
+class StaticDecisionParser:
+    def __init__(self, payload) -> None:
+        self.payload = payload
+
+    def parse_pending_action_decision(self, _action, _user_message):
+        return self.payload
 
 
-class StaticInterpreter:
-    def __init__(self, parsed_reply: dict) -> None:
-        self.parsed_reply = dict(parsed_reply)
+class ReplyMapDecisionParser:
+    def __init__(self, mapping: dict[str, dict], *, default: dict | None = None) -> None:
+        self.mapping = {str(key): dict(value) for key, value in mapping.items()}
+        self.default = dict(default or {})
+        self.calls = 0
 
-    def parse_pending_action_reply(self, _action, _prepared_input):
-        return dict(self.parsed_reply)
-
-
-class RaisingInterpreter:
-    def parse_pending_action_reply(self, _action, _prepared_input):
-        raise RuntimeError("parser unavailable")
-
-
-class StructuredOutputLLM:
-    def __init__(self, raw_output=None, *, error: Exception | None = None) -> None:
-        self.raw_output = raw_output
-        self.error = error
-
-    def with_structured_output(self, _schema):
-        return self
-
-    def invoke(self, _prompt):
-        if self.error is not None:
-            raise self.error
-        return self.raw_output
-
-
-class SequencedLLM:
-    def __init__(self, outputs: list[object]) -> None:
-        self.outputs = list(outputs)
-
-    def with_structured_output(self, _schema):
-        return self
-
-    def invoke(self, _prompt):
-        if not self.outputs:
-            raise RuntimeError("No more queued outputs.")
-        current = self.outputs.pop(0)
-        if isinstance(current, Exception):
-            raise current
-        return current
+    def parse_pending_action_decision(self, action, user_message):
+        self.calls += 1
+        payload = dict(self.mapping.get(str(user_message), self.default))
+        payload.setdefault("type", "pending_action_decision")
+        payload.setdefault("pending_action_id", str(action.get("id", "")).strip())
+        payload.setdefault("decision", "unclear")
+        payload.setdefault("notes", None)
+        payload.setdefault("selected_item_id", None)
+        payload.setdefault("constraints", [])
+        return payload
 
 
 class PendingActionTests(unittest.TestCase):
-    def test_exact_numeric_selection_bypasses_interpreter(self) -> None:
+    def test_approval_reply_continues_pending_action(self) -> None:
         action = build_pending_action(
             session_id="thread-1",
-            action_type="select_knowledge_document",
-            requested_by_agent="knowledge_agent",
-            summary="Select a document to open.",
-            metadata={
-                "selection_options": [
-                    {
-                        "label": "Setup Guide",
-                        "aliases": ["1"],
-                        "value": "Setup Guide",
-                        "payload": {"document_name": "Setup Guide"},
-                    }
-                ]
-            },
-        )
-
-        contract = interpret_pending_action_reply(
-            action,
-            "1",
-            interpreter=FailIfCalledInterpreter(),
-        )
-        validation = validate_execution_contract(action, contract)
-
-        self.assertEqual(contract["decision"], "select")
-        self.assertEqual(contract["interpretation_source"], "deterministic_selection")
-        self.assertTrue(validation["valid"])
-        self.assertEqual(validation["runtime_action"], "select")
-
-    def test_exact_alias_selection_bypasses_interpreter(self) -> None:
-        action = build_pending_action(
-            session_id="thread-1",
-            action_type="select_knowledge_document",
-            requested_by_agent="knowledge_agent",
-            summary="Select a document to open.",
-            metadata={
-                "selection_options": [
-                    {
-                        "label": "Setup Guide",
-                        "aliases": ["setup guide", "guide"],
-                        "value": "Setup Guide",
-                        "payload": {"document_name": "Setup Guide"},
-                    }
-                ]
-            },
-        )
-
-        contract = interpret_pending_action_reply(
-            action,
-            "setup guide",
-            interpreter=FailIfCalledInterpreter(),
-        )
-        validation = validate_execution_contract(action, contract)
-
-        self.assertEqual(contract["decision"], "select")
-        self.assertEqual(contract["selected_option"]["payload"]["document_name"], "Setup Guide")
-        self.assertTrue(validation["valid"])
-        self.assertEqual(validation["runtime_action"], "select")
-
-    def test_simple_approval_from_interpreter_becomes_execute_contract(self) -> None:
-        action = build_pending_action(
-            session_id="thread-1",
-            action_type="run_skill",
+            action_type="apply_edit",
             requested_by_agent="general_chat_agent",
-            summary="Run the review skill.",
-            target_scope={"skill_name": "review-kb-doc"},
+            summary="Apply the proposed edit.",
         )
-        interpreter = StaticInterpreter(
+        router = PendingActionRouter(
+            StaticDecisionParser(
+                {
+                    "type": "pending_action_decision",
+                    "pending_action_id": action["id"],
+                    "decision": "approve",
+                    "notes": "The user approved the change.",
+                    "selected_item_id": None,
+                    "constraints": [],
+                }
+            )
+        )
+
+        result = resolve_pending_action_turn_from_state(
             {
-                "decision": "approve",
-                "requested_outputs": [],
-                "target_scope": {},
-                "selected_index": None,
-                "should_execute": True,
-                "reason": "The user approved the action.",
-                "confidence": 0.97,
-                "interpretation_source": "llm_parser",
-            }
+                "messages": [HumanMessage(content="ok")],
+                "pending_action": action,
+            },
+            pending_action_router=router,
         )
 
-        contract = interpret_pending_action_reply(action, "go ahead", interpreter=interpreter)
-        validation = validate_execution_contract(action, contract)
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertFalse(result.allow_fresh_routing)
+        self.assertEqual(result.execution_contract["decision"], "approve")
+        self.assertEqual(result.validation["runtime_action"], "execute")
 
-        self.assertEqual(contract["decision"], "approve")
-        self.assertEqual(contract["interpretation_source"], "llm_parser")
-        self.assertTrue(validation["valid"])
-        self.assertEqual(validation["runtime_action"], "execute")
-
-    def test_rejection_from_interpreter_becomes_cancel(self) -> None:
+    def test_rejection_reply_cancels_pending_action(self) -> None:
         action = build_pending_action(
             session_id="thread-1",
             action_type="publish_conversion_package",
             requested_by_agent="document_conversion_agent",
-            summary="Publish the staged conversion package.",
+            summary="Publish the staged package.",
         )
-        interpreter = StaticInterpreter(
+        router = PendingActionRouter(
+            StaticDecisionParser(
+                {
+                    "type": "pending_action_decision",
+                    "pending_action_id": action["id"],
+                    "decision": "reject",
+                    "notes": "The user rejected the publish.",
+                    "selected_item_id": None,
+                    "constraints": [],
+                }
+            )
+        )
+
+        result = resolve_pending_action_turn_from_state(
             {
-                "decision": "reject",
-                "requested_outputs": [],
-                "target_scope": {},
-                "selected_index": None,
-                "should_execute": False,
-                "reason": "The user rejected the action.",
-                "confidence": 0.92,
-                "interpretation_source": "llm_parser",
-            }
+                "messages": [HumanMessage(content="not yet")],
+                "pending_action": action,
+            },
+            pending_action_router=router,
         )
 
-        contract = interpret_pending_action_reply(action, "cancel", interpreter=interpreter)
-        validation = validate_execution_contract(action, contract)
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.validation["runtime_action"], "cancel")
+        self.assertEqual(result.validation["next_status"], "rejected")
 
-        self.assertEqual(contract["decision"], "reject")
-        self.assertTrue(validation["valid"])
-        self.assertEqual(validation["runtime_action"], "cancel")
+    def test_selection_reply_resolves_shared_pending_action_option(self) -> None:
+        action = build_pending_action(
+            session_id="thread-1",
+            action_type="select_project_task",
+            requested_by_agent="project_task_agent",
+            summary="Select a task to inspect.",
+            metadata={
+                "selection_options": [
+                    {"id": "task_1", "label": "Task One", "value": "Task One", "payload": {"task_id": "task_1"}},
+                    {"id": "task_2", "label": "Task Two", "value": "Task Two", "payload": {"task_id": "task_2"}},
+                ]
+            },
+        )
+        router = PendingActionRouter(
+            StaticDecisionParser(
+                {
+                    "type": "pending_action_decision",
+                    "pending_action_id": action["id"],
+                    "decision": "select",
+                    "notes": "The user selected the second task.",
+                    "selected_item_id": "task_2",
+                    "constraints": [],
+                }
+            )
+        )
 
-    def test_scope_limited_reply_becomes_narrowed_execute_contract(self) -> None:
+        result = resolve_pending_action_turn_from_state(
+            {
+                "messages": [HumanMessage(content="the second one")],
+                "pending_action": action,
+            },
+            pending_action_router=router,
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.validation["runtime_action"], "select")
+        self.assertEqual(result.validation["selected_index"], 1)
+        self.assertEqual(result.validation["selected_option"]["id"], "task_2")
+
+    def test_modify_reply_applies_valid_constraints(self) -> None:
         action = build_pending_action(
             session_id="thread-1",
             action_type="apply_edit",
@@ -186,405 +158,289 @@ class PendingActionTests(unittest.TestCase):
             summary="Apply edits across backend and frontend.",
             target_scope={"modules": ["backend", "frontend"]},
         )
-        interpreter = StaticInterpreter(
+        router = PendingActionRouter(
+            StaticDecisionParser(
+                {
+                    "type": "pending_action_decision",
+                    "pending_action_id": action["id"],
+                    "decision": "modify",
+                    "notes": "Only continue for backend.",
+                    "selected_item_id": None,
+                    "constraints": ["modules:backend"],
+                }
+            )
+        )
+
+        result = resolve_pending_action_turn_from_state(
             {
-                "decision": "modify",
-                "requested_outputs": [],
-                "target_scope": {"modules": ["backend"]},
-                "selected_index": None,
-                "should_execute": True,
-                "reason": "The user approved a narrowed backend-only execution.",
-                "confidence": 0.94,
-                "interpretation_source": "llm_parser",
-            }
-        )
-
-        contract = interpret_pending_action_reply(action, "yes but only backend", interpreter=interpreter)
-        validation = validate_execution_contract(action, contract)
-
-        self.assertEqual(contract["decision"], "modify")
-        self.assertTrue(validation["valid"])
-        self.assertEqual(validation["runtime_action"], "execute")
-        self.assertEqual(validation["normalized_scope"]["modules"], ["backend"])
-
-    def test_diff_request_becomes_request_revision_contract(self) -> None:
-        action = build_pending_action(
-            session_id="thread-1",
-            action_type="apply_edit",
-            requested_by_agent="general_chat_agent",
-            summary="Apply the proposed edit.",
-            target_scope={"files": ["src/main.py"]},
-        )
-        interpreter = StaticInterpreter(
-            {
-                "decision": "modify",
-                "requested_outputs": ["diff"],
-                "target_scope": {},
-                "selected_index": None,
-                "should_execute": False,
-                "reason": "The user asked to see the diff first.",
-                "confidence": 0.95,
-                "interpretation_source": "llm_parser",
-            }
-        )
-
-        contract = interpret_pending_action_reply(action, "show me the diff first", interpreter=interpreter)
-        validation = validate_execution_contract(action, contract)
-
-        self.assertEqual(contract["decision"], "modify")
-        self.assertIn("diff", contract["requested_outputs"])
-        self.assertTrue(validation["valid"])
-        self.assertEqual(validation["runtime_action"], "request_revision")
-        self.assertEqual(validation["next_status"], "request_revision")
-
-    def test_summary_request_becomes_request_revision_contract(self) -> None:
-        action = build_pending_action(
-            session_id="thread-1",
-            action_type="apply_edit",
-            requested_by_agent="general_chat_agent",
-            summary="Apply the proposed edit.",
-            target_scope={"files": ["src/main.py"]},
-        )
-        interpreter = StaticInterpreter(
-            {
-                "decision": "modify",
-                "requested_outputs": ["summary"],
-                "target_scope": {},
-                "selected_index": None,
-                "should_execute": False,
-                "reason": "The user asked to see a summary first.",
-                "confidence": 0.95,
-                "interpretation_source": "llm_parser",
-            }
-        )
-
-        contract = interpret_pending_action_reply(action, "show me a summary", interpreter=interpreter)
-        validation = validate_execution_contract(action, contract)
-
-        self.assertEqual(contract["decision"], "modify")
-        self.assertEqual(contract["requested_outputs"], ["summary"])
-        self.assertTrue(validation["valid"])
-        self.assertEqual(validation["runtime_action"], "request_revision")
-        self.assertEqual(validation["next_status"], "request_revision")
-
-    def test_unsupported_scope_modification_stays_non_executable(self) -> None:
-        action = build_pending_action(
-            session_id="thread-1",
-            action_type="delete_file",
-            requested_by_agent="general_chat_agent",
-            summary="Delete the generated file.",
-            target_scope={"files": ["build/output.txt"]},
-        )
-        interpreter = StaticInterpreter(
-            {
-                "decision": "modify",
-                "requested_outputs": [],
-                "target_scope": {"modules": ["backend"]},
-                "selected_index": None,
-                "should_execute": True,
-                "reason": "The user requested a narrowed backend-only deletion.",
-                "confidence": 0.81,
-                "interpretation_source": "llm_parser",
-            }
-        )
-
-        contract = interpret_pending_action_reply(action, "yes but only backend", interpreter=interpreter)
-        validation = validate_execution_contract(action, contract)
-
-        self.assertEqual(contract["decision"], "modify")
-        self.assertFalse(validation["valid"])
-        self.assertEqual(validation["runtime_action"], "ask_clarification")
-        self.assertEqual(validation["next_status"], "ask_clarification")
-
-    def test_interpreter_exception_becomes_unclear(self) -> None:
-        action = build_pending_action(
-            session_id="thread-1",
-            action_type="publish_conversion_package",
-            requested_by_agent="document_conversion_agent",
-            summary="Publish the staged conversion package.",
-        )
-
-        contract = interpret_pending_action_reply(action, "go ahead", interpreter=RaisingInterpreter())
-        validation = validate_execution_contract(action, contract)
-
-        self.assertEqual(contract["decision"], "unclear")
-        self.assertFalse(validation["valid"])
-        self.assertEqual(validation["runtime_action"], "ask_clarification")
-
-    def test_malformed_interpreter_output_becomes_unclear(self) -> None:
-        action = build_pending_action(
-            session_id="thread-1",
-            action_type="publish_conversion_package",
-            requested_by_agent="document_conversion_agent",
-            summary="Publish the staged conversion package.",
-        )
-        interpreter = StaticInterpreter(
-            {
-                "decision": "launch",
-                "requested_outputs": "diff",
-                "target_scope": "backend",
-                "selected_index": "two",
-                "should_execute": True,
-                "reason": "Malformed parse.",
-                "confidence": "not-a-number",
-                "interpretation_source": "",
-            }
-        )
-
-        contract = interpret_pending_action_reply(action, "do it", interpreter=interpreter)
-        validation = validate_execution_contract(action, contract)
-
-        self.assertEqual(contract["decision"], "unclear")
-        self.assertEqual(contract["requested_outputs"], [])
-        self.assertFalse(validation["valid"])
-        self.assertEqual(validation["runtime_action"], "ask_clarification")
-
-    def test_llm_inferred_selection_without_exact_match_becomes_selection(self) -> None:
-        action = build_pending_action(
-            session_id="thread-1",
-            action_type="select_knowledge_document",
-            requested_by_agent="knowledge_agent",
-            summary="Select a document to open.",
-            metadata={
-                "selection_options": [
-                    {
-                        "label": "Setup Guide",
-                        "aliases": ["guide"],
-                        "value": "Setup Guide",
-                        "payload": {"document_name": "Setup Guide"},
-                    },
-                    {
-                        "label": "Architecture Overview",
-                        "aliases": ["architecture overview"],
-                        "value": "Architecture Overview",
-                        "payload": {"document_name": "Architecture Overview"},
-                    },
-                ]
+                "messages": [HumanMessage(content="backend only")],
+                "pending_action": action,
             },
-        )
-        interpreter = StaticInterpreter(
-            {
-                "decision": "select",
-                "requested_outputs": [],
-                "target_scope": {},
-                "selected_index": 1,
-                "should_execute": True,
-                "reason": "The user appears to mean the second document.",
-                "confidence": 0.9,
-                "interpretation_source": "llm_parser",
-            }
+            pending_action_router=router,
         )
 
-        contract = interpret_pending_action_reply(action, "the second one sounds right", interpreter=interpreter)
-        validation = validate_execution_contract(action, contract)
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.validation["runtime_action"], "execute")
+        self.assertEqual(result.validation["normalized_scope"]["modules"], ["backend"])
 
-        self.assertEqual(contract["decision"], "select")
-        self.assertTrue(validation["valid"])
-        self.assertEqual(validation["runtime_action"], "select")
-        self.assertEqual(validation["selected_index"], 1)
-
-    def test_inconsistent_approve_with_requested_outputs_becomes_revision(self) -> None:
+    def test_unrelated_reply_allows_fresh_routing(self) -> None:
         action = build_pending_action(
             session_id="thread-1",
             action_type="apply_edit",
             requested_by_agent="general_chat_agent",
             summary="Apply the proposed edit.",
-            target_scope={"files": ["src/main.py"]},
         )
-        interpreter = StaticInterpreter(
+        router = PendingActionRouter(
+            StaticDecisionParser(
+                {
+                    "type": "pending_action_decision",
+                    "pending_action_id": action["id"],
+                    "decision": "unrelated",
+                    "notes": "The user started a new topic.",
+                    "selected_item_id": None,
+                    "constraints": [],
+                }
+            )
+        )
+
+        result = resolve_pending_action_turn_from_state(
             {
-                "decision": "approve",
-                "requested_outputs": ["diff"],
-                "target_scope": {},
-                "selected_index": None,
-                "should_execute": False,
-                "reason": "The user asked to see the diff first.",
-                "confidence": 0.92,
-                "interpretation_source": "llm_parser",
-            }
+                "messages": [HumanMessage(content="What docs do we have?")],
+                "pending_action": action,
+            },
+            pending_action_router=router,
         )
 
-        contract = interpret_pending_action_reply(action, "show me the diff first", interpreter=interpreter)
-        validation = validate_execution_contract(action, contract)
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertTrue(result.allow_fresh_routing)
+        self.assertIsNone(result.execution_contract)
+        self.assertIsNone(result.validation)
 
-        self.assertEqual(contract["decision"], "approve")
-        self.assertTrue(validation["valid"])
-        self.assertEqual(validation["runtime_action"], "request_revision")
-
-    def test_inconsistent_approve_without_execution_stays_non_executable(self) -> None:
+    def test_unclear_reply_routes_to_clarification(self) -> None:
         action = build_pending_action(
             session_id="thread-1",
-            action_type="publish_conversion_package",
-            requested_by_agent="document_conversion_agent",
-            summary="Publish the staged conversion package.",
+            action_type="apply_edit",
+            requested_by_agent="general_chat_agent",
+            summary="Apply the proposed edit.",
         )
-        interpreter = StaticInterpreter(
+        router = PendingActionRouter(
+            StaticDecisionParser(
+                {
+                    "type": "pending_action_decision",
+                    "pending_action_id": action["id"],
+                    "decision": "unclear",
+                    "notes": "The reply was ambiguous.",
+                    "selected_item_id": None,
+                    "constraints": [],
+                }
+            )
+        )
+
+        result = resolve_pending_action_turn_from_state(
             {
-                "decision": "approve",
-                "requested_outputs": [],
-                "target_scope": {},
-                "selected_index": None,
-                "should_execute": False,
-                "reason": "The parser was unsure.",
-                "confidence": 0.92,
-                "interpretation_source": "llm_parser",
+                "messages": [HumanMessage(content="maybe")],
+                "pending_action": action,
+            },
+            pending_action_router=router,
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertFalse(result.allow_fresh_routing)
+        self.assertEqual(result.validation["runtime_action"], "ask_clarification")
+        self.assertFalse(result.validation["valid"])
+
+    def test_malformed_parser_output_falls_back_to_clarification(self) -> None:
+        action = build_pending_action(
+            session_id="thread-1",
+            action_type="apply_edit",
+            requested_by_agent="general_chat_agent",
+            summary="Apply the proposed edit.",
+        )
+        router = PendingActionRouter(StaticDecisionParser({"unexpected": "payload"}))
+
+        result = resolve_pending_action_turn_from_state(
+            {
+                "messages": [HumanMessage(content="go ahead")],
+                "pending_action": action,
+            },
+            pending_action_router=router,
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(result.pending_action_decision.decision, "unclear")
+        self.assertIn("malformed", str(result.pending_action_decision.notes).lower())
+        self.assertEqual(result.validation["runtime_action"], "ask_clarification")
+
+    def test_cached_pending_action_resolution_reused_within_same_turn(self) -> None:
+        action = build_pending_action(
+            session_id="thread-1",
+            action_type="apply_edit",
+            requested_by_agent="general_chat_agent",
+            summary="Apply the proposed edit.",
+        )
+        state = {
+            "messages": [HumanMessage(content="approve")],
+            "pending_action": action,
+        }
+        resolution_key = build_pending_action_resolution_key(state, action)
+        parser = ReplyMapDecisionParser(
+            {
+                "approve": {
+                    "decision": "approve",
+                    "notes": "The user approved the change.",
+                }
             }
         )
 
-        contract = interpret_pending_action_reply(action, "approve", interpreter=interpreter)
-        validation = validate_execution_contract(action, contract)
+        first_result = resolve_pending_action_turn_from_state(
+            state,
+            pending_action_router=PendingActionRouter(parser),
+        )
 
-        self.assertEqual(contract["decision"], "approve")
+        self.assertIsNotNone(first_result)
+        assert first_result is not None
+        self.assertEqual(parser.calls, 1)
+
+        second_result = resolve_pending_action_turn_from_state(
+            {
+                **state,
+                "pending_action_decision": first_result.pending_action_decision.model_dump(),
+                "pending_action_resolution_key": resolution_key,
+                "execution_contract": first_result.execution_contract,
+            },
+            pending_action_router=PendingActionRouter(parser),
+        )
+
+        self.assertIsNotNone(second_result)
+        assert second_result is not None
+        self.assertEqual(parser.calls, 1)
+        self.assertEqual(second_result.pending_action_decision.decision, "approve")
+        self.assertEqual(second_result.execution_contract["decision"], "approve")
+
+    def test_stale_pending_action_decision_is_reparsed_on_next_turn(self) -> None:
+        action = build_pending_action(
+            session_id="thread-1",
+            action_type="apply_edit",
+            requested_by_agent="general_chat_agent",
+            summary="Apply the proposed edit.",
+        )
+        parser = ReplyMapDecisionParser(
+            {
+                "maybe": {
+                    "decision": "unclear",
+                    "notes": "The reply was ambiguous.",
+                },
+                "approve": {
+                    "decision": "approve",
+                    "notes": "The user approved the change.",
+                },
+            }
+        )
+        router = PendingActionRouter(parser)
+        first_state = {
+            "messages": [HumanMessage(content="maybe")],
+            "pending_action": action,
+        }
+        first_result = resolve_pending_action_turn_from_state(
+            first_state,
+            pending_action_router=router,
+        )
+
+        self.assertIsNotNone(first_result)
+        assert first_result is not None
+        self.assertEqual(first_result.pending_action_decision.decision, "unclear")
+        self.assertEqual(first_result.validation["runtime_action"], "ask_clarification")
+
+        second_result = resolve_pending_action_turn_from_state(
+            {
+                "messages": [
+                    HumanMessage(content="maybe"),
+                    HumanMessage(content="approve"),
+                ],
+                "pending_action": action,
+                "pending_action_decision": first_result.pending_action_decision.model_dump(),
+                "pending_action_resolution_key": first_result.pending_action_resolution_key,
+                "execution_contract": first_result.execution_contract,
+            },
+            pending_action_router=router,
+        )
+
+        self.assertIsNotNone(second_result)
+        assert second_result is not None
+        self.assertEqual(parser.calls, 2)
+        self.assertEqual(second_result.pending_action_decision.decision, "approve")
+        self.assertEqual(second_result.validation["runtime_action"], "execute")
+        self.assertEqual(second_result.execution_contract["decision"], "approve")
+
+    def test_cached_pending_action_resolution_with_mismatched_key_is_ignored(self) -> None:
+        action = build_pending_action(
+            session_id="thread-1",
+            action_type="apply_edit",
+            requested_by_agent="general_chat_agent",
+            summary="Apply the proposed edit.",
+        )
+        parser = ReplyMapDecisionParser(
+            {
+                "approve": {
+                    "decision": "approve",
+                    "notes": "The user approved the change.",
+                }
+            }
+        )
+
+        result = resolve_pending_action_turn_from_state(
+            {
+                "messages": [HumanMessage(content="approve")],
+                "pending_action": action,
+                "pending_action_decision": {
+                    "type": "pending_action_decision",
+                    "pending_action_id": action["id"],
+                    "decision": "unclear",
+                    "notes": "Old ambiguous reply.",
+                    "selected_item_id": None,
+                    "constraints": [],
+                },
+                "pending_action_resolution_key": "pending_old:1:stale",
+            },
+            pending_action_router=PendingActionRouter(parser),
+        )
+
+        self.assertIsNotNone(result)
+        assert result is not None
+        self.assertEqual(parser.calls, 1)
+        self.assertEqual(result.pending_action_decision.decision, "approve")
+        self.assertEqual(result.execution_contract["decision"], "approve")
+
+    def test_wrong_pending_action_id_stays_safe(self) -> None:
+        action = build_pending_action(
+            session_id="thread-1",
+            action_type="apply_edit",
+            requested_by_agent="general_chat_agent",
+            summary="Apply the proposed edit.",
+        )
+        decision = validate_pending_action_decision(
+            {
+                "type": "pending_action_decision",
+                "pending_action_id": "pending_wrong",
+                "decision": "approve",
+                "notes": "The user approved the action.",
+                "selected_item_id": None,
+                "constraints": [],
+            }
+        )
+
+        result = resolve_pending_action_decision(action, decision, user_text="approve")
+        validation = result["validation"]
+
+        self.assertIsNotNone(validation)
+        assert validation is not None
         self.assertFalse(validation["valid"])
         self.assertEqual(validation["runtime_action"], "ask_clarification")
-
-
-class PendingActionParserTests(unittest.TestCase):
-    def test_parser_low_confidence_result_becomes_unclear(self) -> None:
-        action = build_pending_action(
-            session_id="thread-1",
-            action_type="publish_conversion_package",
-            requested_by_agent="document_conversion_agent",
-            summary="Publish the staged conversion package.",
-        )
-        interpreter = LLMPendingActionInterpreter(
-            StructuredOutputLLM(
-                {
-                    "decision": "approve",
-                    "requested_outputs": [],
-                    "target_scope": {},
-                    "selected_index": None,
-                    "should_execute": True,
-                    "reason": "Low confidence approval.",
-                    "confidence": 0.4,
-                }
-            ),
-            confidence_threshold=0.75,
-        )
-
-        parsed = interpreter.parse_pending_action_reply(
-            action,
-            prepare_pending_action_reply_input(action, "go ahead"),
-        )
-
-        self.assertEqual(parsed["decision"], "unclear")
-        self.assertFalse(parsed["should_execute"])
-
-    def test_parser_malformed_output_becomes_unclear(self) -> None:
-        action = build_pending_action(
-            session_id="thread-1",
-            action_type="publish_conversion_package",
-            requested_by_agent="document_conversion_agent",
-            summary="Publish the staged conversion package.",
-        )
-        interpreter = LLMPendingActionInterpreter(
-            StructuredOutputLLM({"decision": "launch", "confidence": 0.99}),
-            confidence_threshold=0.75,
-        )
-
-        parsed = interpreter.parse_pending_action_reply(
-            action,
-            prepare_pending_action_reply_input(action, "do it"),
-        )
-
-        self.assertEqual(parsed["decision"], "unclear")
-        self.assertFalse(parsed["should_execute"])
-
-    def test_parser_exception_becomes_unclear(self) -> None:
-        action = build_pending_action(
-            session_id="thread-1",
-            action_type="publish_conversion_package",
-            requested_by_agent="document_conversion_agent",
-            summary="Publish the staged conversion package.",
-        )
-        interpreter = LLMPendingActionInterpreter(
-            StructuredOutputLLM(error=RuntimeError("network unavailable")),
-            confidence_threshold=0.75,
-        )
-
-        parsed = interpreter.parse_pending_action_reply(
-            action,
-            prepare_pending_action_reply_input(action, "approve"),
-        )
-
-        self.assertEqual(parsed["decision"], "unclear")
-        self.assertFalse(parsed["should_execute"])
-
-    def test_parser_uses_backup_model_when_primary_is_unavailable(self) -> None:
-        action = build_pending_action(
-            session_id="thread-1",
-            action_type="publish_conversion_package",
-            requested_by_agent="document_conversion_agent",
-            summary="Publish the staged conversion package.",
-        )
-        interpreter = LLMPendingActionInterpreter(
-            SequencedLLM([RuntimeError("network unavailable"), RuntimeError("network unavailable")]),
-            backup_llm=StructuredOutputLLM(
-                {
-                    "decision": "approve",
-                    "requested_outputs": [],
-                    "target_scope": {},
-                    "selected_index": None,
-                    "should_execute": True,
-                    "reason": "The backup parser recovered the approval.",
-                    "confidence": 0.91,
-                }
-            ),
-            confidence_threshold=0.75,
-        )
-
-        parsed = interpreter.parse_pending_action_reply(
-            action,
-            prepare_pending_action_reply_input(action, "approve"),
-        )
-
-        self.assertEqual(parsed["decision"], "approve")
-        self.assertTrue(parsed["should_execute"])
-
-    def test_parser_repairs_low_confidence_output(self) -> None:
-        action = build_pending_action(
-            session_id="thread-1",
-            action_type="apply_edit",
-            requested_by_agent="general_chat_agent",
-            summary="Apply the proposed edit.",
-            target_scope={"files": ["src/main.py"]},
-        )
-        interpreter = LLMPendingActionInterpreter(
-            SequencedLLM(
-                [
-                    {
-                        "decision": "modify",
-                        "requested_outputs": ["preview"],
-                        "target_scope": {},
-                        "selected_index": None,
-                        "should_execute": False,
-                        "reason": "Unsure whether the user wanted a preview or summary.",
-                        "confidence": 0.41,
-                    },
-                    AIMessage(content='{"decision":"modify","requested_outputs":["summary"],"should_execute":false}'),
-                    {
-                        "decision": "modify",
-                        "requested_outputs": ["summary"],
-                        "target_scope": {},
-                        "selected_index": None,
-                        "should_execute": False,
-                        "reason": "The user asked for a summary first.",
-                        "confidence": 0.91,
-                    },
-                ]
-            ),
-            confidence_threshold=0.75,
-            max_parse_attempts=1,
-        )
-
-        parsed = interpreter.parse_pending_action_reply(
-            action,
-            prepare_pending_action_reply_input(action, "show me a summary"),
-        )
-
-        self.assertEqual(parsed["decision"], "modify")
-        self.assertEqual(parsed["requested_outputs"], ["summary"])
-        self.assertFalse(parsed["should_execute"])
+        self.assertIn("did not match", validation["reason"])
 
 
 if __name__ == "__main__":

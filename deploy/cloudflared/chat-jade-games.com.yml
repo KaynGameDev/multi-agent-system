@@ -1,0 +1,7 @@
+tunnel: <tunnel-uuid>
+credentials-file: /home/<linux-user>/.cloudflared/<tunnel-uuid>.json
+
+ingress:
+  - hostname: chat.jade-games.com
+    service: http://127.0.0.1:8000
+  - service: http_status:404

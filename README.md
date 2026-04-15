@@ -5,7 +5,7 @@ A lean LangGraph + Slack starter for a company-facing multi-agent assistant with
 ## Current architecture
 
 - `gateway` is the deterministic policy layer for routing, skill precedence, fallback, and delegation
-- `app/contracts.py` and `app/state.py` define the shared runtime contract model
+- `app/contracts/` and `app/state.py` define the shared runtime contract model
 - `app/pending_actions.py` is the only supported confirmation and waiting model
 - `app/tool_runtime.py` standardizes tool invocation/results for both ToolNode calls and internal workflows
 - `app/skill_runtime.py` attaches runtime-selected skill instructions to prompts
@@ -28,15 +28,11 @@ That keeps routing explicit, tool execution bounded, and the runtime easier to d
 Each turn follows one supported runtime flow:
 
 1. Slack or web appends the user message and metadata to graph state.
-2. The gateway resolves the route deterministically in this order:
-   - requested agent
-   - forked-skill delegate
-   - forked-skill fallback
-   - inline-skill-compatible agent
-   - pending-action owner
-   - tool-intent route
-   - deterministic matcher
-   - general fallback
+2. The gateway resolves the route deterministically:
+   - active `pending_action` first
+   - explicit internal overrides such as requested agent or explicit skill delegation next
+   - otherwise parser-based `AssistantRequest` routing
+   - otherwise deterministic fallback to `general_chat_agent`
 3. The selected agent either:
    - resolves a shared `pending_action`
    - renders a standardized tool result deterministically
@@ -110,6 +106,7 @@ Required:
 
 Interface configuration:
 - Slack: `SLACK_BOT_TOKEN` and `SLACK_APP_TOKEN`
+- Web auth and host guard: `WEB_AUTH_ENABLED`, `WEB_AUTH_SESSION_SECRET`, and either `WEB_AUTH_CREDENTIALS` or `WEB_AUTH_USERNAME` + `WEB_AUTH_PASSWORD`
 
 Optional:
 - `LLM_PROVIDER` (default: `google`; supported: `google`, `minimax`, `openai`)
@@ -122,6 +119,7 @@ Optional:
 - `OPENAI_BASE_URL` (default: `https://api.openai.com/v1`)
 - `PENDING_ACTION_PARSER_MODEL` (default: `LLM_MODEL`)
 - `PENDING_ACTION_PARSER_TEMPERATURE` (default: `0.0` for `google`/`openai`, `0.01` for `minimax`)
+- `ASSISTANT_REQUEST_PARSER_CONFIDENCE_THRESHOLD` (default: `0.60`)
 - `PENDING_ACTION_PARSER_CONFIDENCE_THRESHOLD` (default: `0.75`)
 - `LLM_HTTP_TRUST_ENV` (default: `false`; currently applied to the Google provider path)
 - `PROJECT_SHEET_RANGE` (default: `Tasks!A1:Z`)
@@ -133,6 +131,13 @@ Optional:
 - `KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH` (default: `knowledge/AI/Rules/google_sheets_catalog.json`)
 - `KNOWLEDGE_GOOGLE_SHEETS_CACHE_TTL_SECONDS` (default: `120`)
 - `CONVERSION_WORK_DIR` (default: `runtime/conversion`)
+- `WEB_ALLOWED_HOSTS` (comma-separated allowed `Host` headers such as `jade.example.com`; recommended when publishing the web app)
+- `WEB_AUTH_ENABLED` (default: `false`)
+- `WEB_AUTH_USERNAME` / `WEB_AUTH_PASSWORD` (simple single-user web login)
+- `WEB_AUTH_CREDENTIALS` (comma-separated `username:password` pairs for multi-user web login)
+- `WEB_AUTH_SESSION_SECRET` (required when `WEB_AUTH_ENABLED=true`)
+- `WEB_AUTH_COOKIE_SECURE` (default: `true`; set `false` only for local non-HTTPS testing)
+- `WEB_AUTH_SESSION_MAX_AGE_SECONDS` (default: `43200`, which is 12 hours)
 
 Provider examples:
 
@@ -180,6 +185,28 @@ Recommended scopes/events:
 ```bash
 python main.py
 ```
+
+## Hosting the web interface
+
+If you plan to publish the web UI on a company HTTPS URL, turn on the built-in login and host guard:
+
+```bash
+WEB_ENABLED=true
+WEB_HOST=127.0.0.1
+WEB_PORT=8000
+WEB_ALLOWED_HOSTS=jade.example.com
+WEB_AUTH_ENABLED=true
+WEB_AUTH_SESSION_SECRET=replace-with-a-long-random-secret
+WEB_AUTH_CREDENTIALS=alice:replace-me,bob:replace-me-too
+WEB_AUTH_COOKIE_SECURE=true
+```
+
+Notes:
+- Keep `WEB_AUTH_SESSION_SECRET` and the web credentials in your runtime environment or secret manager, not in the repo.
+- `WEB_ALLOWED_HOSTS` is the hostname allowlist for the served app and helps protect against bad `Host` headers.
+- The built-in login is intended for internal hosting behind HTTPS. For a larger rollout, putting this behind your company SSO or reverse-proxy auth is still the stronger long-term option.
+- If you are publishing through Cloudflare Tunnel, keep Jade on `127.0.0.1` and let `cloudflared` expose the local origin.
+- A ready-to-fill deployment bundle for `chat.jade-games.com` is available in [`deploy/README.md`](/Users/kayngame/jade_ai_core/deploy/README.md).
 
 ## Notes
 

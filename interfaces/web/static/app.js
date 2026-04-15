@@ -5,6 +5,8 @@ const state = {
   contextMenuConversationTitle: "New chat",
   conversations: [],
   sending: false,
+  authEnabled: false,
+  authenticatedUsername: "",
 };
 
 const elements = {
@@ -24,6 +26,9 @@ const elements = {
   conversationContextMenu: document.getElementById("conversationContextMenu"),
   contextMenuRenameButton: document.getElementById("contextMenuRenameButton"),
   contextMenuDeleteButton: document.getElementById("contextMenuDeleteButton"),
+  sidebarAuth: document.getElementById("sidebarAuth"),
+  authUsername: document.getElementById("authUsername"),
+  logoutButton: document.getElementById("logoutButton"),
 };
 
 const PROFILE_STORAGE_KEY = "jade-web-profile";
@@ -111,12 +116,29 @@ async function api(path, options = {}) {
     ...options,
   });
 
+  if (response.status === 401) {
+    window.location.href = "/login";
+    throw new Error("Your session has expired. Please sign in again.");
+  }
+
   if (!response.ok) {
     const payload = await response.json().catch(() => ({}));
     throw new Error(payload.detail || "Request failed.");
   }
 
   return response.json();
+}
+
+function syncAuthUi(session) {
+  state.authEnabled = Boolean(session && session.enabled);
+  state.authenticatedUsername = session && session.authenticated ? (session.username || "") : "";
+
+  elements.sidebarAuth.hidden = !state.authEnabled;
+  if (state.authEnabled) {
+    elements.authUsername.textContent = state.authenticatedUsername
+      ? `Signed in as ${state.authenticatedUsername}`
+      : "Protected access";
+  }
 }
 
 function restoreProfile() {
@@ -635,6 +657,8 @@ async function handleSubmit(event) {
 }
 
 async function bootstrap() {
+  const session = await api("/api/auth/session");
+  syncAuthUi(session);
   restoreProfile();
   autoResizeTextarea();
   updateConversationHeader("New chat");
@@ -742,6 +766,13 @@ elements.contextMenuDeleteButton.addEventListener("click", async () => {
     await deleteConversation(conversationId, conversationTitle);
   } catch (error) {
     window.alert(error.message || "Could not delete that chat.");
+  }
+});
+elements.logoutButton.addEventListener("click", async () => {
+  try {
+    await api("/api/auth/logout", { method: "POST" });
+  } finally {
+    window.location.href = "/login";
   }
 });
 
