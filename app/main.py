@@ -11,8 +11,11 @@ from dotenv import load_dotenv
 from app.checkpoints import build_checkpoint_store
 from app.config import is_agent_runtime_enabled, is_slack_enabled, load_settings, validate_bootstrap_settings
 from app.graph import build_agent_graph, build_web_agent_registrations
+from app.interpretation.intent_parser import IntentParser
+from app.interpretation.model_config import IntentParserModelConfig
 from app.llm_factory import build_runtime_llms
-from app.pending_action_parser import LLMPendingActionInterpreter
+from app.routing.agent_router import AgentRouter
+from app.routing.pending_action_router import PendingActionRouter
 from interfaces.slack.listener import SlackListener
 from interfaces.web.server import WebServer, format_web_chat_url
 
@@ -74,19 +77,31 @@ def bootstrap_system() -> list[object]:
 
     listeners: list[object] = []
     if is_agent_runtime_enabled(settings):
-        llm, pending_action_parser_llm = build_runtime_llms(settings)
-        pending_action_interpreter = LLMPendingActionInterpreter(
-            pending_action_parser_llm,
-            backup_llm=llm,
+        llm, parser_llm = build_runtime_llms(settings)
+        assistant_request_parser_config = IntentParserModelConfig(
+            confidence_threshold=settings.assistant_request_parser_confidence_threshold,
+        )
+        pending_action_parser_config = IntentParserModelConfig(
             confidence_threshold=settings.pending_action_parser_confidence_threshold,
         )
+        assistant_request_parser = IntentParser(
+            parser_llm,
+            config=assistant_request_parser_config,
+        )
+        pending_action_parser = IntentParser(
+            parser_llm,
+            config=pending_action_parser_config,
+        )
+        pending_action_router = PendingActionRouter(pending_action_parser)
+        agent_router = AgentRouter(assistant_request_parser)
         checkpoint_store = build_checkpoint_store(settings)
         try:
             agent_graph = build_agent_graph(
                 llm,
                 checkpointer=checkpoint_store.saver,
                 settings=settings,
-                pending_action_interpreter=pending_action_interpreter,
+                pending_action_router=pending_action_router,
+                agent_router=agent_router,
             )
             web_graph = build_agent_graph(
                 llm,
@@ -94,9 +109,10 @@ def bootstrap_system() -> list[object]:
                 settings=settings,
                 agent_registrations=build_web_agent_registrations(
                     settings=settings,
-                    pending_action_interpreter=pending_action_interpreter,
+                    pending_action_router=pending_action_router,
                 ),
-                pending_action_interpreter=pending_action_interpreter,
+                pending_action_router=pending_action_router,
+                agent_router=agent_router,
             )
         except Exception:
             checkpoint_store.close()
@@ -114,6 +130,11 @@ def bootstrap_system() -> list[object]:
         elif not settings.slack_enabled and (settings.slack_bot_token or settings.slack_app_token):
             print("💤 Slack listener disabled via SLACK_ENABLED=false")
         if settings.web_enabled:
+            if not settings.web_auth_enabled:
+                logger.warning(
+                    "Web interface is running WITHOUT authentication (WEB_AUTH_ENABLED=false). "
+                    "Do not expose this server on a public URL without enabling auth."
+                )
             listeners.append(
                 WebServer(
                     agent_graph=web_graph,
@@ -146,7 +167,7 @@ def _stop_listener(listener: object) -> None:
         try:
             stop()
         except Exception:
-            pass
+            logger.debug("Error stopping listener %s", listener.__class__.__name__, exc_info=True)
 
 
 def main() -> int:

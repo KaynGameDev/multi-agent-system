@@ -23,7 +23,6 @@ from agents.document_conversion.rendering import (
     render_conversion_response,
 )
 from app.language import detect_response_language
-from app.pending_action_parser import PendingActionReplyInterpreter
 from app.pending_actions import (
     action_allows_execution,
     build_pending_action,
@@ -32,9 +31,9 @@ from app.pending_actions import (
     get_pending_action,
     get_pending_action_metadata,
     is_pending_action_active,
-    resolve_pending_action_reply,
     update_pending_action,
 )
+from app.routing.pending_action_router import PendingActionRouter, PendingActionTurnResult, resolve_owned_pending_action_turn
 from app.state import AgentState
 from tools.document_conversion import (
     DEFAULT_CONVERSION_WORK_DIR,
@@ -163,14 +162,14 @@ class DocumentConversionAgentNode:
         settings=None,
         *,
         skill_registry: SkillRegistry | None = None,
-        pending_action_interpreter: PendingActionReplyInterpreter | None = None,
+        pending_action_router: PendingActionRouter | None = None,
         agent_name: str = "",
     ) -> None:
         self.llm = llm
         self.extractor = llm.with_structured_output(ConversionDraftPayload)
         self.settings = settings or load_settings()
         self.skill_registry = skill_registry
-        self.pending_action_interpreter = pending_action_interpreter
+        self.pending_action_router = pending_action_router
         self.agent_name = agent_name
         self.store = ConversionSessionStore(self._resolve_path(self.settings.conversion_work_dir, DEFAULT_CONVERSION_WORK_DIR))
         self.knowledge_root = self._resolve_path(
@@ -257,12 +256,15 @@ class DocumentConversionAgentNode:
             }
         preferred_language = resolve_preferred_language(state, session)
 
-        pending_action = get_pending_action(state)
-        if pending_action and pending_action.get("requested_by_agent") == self.agent_name and is_pending_action_active(pending_action):
+        pending_action, pending_action_turn = resolve_owned_pending_action_turn(
+            state, agent_name=self.agent_name, pending_action_router=self.pending_action_router,
+        )
+        if pending_action is not None:
             pending_action_result = self._build_pending_action_response(
                 state,
                 session=session,
                 pending_action=pending_action,
+                pending_action_turn=pending_action_turn,
                 preferred_language=preferred_language,
             )
             if pending_action_result is not None:
@@ -582,17 +584,29 @@ class DocumentConversionAgentNode:
         *,
         session: ConversionSessionRecord,
         pending_action: dict[str, Any],
+        pending_action_turn: PendingActionTurnResult,
         preferred_language: str,
     ) -> dict[str, Any] | None:
         tool_execution_trace: list[dict[str, Any]] = []
-        latest_text = extract_latest_human_text(state)
-        resolution = resolve_pending_action_reply(
-            pending_action,
-            latest_text,
-            interpreter=self.pending_action_interpreter,
-        )
-        contract = resolution["contract"]
-        validation = resolution["validation"]
+        contract = pending_action_turn.execution_contract
+        validation = pending_action_turn.validation
+        if contract is None or validation is None:
+            content = build_conversion_pending_action_clarification(
+                pending_action=pending_action,
+                validation={"reason": "The pending-action decision could not be validated."},
+                preferred_language=preferred_language,
+            )
+            return {
+                "content": content,
+                "assistant_response": build_assistant_response(
+                    kind="await_confirmation",
+                    content=content,
+                    pending_action=pending_action,
+                ),
+                "session": session,
+                "pending_action": pending_action,
+                "execution_contract": None,
+            }
 
         if validation.get("runtime_action") == "cancel":
             session = self.store.update_session(
@@ -817,7 +831,7 @@ class DocumentConversionAgentNode:
                 missing_required_fields=[],
             )
         except Exception:
-            pass
+            logger.debug("Failed to mark conversion session as failed", exc_info=True)
 
     def _find_existing_session(self, state: AgentState) -> ConversionSessionRecord | None:
         session_id = str(state.get("conversion_session_id", "")).strip()

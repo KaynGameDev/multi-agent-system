@@ -13,7 +13,8 @@ from agents.knowledge_base_builder.agent import KnowledgeBaseBuilderAgentNode
 from agents.project_task.agent import ProjectTaskAgentNode
 from app.agent_registry import AgentRegistration
 from app.config import load_settings
-from app.pending_action_parser import PendingActionReplyInterpreter
+from app.routing.agent_router import AgentRouter
+from app.routing.pending_action_router import PendingActionRouter
 from gateway.agent import GatewayNode
 from app.skills import SkillRegistry
 from app.state import AgentState
@@ -31,7 +32,7 @@ from app.tool_registry import KNOWLEDGE_BUILDER_TOOL_IDS, KNOWLEDGE_TOOL_IDS, PR
 def build_default_agent_registrations(
     settings=None,
     *,
-    pending_action_interpreter: PendingActionReplyInterpreter | None = None,
+    pending_action_router: PendingActionRouter | None = None,
 ) -> tuple[AgentRegistration, ...]:
     resolved_settings = settings or load_settings()
     knowledge_read_tools = (
@@ -53,7 +54,7 @@ def build_default_agent_registrations(
         AgentRegistration(
             name="general_chat_agent",
             description="Use for greetings, casual chat, and general questions that do not require project data or internal documentation.",
-            build_node=lambda llm, skill_registry=None, pending_action_interpreter=None: GeneralChatAgentNode(
+            build_node=lambda llm, skill_registry=None, pending_action_router=None: GeneralChatAgentNode(
                 llm,
                 skill_registry=skill_registry,
                 agent_name="general_chat_agent",
@@ -68,11 +69,11 @@ def build_default_agent_registrations(
                 "Use for internal documentation, system architecture, setup instructions, repository guidance, "
                 "and documented company workflows."
             ),
-            build_node=lambda llm, tools=knowledge_read_tools, skill_registry=None, pending_action_interpreter=pending_action_interpreter: KnowledgeAgentNode(
+            build_node=lambda llm, tools=knowledge_read_tools, skill_registry=None, pending_action_router=pending_action_router: KnowledgeAgentNode(
                 llm,
                 list(tools),
                 skill_registry=skill_registry,
-                pending_action_interpreter=pending_action_interpreter,
+                pending_action_router=pending_action_router,
                 agent_name="knowledge_agent",
                 tool_ids=knowledge_read_tool_ids,
             ),
@@ -87,11 +88,11 @@ def build_default_agent_registrations(
                 "Use for knowledge elicitation, KB document review, layer placement decisions, "
                 "feature-spec skeleton building, and KB V1 execution tracking."
             ),
-            build_node=lambda llm, tools=knowledge_builder_tools, skill_registry=None, pending_action_interpreter=pending_action_interpreter: KnowledgeBaseBuilderAgentNode(
+            build_node=lambda llm, tools=knowledge_builder_tools, skill_registry=None, pending_action_router=pending_action_router: KnowledgeBaseBuilderAgentNode(
                 llm,
                 list(tools),
                 skill_registry=skill_registry,
-                pending_action_interpreter=pending_action_interpreter,
+                pending_action_router=pending_action_router,
                 agent_name="knowledge_base_builder_agent",
                 tool_ids=knowledge_builder_tool_ids,
             ),
@@ -106,11 +107,11 @@ def build_default_agent_registrations(
                 "Use for project tracker questions, assignees, deadlines, schedules, priorities, iterations, "
                 "project status, or anything that likely requires Google Sheets data."
             ),
-            build_node=lambda llm, tools=project_tools, skill_registry=None, pending_action_interpreter=pending_action_interpreter: ProjectTaskAgentNode(
+            build_node=lambda llm, tools=project_tools, skill_registry=None, pending_action_router=pending_action_router: ProjectTaskAgentNode(
                 llm,
                 list(tools),
                 skill_registry=skill_registry,
-                pending_action_interpreter=pending_action_interpreter,
+                pending_action_router=pending_action_router,
                 agent_name="project_task_agent",
                 tool_ids=project_tool_ids,
             ),
@@ -125,11 +126,11 @@ def build_default_agent_registrations(
                 "Use for Slack-driven design document conversion, canonical knowledge package staging, "
                 "follow-up questions about missing conversion fields, and approval-gated publishing."
             ),
-            build_node=lambda llm, settings=resolved_settings, skill_registry=None, pending_action_interpreter=pending_action_interpreter: DocumentConversionAgentNode(
+            build_node=lambda llm, settings=resolved_settings, skill_registry=None, pending_action_router=pending_action_router: DocumentConversionAgentNode(
                 llm,
                 settings=settings,
                 skill_registry=skill_registry,
-                pending_action_interpreter=pending_action_interpreter,
+                pending_action_router=pending_action_router,
                 agent_name="document_conversion_agent",
             ),
             selection_order=10,
@@ -141,7 +142,7 @@ def build_default_agent_registrations(
 def build_web_agent_registrations(
     settings=None,
     *,
-    pending_action_interpreter: PendingActionReplyInterpreter | None = None,
+    pending_action_router: PendingActionRouter | None = None,
 ) -> tuple[AgentRegistration, ...]:
     allowed_agent_names = {
         "general_chat_agent",
@@ -154,7 +155,7 @@ def build_web_agent_registrations(
         registration
         for registration in build_default_agent_registrations(
             settings=settings,
-            pending_action_interpreter=pending_action_interpreter,
+            pending_action_router=pending_action_router,
         )
         if registration.name in allowed_agent_names
     )
@@ -164,13 +165,13 @@ def normalize_agent_registrations(
     agent_registrations: Sequence[AgentRegistration] | None,
     *,
     settings=None,
-    pending_action_interpreter: PendingActionReplyInterpreter | None = None,
+    pending_action_router: PendingActionRouter | None = None,
 ) -> tuple[AgentRegistration, ...]:
     registrations = tuple(
         agent_registrations
         or build_default_agent_registrations(
             settings=settings,
-            pending_action_interpreter=pending_action_interpreter,
+            pending_action_router=pending_action_router,
         )
     )
     if not registrations:
@@ -223,12 +224,13 @@ def build_graph(
     default_route: str | None = None,
     settings=None,
     skill_registry: SkillRegistry | None = None,
-    pending_action_interpreter: PendingActionReplyInterpreter | None = None,
+    pending_action_router: PendingActionRouter | None = None,
+    agent_router: AgentRouter | None = None,
 ):
     registrations = normalize_agent_registrations(
         agent_registrations,
         settings=settings,
-        pending_action_interpreter=pending_action_interpreter,
+        pending_action_router=pending_action_router,
     )
     resolved_default_route = resolve_default_route(registrations, default_route=default_route)
     resolved_settings = settings or load_settings()
@@ -242,6 +244,8 @@ def build_graph(
         agent_registrations=registrations,
         default_route=resolved_default_route,
         skill_registry=resolved_skill_registry,
+        pending_action_router=pending_action_router,
+        agent_router=agent_router,
     )
 
     graph = StateGraph(AgentState)
@@ -256,7 +260,7 @@ def build_graph(
                 registration,
                 llm,
                 skill_registry=resolved_skill_registry,
-                pending_action_interpreter=pending_action_interpreter,
+                pending_action_router=pending_action_router,
             ),
         )
         route_map[registration.name] = registration.name
@@ -299,7 +303,8 @@ def build_agent_graph(
     default_route: str | None = None,
     settings=None,
     skill_registry: SkillRegistry | None = None,
-    pending_action_interpreter: PendingActionReplyInterpreter | None = None,
+    pending_action_router: PendingActionRouter | None = None,
+    agent_router: AgentRouter | None = None,
 ):
     return build_graph(
         llm,
@@ -308,7 +313,8 @@ def build_agent_graph(
         default_route=default_route,
         settings=settings,
         skill_registry=skill_registry,
-        pending_action_interpreter=pending_action_interpreter,
+        pending_action_router=pending_action_router,
+        agent_router=agent_router,
     )
 
 
@@ -317,12 +323,12 @@ def build_registered_agent_node(
     llm,
     *,
     skill_registry: SkillRegistry | None = None,
-    pending_action_interpreter: PendingActionReplyInterpreter | None = None,
+    pending_action_router: PendingActionRouter | None = None,
 ):
     kwargs = build_supported_agent_node_kwargs(
         registration.build_node,
         skill_registry=skill_registry,
-        pending_action_interpreter=pending_action_interpreter,
+        pending_action_router=pending_action_router,
     )
     return registration.build_node(llm, **kwargs)
 

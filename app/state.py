@@ -8,9 +8,11 @@ from langgraph.graph.message import add_messages
 from typing_extensions import TypedDict
 
 from app.contracts import (
+    AgentRouteDecision,
     AssistantResponse,
     ExecutionContract,
     PendingAction,
+    PendingActionDecision,
     RoutingDecision,
     SkillInvocationContract,
     ToolExecutionRecord,
@@ -27,6 +29,9 @@ class AgentState(TypedDict, total=False):
     route_reason: str
     route_policy_step: str
     pending_action: PendingAction | None
+    pending_action_decision: PendingActionDecision | dict[str, Any] | None
+    pending_action_resolution_key: str | None
+    agent_route_decision: AgentRouteDecision | dict[str, Any] | None
     execution_contract: ExecutionContract | None
     assistant_response: AssistantResponse | None
     routing_decision: RoutingDecision | None

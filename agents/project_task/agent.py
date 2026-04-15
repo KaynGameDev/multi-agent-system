@@ -7,17 +7,16 @@ from langchain_core.messages import AIMessage, SystemMessage
 from app.contracts import build_assistant_response
 from app.language import detect_response_language
 from app.messages import extract_latest_human_text, stringify_message_content
-from app.pending_action_parser import PendingActionReplyInterpreter
 from app.pending_actions import (
     PendingActionSelectionOption,
     build_pending_action,
     get_pending_action,
     get_pending_action_metadata,
     is_pending_action_active,
-    resolve_pending_action_reply,
     update_pending_action,
 )
 from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
+from app.routing.pending_action_router import PendingActionRouter, PendingActionTurnResult, resolve_owned_pending_action_turn
 from app.skill_runtime import build_skill_prompt_context
 from app.skills import SkillRegistry
 from app.state import AgentState
@@ -38,13 +37,13 @@ class ProjectTaskAgentNode:
         tools: list,
         *,
         skill_registry: SkillRegistry | None = None,
-        pending_action_interpreter: PendingActionReplyInterpreter | None = None,
+        pending_action_router: PendingActionRouter | None = None,
         agent_name: str = "",
         tool_ids: tuple[str, ...] = (),
     ) -> None:
         self.llm = llm.bind_tools(tools)
         self.skill_registry = skill_registry
-        self.pending_action_interpreter = pending_action_interpreter
+        self.pending_action_router = pending_action_router
         self.agent_name = agent_name
         self.tool_ids = tuple(tool_ids)
 
@@ -52,7 +51,7 @@ class ProjectTaskAgentNode:
         rendered_response = build_project_task_response(
             state,
             agent_name=self.agent_name,
-            pending_action_interpreter=self.pending_action_interpreter,
+            pending_action_router=self.pending_action_router,
         )
         if rendered_response is not None:
             return rendered_response
@@ -184,17 +183,19 @@ def build_project_task_response(
     state: AgentState,
     *,
     agent_name: str,
-    pending_action_interpreter: PendingActionReplyInterpreter | None = None,
+    pending_action_router: PendingActionRouter | None = None,
 ) -> dict[str, Any] | None:
     latest_user_text = extract_latest_human_text(state)
     preferred_language = detect_response_language(latest_user_text)
-    pending_action = get_pending_action(state)
-    if pending_action and pending_action.get("requested_by_agent") == agent_name and is_pending_action_active(pending_action):
+    pending_action, pending_action_turn = resolve_owned_pending_action_turn(
+        state, agent_name=agent_name, pending_action_router=pending_action_router,
+    )
+    if pending_action is not None:
         follow_up_result = build_task_pending_action_response(
             state,
             pending_action=pending_action,
+            pending_action_turn=pending_action_turn,
             preferred_language=preferred_language,
-            pending_action_interpreter=pending_action_interpreter,
         )
         if follow_up_result is not None:
             return follow_up_result
@@ -325,17 +326,26 @@ def build_task_pending_action_response(
     state: AgentState,
     *,
     pending_action: dict[str, Any],
+    pending_action_turn: PendingActionTurnResult,
     preferred_language: str,
-    pending_action_interpreter: PendingActionReplyInterpreter | None = None,
 ) -> dict[str, Any] | None:
-    latest_user_text = extract_latest_human_text(state)
-    resolution = resolve_pending_action_reply(
-        pending_action,
-        latest_user_text,
-        interpreter=pending_action_interpreter,
-    )
-    contract = resolution["contract"]
-    validation = resolution["validation"]
+    contract = pending_action_turn.execution_contract
+    validation = pending_action_turn.validation
+    if contract is None or validation is None:
+        content = build_task_clarification_text(
+            pending_action=pending_action,
+            validation={"reason": "The pending-action decision could not be validated."},
+            preferred_language=preferred_language,
+        )
+        return {
+            "messages": [AIMessage(content=content)],
+            "assistant_response": build_assistant_response(
+                kind="await_confirmation",
+                content=content,
+                pending_action=pending_action,
+            ),
+            "pending_action": pending_action,
+        }
 
     if validation.get("runtime_action") == "cancel":
         content = "已取消待处理的任务跟进。" if preferred_language == "zh" else "Cancelled the pending task follow-up."
@@ -572,6 +582,7 @@ def build_task_option(task: dict[str, Any], *, index: int, include_referential_a
     if include_referential_aliases:
         aliases.extend(["that one", "this one", "details", "detail", "那个", "这个", "详情"])
     return PendingActionSelectionOption(
+        id=first_non_empty(task.get("id"), title, str(index)),
         label=title,
         aliases=list(dict.fromkeys(alias for alias in aliases if alias)),
         value=title,

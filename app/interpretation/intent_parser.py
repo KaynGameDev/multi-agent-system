@@ -4,6 +4,7 @@ import ast
 from collections.abc import Sequence
 import json
 import logging
+import re
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
@@ -102,7 +103,11 @@ class IntentParser:
                 notes=DEFAULT_INTENT_PARSER_MALFORMED_REASON,
             )
 
-        if candidate.type != "assistant_request":
+        candidate_type = normalize_contract_type_name(
+            candidate.type,
+            expected_type="assistant_request",
+        )
+        if candidate_type != "assistant_request":
             logger.warning(
                 "AssistantRequest parser returned wrong contract type; using general fallback. type=%s",
                 candidate.type,
@@ -188,7 +193,11 @@ class IntentParser:
                 notes=candidate.notes or DEFAULT_PENDING_ACTION_LOW_CONFIDENCE_REASON,
             )
 
-        if candidate.type != "pending_action_decision":
+        candidate_type = normalize_contract_type_name(
+            candidate.type,
+            expected_type="pending_action_decision",
+        )
+        if candidate_type != "pending_action_decision":
             logger.warning(
                 "PendingActionDecision parser returned wrong contract type; using unclear decision. pending_action_id=%s type=%s",
                 pending_action_id,
@@ -202,7 +211,7 @@ class IntentParser:
         try:
             return validate_pending_action_decision(
                 {
-                    "type": candidate.type,
+                    "type": candidate_type,
                     "pending_action_id": candidate.pending_action_id or pending_action_id,
                     "decision": candidate.decision,
                     "notes": candidate.notes,
@@ -398,6 +407,18 @@ def parse_json_like_payload(text: str) -> dict[str, Any] | None:
     if isinstance(parsed, dict):
         return parsed
     return None
+
+
+def normalize_contract_type_name(value: str | None, *, expected_type: str) -> str:
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return ""
+
+    normalized = re.sub(r"[^a-z0-9]+", "", cleaned.lower())
+    expected_normalized = re.sub(r"[^a-z0-9]+", "", str(expected_type).strip().lower())
+    if normalized == expected_normalized:
+        return expected_type
+    return cleaned
 
 
 def normalize_user_message(user_message: str) -> str:

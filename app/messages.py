@@ -1,8 +1,12 @@
 from __future__ import annotations
 
-from langchain_core.messages import HumanMessage
+import re
+
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
 from app.contracts import extract_assistant_response_text
+
+THINK_BLOCK_PATTERN = re.compile(r"<think>.*?</think>", re.IGNORECASE | re.DOTALL)
 
 
 def stringify_message_content(content) -> str:
@@ -21,6 +25,41 @@ def stringify_message_content(content) -> str:
         return "\n".join(part for part in parts if part).strip()
 
     return str(content)
+
+
+def strip_internal_reasoning(text: str) -> str:
+    cleaned = THINK_BLOCK_PATTERN.sub("", str(text or ""))
+    return cleaned.strip()
+
+
+def normalize_text_for_routing_context(text: str) -> str:
+    stripped = strip_internal_reasoning(text)
+    if not stripped:
+        return ""
+    return " ".join(part.strip() for part in stripped.splitlines() if part.strip()).strip()
+
+
+def render_message_for_routing_context(message) -> str:
+    if isinstance(message, ToolMessage):
+        return ""
+
+    text = normalize_text_for_routing_context(
+        stringify_message_content(getattr(message, "content", ""))
+    )
+    if not text:
+        return ""
+
+    if isinstance(message, HumanMessage):
+        return f"user: {text}"
+    if isinstance(message, AIMessage):
+        return f"assistant: {text}"
+
+    message_type = str(getattr(message, "type", "")).strip().lower()
+    if message_type == "human":
+        return f"user: {text}"
+    if message_type in {"ai", "assistant"}:
+        return f"assistant: {text}"
+    return text
 
 
 def extract_final_text(final_state: dict) -> str:

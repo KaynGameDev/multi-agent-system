@@ -5,6 +5,22 @@ from uuid import uuid4
 
 from typing_extensions import Literal, TypedDict
 
+from app.utils import safe_get_str
+
+from .agent_route_decision import AgentRouteDecision, validate_agent_route_decision
+from .assistant_request import (
+    AssistantRequest,
+    AssistantRequestDomain,
+    build_fallback_assistant_request,
+    validate_assistant_request,
+)
+from .pending_action_decision import (
+    PendingActionDecision,
+    PendingActionDecisionKind,
+    build_unclear_pending_action_decision,
+    validate_pending_action_decision,
+)
+
 PendingActionStatus = Literal[
     "awaiting_confirmation",
     "approved",
@@ -36,6 +52,7 @@ class PendingActionTargetScope(TypedDict, total=False):
 
 
 class PendingActionSelectionOption(TypedDict, total=False):
+    id: str
     label: str
     aliases: list[str]
     value: str
@@ -397,27 +414,27 @@ def normalize_skill_invocation_mode(raw_value: Any) -> SkillInvocationMode:
 
 def normalize_skill_invocation_contract(contract: SkillInvocationContract) -> SkillInvocationContract:
     normalized = dict(contract)
-    normalized["skill_id"] = str(normalized.get("skill_id", "")).strip()
-    name = str(normalized.get("name", "")).strip()
+    normalized["skill_id"] = safe_get_str(normalized, "skill_id")
+    name = safe_get_str(normalized, "name")
     if name:
         normalized["name"] = name
     else:
         normalized.pop("name", None)
-    description = str(normalized.get("description", "")).strip()
+    description = safe_get_str(normalized, "description")
     if description:
         normalized["description"] = description
     else:
         normalized.pop("description", None)
-    source_path = str(normalized.get("source_path", "")).strip()
+    source_path = safe_get_str(normalized, "source_path")
     if source_path:
         normalized["source_path"] = source_path
     else:
         normalized.pop("source_path", None)
     normalized["mode"] = normalize_skill_invocation_mode(normalized.get("mode", "inline"))
-    normalized["target_agent"] = str(normalized.get("target_agent", "")).strip()
+    normalized["target_agent"] = safe_get_str(normalized, "target_agent")
     normalized["arguments"] = dict(normalized.get("arguments") or {})
-    normalized["source"] = str(normalized.get("source", "")).strip()
-    normalized["reason"] = str(normalized.get("reason", "")).strip()
+    normalized["source"] = safe_get_str(normalized, "source")
+    normalized["reason"] = safe_get_str(normalized, "reason")
     context_paths = normalized.get("context_paths")
     if isinstance(context_paths, list):
         normalized["context_paths"] = [str(item).strip() for item in context_paths if str(item).strip()]
@@ -449,38 +466,38 @@ def normalize_tool_invocation_envelope(
 
     if "tool_name" in envelope and "arguments" in envelope and "status" in envelope:
         normalized: ToolInvocationEnvelope = {
-            "tool_name": str(envelope.get("tool_name", tool_name)).strip(),
+            "tool_name": safe_get_str(envelope, "tool_name", tool_name),
             "arguments": dict(envelope.get("arguments") or arguments or {}),
-            "status": str(envelope.get("status", "requested")).strip().lower() or "requested",
+            "status": safe_get_str(envelope, "status", "requested").lower() or "requested",
         }
-        tool_id = str(envelope.get("tool_id", "")).strip()
+        tool_id = safe_get_str(envelope, "tool_id")
         if tool_id:
             normalized["tool_id"] = tool_id
-        display_name = str(envelope.get("display_name", "")).strip()
+        display_name = safe_get_str(envelope, "display_name")
         if display_name:
             normalized["display_name"] = display_name
-        tool_family = str(envelope.get("tool_family", "")).strip()
+        tool_family = safe_get_str(envelope, "tool_family")
         if tool_family:
             normalized["tool_family"] = tool_family
-        execution_backend_value = str(envelope.get("execution_backend", execution_backend)).strip().lower()
+        execution_backend_value = safe_get_str(envelope, "execution_backend", execution_backend).lower()
         if execution_backend_value:
             normalized["execution_backend"] = execution_backend_value  # type: ignore[assignment]
         payload = envelope.get("payload")
         if isinstance(payload, dict):
             normalized["payload"] = dict(payload)
-        error = str(envelope.get("error", "")).strip()
+        error = safe_get_str(envelope, "error")
         if error:
             normalized["error"] = error
         diagnostics = envelope.get("diagnostics")
         if isinstance(diagnostics, list):
             normalized["diagnostics"] = [dict(item) for item in diagnostics if isinstance(item, dict)]
-        source_value = str(envelope.get("source", source)).strip()
+        source_value = safe_get_str(envelope, "source", source)
         if source_value:
             normalized["source"] = source_value
-        reason_value = str(envelope.get("reason", reason)).strip()
+        reason_value = safe_get_str(envelope, "reason", reason)
         if reason_value:
             normalized["reason"] = reason_value
-        tool_call_id = str(envelope.get("tool_call_id", envelope.get("id", ""))).strip()
+        tool_call_id = safe_get_str(envelope, "tool_call_id", envelope.get("id", ""))
         if tool_call_id:
             normalized["tool_call_id"] = tool_call_id
         return normalized
@@ -492,7 +509,7 @@ def normalize_tool_invocation_envelope(
     if not isinstance(inferred_arguments, dict):
         inferred_arguments = arguments or {}
 
-    status = str(envelope.get("status", "")).strip().lower()
+    status = safe_get_str(envelope, "status").lower()
     if not status:
         if envelope.get("ok") is True:
             status = "ok"
@@ -508,14 +525,14 @@ def normalize_tool_invocation_envelope(
     normalized = build_tool_invocation_envelope(
         inferred_tool_name,
         inferred_arguments,
-        execution_backend=execution_backend or str(envelope.get("execution_backend", "")).strip(),
+        execution_backend=execution_backend or safe_get_str(envelope, "execution_backend"),
         status=status,  # type: ignore[arg-type]
         payload=dict(envelope),
-        error=str(envelope.get("error", "")).strip(),
+        error=safe_get_str(envelope, "error"),
         diagnostics=normalize_diagnostics(envelope.get("diagnostics")),
-        source=source or str(envelope.get("source", "")).strip(),
-        reason=reason or str(envelope.get("reason", "")).strip(),
-        tool_call_id=str(envelope.get("tool_call_id", envelope.get("id", ""))).strip(),
+        source=source or safe_get_str(envelope, "source"),
+        reason=reason or safe_get_str(envelope, "reason"),
+        tool_call_id=safe_get_str(envelope, "tool_call_id", envelope.get("id", "")),
     )
     return normalized
 
@@ -544,36 +561,36 @@ def normalize_tool_result_envelope(
     if "tool_name" in result and "arguments" in result and "status" in result and "payload" in result:
         payload = result.get("payload")
         normalized: ToolResultEnvelope = {
-            "tool_name": str(result.get("tool_name", tool_name)).strip(),
+            "tool_name": safe_get_str(result, "tool_name", tool_name),
             "arguments": dict(result.get("arguments") or arguments or {}),
-            "status": str(result.get("status", "ok")).strip().lower() or "ok",
+            "status": safe_get_str(result, "status", "ok").lower() or "ok",
             "payload": dict(payload) if isinstance(payload, dict) else {},
         }
-        tool_id = str(result.get("tool_id", "")).strip()
+        tool_id = safe_get_str(result, "tool_id")
         if tool_id:
             normalized["tool_id"] = tool_id
-        display_name = str(result.get("display_name", "")).strip()
+        display_name = safe_get_str(result, "display_name")
         if display_name:
             normalized["display_name"] = display_name
-        tool_family = str(result.get("tool_family", "")).strip()
+        tool_family = safe_get_str(result, "tool_family")
         if tool_family:
             normalized["tool_family"] = tool_family
-        execution_backend_value = str(result.get("execution_backend", execution_backend)).strip().lower()
+        execution_backend_value = safe_get_str(result, "execution_backend", execution_backend).lower()
         if execution_backend_value:
             normalized["execution_backend"] = execution_backend_value  # type: ignore[assignment]
-        error = str(result.get("error", "")).strip()
+        error = safe_get_str(result, "error")
         if error:
             normalized["error"] = error
         diagnostics = result.get("diagnostics")
         if isinstance(diagnostics, list):
             normalized["diagnostics"] = [dict(item) for item in diagnostics if isinstance(item, dict)]
-        source_value = str(result.get("source", source)).strip()
+        source_value = safe_get_str(result, "source", source)
         if source_value:
             normalized["source"] = source_value
-        reason_value = str(result.get("reason", reason)).strip()
+        reason_value = safe_get_str(result, "reason", reason)
         if reason_value:
             normalized["reason"] = reason_value
-        tool_call_id = str(result.get("tool_call_id", result.get("id", ""))).strip()
+        tool_call_id = safe_get_str(result, "tool_call_id", result.get("id", ""))
         if tool_call_id:
             normalized["tool_call_id"] = tool_call_id
         return normalized
@@ -582,14 +599,14 @@ def normalize_tool_result_envelope(
     return build_tool_result_envelope(
         tool_name or str(result.get("tool_name") or result.get("name") or "").strip(),
         dict(arguments or result.get("arguments") or result.get("args") or {}),
-        execution_backend=execution_backend or str(result.get("execution_backend", "")).strip(),
+        execution_backend=execution_backend or safe_get_str(result, "execution_backend"),
         status=status,
         payload=dict(result),
-        error=str(result.get("error", "")).strip(),
+        error=safe_get_str(result, "error"),
         diagnostics=normalize_diagnostics(result.get("diagnostics")),
-        source=source or str(result.get("source", "")).strip(),
-        reason=reason or str(result.get("reason", "")).strip(),
-        tool_call_id=str(result.get("tool_call_id", result.get("id", ""))).strip(),
+        source=source or safe_get_str(result, "source"),
+        reason=reason or safe_get_str(result, "reason"),
+        tool_call_id=safe_get_str(result, "tool_call_id", result.get("id", "")),
     )
 
 
@@ -597,7 +614,7 @@ def tool_invocation_to_tool_call(envelope: ToolInvocationEnvelope | None) -> dic
     normalized = normalize_tool_invocation_envelope(
         envelope if isinstance(envelope, dict) else None,
     )
-    tool_call_id = str(normalized.get("tool_call_id", "")).strip() or f"call_{normalized['tool_name']}_{uuid4().hex}"
+    tool_call_id = safe_get_str(normalized, "tool_call_id") or f"call_{normalized['tool_name']}_{uuid4().hex}"
     return {
         "name": normalized["tool_name"],
         "args": dict(normalized.get("arguments") or {}),
@@ -660,14 +677,14 @@ def extract_tool_result_text(result: Any) -> str:
             text = _stringify_content(content)
             if text:
                 return text
-    error = str(result.get("error", "")).strip()
+    error = safe_get_str(result, "error")
     if error:
         return error
     return ""
 
 
 def infer_tool_result_status(result: dict[str, Any]) -> ToolEnvelopeStatus:
-    status = str(result.get("status", "")).strip().lower()
+    status = safe_get_str(result, "status").lower()
     if status in {"requested", "running", "ok", "error", "blocked", "cancelled"}:
         return status  # type: ignore[return-value]
     if result.get("ok") is True:

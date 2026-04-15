@@ -154,11 +154,19 @@ class AgentRouter:
             try:
                 parsed = self.parser.parse_assistant_request(normalized_user_text)
             except Exception:
+                logger.warning(
+                    "AgentRouter parser fallback invocation (no routing context) failed; using general fallback.",
+                    exc_info=True,
+                )
                 return build_fallback_assistant_request(
                     normalized_user_text,
                     notes=DEFAULT_INTENT_PARSER_UNAVAILABLE_REASON,
                 )
         except Exception:
+            logger.warning(
+                "AgentRouter parser invocation failed; using general fallback.",
+                exc_info=True,
+            )
             return build_fallback_assistant_request(
                 normalized_user_text,
                 notes=DEFAULT_INTENT_PARSER_UNAVAILABLE_REASON,

@@ -8,12 +8,14 @@ from langchain_core.messages import AIMessage
 
 from app.contracts import (
     AgentRouteDecision,
+    ExecutionContract,
+    SkillInvocationContract,
     build_routing_decision,
     validate_agent_route_decision,
 )
 from app.interpretation.intent_parser import IntentParser
 from app.messages import extract_latest_human_text, render_message_for_routing_context
-from app.pending_actions import expire_pending_action
+from app.pending_actions import PendingAction, expire_pending_action
 from app.routing.agent_router import AgentRouter, AgentRouterResult
 from app.routing.pending_action_router import (
     PendingActionRouter,
@@ -59,6 +61,23 @@ class GatewayRouteSelection:
     agent_route_decision: AgentRouteDecision
 
 
+@dataclass(frozen=True)
+class _PendingActionContext:
+    pending_action_turn: PendingActionTurnResult | None
+    pending_action_decision: dict[str, Any] | None
+    pending_action_resolution_key: str | None
+    execution_contract: ExecutionContract | None
+
+
+@dataclass(frozen=True)
+class _SkillSelectionResult:
+    resolved_skill_ids: tuple[str, ...]
+    skill_invocation_contracts: tuple[SkillInvocationContract, ...]
+    skill_runtime_state: dict[str, Any]
+    warnings: list[str]
+    skill_diagnostics: list[dict[str, Any]]
+
+
 class GatewayNode:
     def __init__(
         self,
@@ -86,39 +105,19 @@ class GatewayNode:
             state,
             general_assistant_name=self.general_assistant_name,
         )
-        latest_user_text = request_context.latest_user_text
-        context_paths = request_context.context_paths
-        requested_skill_ids = request_context.requested_skill_ids
-        requested_agent = request_context.requested_agent
         routing_state = dict(state)
-        pending_action_turn = resolve_pending_action_turn_from_state(
-            routing_state,
-            pending_action_router=self.pending_action_router,
-        )
-        pending_action_decision = None
-        pending_action_resolution_key = None
-        execution_contract = None
-        if pending_action_turn is not None:
-            pending_action_decision = pending_action_turn.pending_action_decision.model_dump()
-            pending_action_resolution_key = pending_action_turn.pending_action_resolution_key
-            execution_contract = pending_action_turn.execution_contract
-            routing_state["pending_action_decision"] = pending_action_decision
-            routing_state["pending_action_resolution_key"] = pending_action_resolution_key
-            routing_state["execution_contract"] = execution_contract
-        else:
-            routing_state["pending_action_decision"] = None
-            routing_state["pending_action_resolution_key"] = None
-            routing_state["execution_contract"] = None
+
+        pa_ctx = self._resolve_pending_action_context(routing_state)
 
         explicit_skill_definitions, skill_diagnostics, warnings = resolve_explicit_skill_definitions(
             self.skill_registry,
-            requested_skill_ids=requested_skill_ids,
-            context_paths=context_paths,
+            requested_skill_ids=request_context.requested_skill_ids,
+            context_paths=request_context.context_paths,
         )
         route_selection = resolve_gateway_route_selection(
-            pending_action_turn=pending_action_turn,
-            latest_user_text=latest_user_text,
-            requested_agent=requested_agent,
+            pending_action_turn=pa_ctx.pending_action_turn,
+            latest_user_text=request_context.latest_user_text,
+            requested_agent=request_context.requested_agent,
             explicit_skill_definitions=explicit_skill_definitions,
             state=routing_state,
             agent_router=self.agent_router,
@@ -131,11 +130,108 @@ class GatewayNode:
 
         selected_agent = route_selection.selected_agent
         policy_step = route_selection.policy_step
-        route_reason = route_selection.route_reason
-        agent_route_decision = route_selection.agent_route_decision
         agent_diagnostics = list(route_selection.diagnostics)
         warnings = list(route_selection.warnings)
 
+        skill_result = self._select_skills_and_contracts(
+            selected_agent=selected_agent,
+            latest_user_text=request_context.latest_user_text,
+            context_paths=request_context.context_paths,
+            explicit_skill_definitions=explicit_skill_definitions,
+            warnings=warnings,
+            skill_diagnostics=skill_diagnostics,
+        )
+
+        routing_decision = build_routing_decision(
+            selected_agent,
+            reason=route_selection.route_reason,
+            policy_step=policy_step,
+            warnings=skill_result.warnings,
+            diagnostics=agent_diagnostics,
+            selected_agent=selected_agent,
+            requested_agent=request_context.requested_agent,
+            requested_skill_ids=list(request_context.requested_skill_ids),
+            resolved_skill_ids=list(skill_result.resolved_skill_ids),
+            skill_invocation_contracts=list(skill_result.skill_invocation_contracts),
+        )
+        logger.info(
+            "Gateway selected route=%s policy_step=%s requested_agent=%s requested_skills=%s resolved_skills=%s warnings=%s",
+            selected_agent,
+            policy_step,
+            request_context.requested_agent,
+            request_context.requested_skill_ids,
+            skill_result.resolved_skill_ids,
+            skill_result.warnings,
+        )
+
+        expired_pending_action, expiry_messages = self._handle_pending_action_expiry(
+            policy_step, pa_ctx.pending_action_turn,
+        )
+
+        state_update: dict[str, Any] = {
+            "route": selected_agent,
+            "route_reason": route_selection.route_reason,
+            "route_policy_step": policy_step,
+            "pending_action_decision": pa_ctx.pending_action_decision,
+            "pending_action_resolution_key": pa_ctx.pending_action_resolution_key,
+            "agent_route_decision": route_selection.agent_route_decision.model_dump(),
+            "execution_contract": pa_ctx.execution_contract,
+            "requested_skill_ids": list(request_context.requested_skill_ids),
+            "resolved_skill_ids": list(skill_result.resolved_skill_ids),
+            "context_paths": list(request_context.context_paths),
+            "skill_resolution_diagnostics": skill_result.skill_diagnostics,
+            "agent_selection_diagnostics": agent_diagnostics,
+            "selection_warnings": skill_result.warnings,
+            "skill_invocation_contracts": list(skill_result.skill_invocation_contracts),
+            "active_skill_invocation_contracts": skill_result.skill_runtime_state["active_skill_invocation_contracts"],
+            "skill_execution_diagnostics": skill_result.skill_runtime_state["skill_execution_diagnostics"],
+            "routing_decision": routing_decision,
+        }
+        if expired_pending_action is not None:
+            state_update["pending_action"] = expired_pending_action
+        if expiry_messages:
+            state_update["messages"] = expiry_messages
+        return state_update
+
+    def _resolve_pending_action_context(
+        self,
+        routing_state: dict[str, Any],
+    ) -> _PendingActionContext:
+        pending_action_turn = resolve_pending_action_turn_from_state(
+            routing_state,
+            pending_action_router=self.pending_action_router,
+        )
+        if pending_action_turn is not None:
+            pending_action_decision = pending_action_turn.pending_action_decision.model_dump()
+            pending_action_resolution_key = pending_action_turn.pending_action_resolution_key
+            execution_contract = pending_action_turn.execution_contract
+            routing_state["pending_action_decision"] = pending_action_decision
+            routing_state["pending_action_resolution_key"] = pending_action_resolution_key
+            routing_state["execution_contract"] = execution_contract
+        else:
+            pending_action_decision = None
+            pending_action_resolution_key = None
+            execution_contract = None
+            routing_state["pending_action_decision"] = None
+            routing_state["pending_action_resolution_key"] = None
+            routing_state["execution_contract"] = None
+        return _PendingActionContext(
+            pending_action_turn=pending_action_turn,
+            pending_action_decision=pending_action_decision,
+            pending_action_resolution_key=pending_action_resolution_key,
+            execution_contract=execution_contract,
+        )
+
+    def _select_skills_and_contracts(
+        self,
+        *,
+        selected_agent: str,
+        latest_user_text: str,
+        context_paths: tuple[str, ...],
+        explicit_skill_definitions: tuple[Any, ...],
+        warnings: list[str],
+        skill_diagnostics: list[dict[str, Any]],
+    ) -> _SkillSelectionResult:
         selected_skills, selected_skill_diagnostics, warnings = select_skills_for_agent(
             self.skill_registry,
             agent_name=selected_agent,
@@ -162,72 +258,37 @@ class GatewayNode:
             skill_invocation_contracts,
             agent_name=selected_agent,
         )
-
-        routing_decision = build_routing_decision(
-            selected_agent,
-            reason=route_reason,
-            policy_step=policy_step,
+        return _SkillSelectionResult(
+            resolved_skill_ids=resolved_skill_ids,
+            skill_invocation_contracts=skill_invocation_contracts,
+            skill_runtime_state=skill_runtime_state,
             warnings=warnings,
-            diagnostics=agent_diagnostics,
-            selected_agent=selected_agent,
-            requested_agent=requested_agent,
-            requested_skill_ids=list(requested_skill_ids),
-            resolved_skill_ids=list(resolved_skill_ids),
-            skill_invocation_contracts=list(skill_invocation_contracts),
-        )
-        logger.info(
-            "Gateway selected route=%s policy_step=%s requested_agent=%s requested_skills=%s resolved_skills=%s warnings=%s",
-            selected_agent,
-            policy_step,
-            requested_agent,
-            requested_skill_ids,
-            resolved_skill_ids,
-            warnings,
+            skill_diagnostics=skill_diagnostics,
         )
 
-        expired_pending_action = None
-        expiry_messages: list[AIMessage] = []
-        if policy_step == ROUTE_POLICY_PENDING_ACTION_OWNER_FALLBACK and pending_action_turn is not None:
-            expired_pending_action = expire_pending_action(pending_action_turn.pending_action)
-            expiry_messages = [
-                AIMessage(
-                    content=(
-                        "The approval request could not be completed because the required "
-                        "service is currently unavailable. The request has been cancelled."
-                    )
+    @staticmethod
+    def _handle_pending_action_expiry(
+        policy_step: str,
+        pending_action_turn: PendingActionTurnResult | None,
+    ) -> tuple[PendingAction | None, list[AIMessage]]:
+        if policy_step != ROUTE_POLICY_PENDING_ACTION_OWNER_FALLBACK or pending_action_turn is None:
+            return None, []
+        expired_pending_action = expire_pending_action(pending_action_turn.pending_action)
+        expiry_messages = [
+            AIMessage(
+                content=(
+                    "The approval request could not be completed because the required "
+                    "service is currently unavailable. The request has been cancelled."
                 )
-            ]
-            logger.warning(
-                "Gateway expired orphaned pending action due to missing owner agent. "
-                "pending_action_id=%s owner_agent=%s",
-                str(expired_pending_action.get("id", "")).strip(),
-                str(pending_action_turn.pending_action.get("requested_by_agent", "")).strip(),
             )
-
-        state_update: dict[str, Any] = {
-            "route": selected_agent,
-            "route_reason": route_reason,
-            "route_policy_step": policy_step,
-            "pending_action_decision": pending_action_decision,
-            "pending_action_resolution_key": pending_action_resolution_key,
-            "agent_route_decision": agent_route_decision.model_dump(),
-            "execution_contract": execution_contract,
-            "requested_skill_ids": list(requested_skill_ids),
-            "resolved_skill_ids": list(resolved_skill_ids),
-            "context_paths": list(context_paths),
-            "skill_resolution_diagnostics": skill_diagnostics,
-            "agent_selection_diagnostics": agent_diagnostics,
-            "selection_warnings": warnings,
-            "skill_invocation_contracts": list(skill_invocation_contracts),
-            "active_skill_invocation_contracts": skill_runtime_state["active_skill_invocation_contracts"],
-            "skill_execution_diagnostics": skill_runtime_state["skill_execution_diagnostics"],
-            "routing_decision": routing_decision,
-        }
-        if expired_pending_action is not None:
-            state_update["pending_action"] = expired_pending_action
-        if expiry_messages:
-            state_update["messages"] = expiry_messages
-        return state_update
+        ]
+        logger.warning(
+            "Gateway expired orphaned pending action due to missing owner agent. "
+            "pending_action_id=%s owner_agent=%s",
+            str(expired_pending_action.get("id", "")).strip(),
+            str(pending_action_turn.pending_action.get("requested_by_agent", "")).strip(),
+        )
+        return expired_pending_action, expiry_messages
 
 
 __all__ = [
