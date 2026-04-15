@@ -11,6 +11,8 @@ DEFAULT_OPENAI_MODEL = "gpt-5-mini"
 DEFAULT_LLM_TEMPERATURE = 0.2
 DEFAULT_MINIMAX_BASE_URL = "https://api.minimaxi.com/v1"
 DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_ASSISTANT_REQUEST_PARSER_CONFIDENCE_THRESHOLD = 0.6
+DEFAULT_PENDING_ACTION_PARSER_CONFIDENCE_THRESHOLD = 0.75
 
 DEFAULT_PROJECT_KEYWORDS = (
     "project",
@@ -43,6 +45,13 @@ DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH = "knowledge/AI/Rules/google_sheets
 DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CACHE_TTL_SECONDS = 120
 DEFAULT_CONVERSION_WORK_DIR = "runtime/conversion"
 DEFAULT_JADE_PROJECT_SKILLS_DIR = ".jade/skills"
+DEFAULT_WEB_AUTH_SESSION_MAX_AGE_SECONDS = 60 * 60 * 12
+
+
+@dataclass(frozen=True)
+class WebAuthCredential:
+    username: str
+    password: str
 
 
 @dataclass(frozen=True)
@@ -53,6 +62,12 @@ class Settings:
     web_enabled: bool
     web_host: str
     web_port: int
+    web_allowed_hosts: tuple[str, ...]
+    web_auth_enabled: bool
+    web_auth_credentials: tuple[WebAuthCredential, ...]
+    web_auth_session_secret: str
+    web_auth_cookie_secure: bool
+    web_auth_session_max_age_seconds: int
     llm_provider: str
     llm_model: str
     llm_temperature: float
@@ -63,6 +78,7 @@ class Settings:
     openai_base_url: str
     pending_action_parser_model: str
     pending_action_parser_temperature: float
+    assistant_request_parser_confidence_threshold: float
     pending_action_parser_confidence_threshold: float
     google_application_credentials: str
     jade_project_sheet_id: str
@@ -110,6 +126,9 @@ def load_settings(force_reload: bool = False) -> Settings:
     )
     pending_action_parser_temperature = resolve_pending_action_parser_temperature(llm_provider)
     llm_http_trust_env = resolve_llm_http_trust_env()
+    web_allowed_hosts = parse_csv_env("WEB_ALLOWED_HOSTS")
+    web_auth_enabled = parse_bool_env("WEB_AUTH_ENABLED", False)
+    web_auth_credentials = resolve_web_auth_credentials() if web_auth_enabled else ()
 
     _cached_settings = Settings(
         slack_enabled=parse_bool_env("SLACK_ENABLED", True),
@@ -118,6 +137,17 @@ def load_settings(force_reload: bool = False) -> Settings:
         web_enabled=parse_bool_env("WEB_ENABLED", False),
         web_host=os.getenv("WEB_HOST", "127.0.0.1").strip() or "127.0.0.1",
         web_port=int(os.getenv("WEB_PORT", "8000")),
+        web_allowed_hosts=web_allowed_hosts,
+        web_auth_enabled=web_auth_enabled,
+        web_auth_credentials=web_auth_credentials,
+        web_auth_session_secret=os.getenv("WEB_AUTH_SESSION_SECRET", "").strip(),
+        web_auth_cookie_secure=parse_bool_env("WEB_AUTH_COOKIE_SECURE", True),
+        web_auth_session_max_age_seconds=int(
+            os.getenv(
+                "WEB_AUTH_SESSION_MAX_AGE_SECONDS",
+                str(DEFAULT_WEB_AUTH_SESSION_MAX_AGE_SECONDS),
+            )
+        ),
         llm_provider=llm_provider,
         llm_model=llm_model,
         llm_temperature=llm_temperature,
@@ -134,8 +164,17 @@ def load_settings(force_reload: bool = False) -> Settings:
         ),
         pending_action_parser_model=pending_action_parser_model,
         pending_action_parser_temperature=pending_action_parser_temperature,
+        assistant_request_parser_confidence_threshold=float(
+            os.getenv(
+                "ASSISTANT_REQUEST_PARSER_CONFIDENCE_THRESHOLD",
+                str(DEFAULT_ASSISTANT_REQUEST_PARSER_CONFIDENCE_THRESHOLD),
+            )
+        ),
         pending_action_parser_confidence_threshold=float(
-            os.getenv("PENDING_ACTION_PARSER_CONFIDENCE_THRESHOLD", "0.75")
+            os.getenv(
+                "PENDING_ACTION_PARSER_CONFIDENCE_THRESHOLD",
+                str(DEFAULT_PENDING_ACTION_PARSER_CONFIDENCE_THRESHOLD),
+            )
         ),
         google_application_credentials=os.getenv("GOOGLE_APPLICATION_CREDENTIALS", ""),
         jade_project_sheet_id=os.getenv("JADE_PROJECT_SHEET_ID", ""),
@@ -223,6 +262,15 @@ def validate_interface_settings(settings: Settings) -> None:
 
     if settings.web_enabled and settings.web_port <= 0:
         raise RuntimeError("WEB_PORT must be a positive integer.")
+    if settings.web_enabled and settings.web_auth_enabled:
+        if not settings.web_auth_session_secret:
+            raise RuntimeError("Missing required environment variables: WEB_AUTH_SESSION_SECRET")
+        if not settings.web_auth_credentials:
+            raise RuntimeError(
+                "Missing required environment variables: WEB_AUTH_CREDENTIALS or WEB_AUTH_USERNAME/WEB_AUTH_PASSWORD"
+            )
+        if settings.web_auth_session_max_age_seconds <= 0:
+            raise RuntimeError("WEB_AUTH_SESSION_MAX_AGE_SECONDS must be a positive integer.")
 
 
 def is_slack_enabled(settings: Settings) -> bool:
@@ -282,6 +330,46 @@ def resolve_pending_action_parser_temperature(provider: str) -> float:
 
 def resolve_llm_http_trust_env() -> bool:
     return parse_bool_env("LLM_HTTP_TRUST_ENV", False)
+
+
+def parse_csv_env(name: str) -> tuple[str, ...]:
+    raw_value = os.getenv(name, "")
+    return tuple(
+        item.strip()
+        for item in raw_value.replace("\n", ",").replace(";", ",").split(",")
+        if item.strip()
+    )
+
+
+def resolve_web_auth_credentials() -> tuple[WebAuthCredential, ...]:
+    credentials: list[WebAuthCredential] = []
+    seen_usernames: set[str] = set()
+
+    single_username = os.getenv("WEB_AUTH_USERNAME", "").strip()
+    single_password = os.getenv("WEB_AUTH_PASSWORD", "").strip()
+    if bool(single_username) != bool(single_password):
+        raise RuntimeError("WEB_AUTH_USERNAME and WEB_AUTH_PASSWORD must be set together.")
+    if single_username and single_password:
+        credentials.append(WebAuthCredential(username=single_username, password=single_password))
+        seen_usernames.add(single_username)
+
+    for entry in parse_csv_env("WEB_AUTH_CREDENTIALS"):
+        username, separator, password = entry.partition(":")
+        normalized_username = username.strip()
+        normalized_password = password.strip()
+        if not separator or not normalized_username or not normalized_password:
+            raise RuntimeError("WEB_AUTH_CREDENTIALS entries must use username:password format.")
+        if normalized_username in seen_usernames:
+            raise RuntimeError(f"Duplicate web auth username configured: {normalized_username}")
+        credentials.append(
+            WebAuthCredential(
+                username=normalized_username,
+                password=normalized_password,
+            )
+        )
+        seen_usernames.add(normalized_username)
+
+    return tuple(credentials)
 
 
 def parse_bool_env(name: str, default: bool) -> bool:

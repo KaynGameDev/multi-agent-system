@@ -13,6 +13,8 @@ fastapi>=0.115.0
 uvicorn>=0.30.0
 Markdown>=3.6
 bleach>=6.1.0
+itsdangerous>=2.2.0
+slowapi>=0.1.5
 
 # Slack
 slack-bolt>=1.18.1

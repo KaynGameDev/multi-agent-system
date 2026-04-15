@@ -1,0 +1,115 @@
+:root {
+  --bg: #eff3f6;
+  --bg-strong: #dce8e5;
+  --surface: rgba(255, 255, 255, 0.92);
+  --border: rgba(15, 23, 42, 0.1);
+  --text: #172033;
+  --text-muted: #5d6981;
+  --accent: #0f766e;
+  --accent-strong: #115e59;
+  font-family: "Avenir Next", "Helvetica Neue", "Segoe UI", sans-serif;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+html,
+body {
+  margin: 0;
+  min-height: 100%;
+}
+
+body {
+  color: var(--text);
+  background:
+    radial-gradient(circle at top left, rgba(255, 255, 255, 0.95) 0%, rgba(255, 255, 255, 0) 32%),
+    linear-gradient(135deg, var(--bg) 0%, var(--bg-strong) 100%);
+}
+
+button,
+input {
+  font: inherit;
+}
+
+.login-shell {
+  display: grid;
+  min-height: 100vh;
+  place-items: center;
+  padding: 1.5rem;
+}
+
+.login-card {
+  width: min(100%, 28rem);
+  border: 1px solid var(--border);
+  border-radius: 1.5rem;
+  padding: 1.6rem;
+  background: var(--surface);
+  box-shadow: 0 22px 70px rgba(15, 23, 42, 0.12);
+  backdrop-filter: blur(16px);
+}
+
+.login-card__eyebrow {
+  font-size: 0.76rem;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--accent-strong);
+}
+
+.login-card h1 {
+  margin: 0.55rem 0 0;
+  font-size: clamp(1.8rem, 4vw, 2.4rem);
+  line-height: 1.05;
+}
+
+.login-card__copy {
+  margin: 0.85rem 0 0;
+  line-height: 1.6;
+  color: var(--text-muted);
+}
+
+.login-form {
+  margin-top: 1.4rem;
+}
+
+.login-form__field {
+  display: flex;
+  flex-direction: column;
+  gap: 0.38rem;
+  margin-bottom: 0.95rem;
+  color: var(--text-muted);
+}
+
+.login-form__field input {
+  border: 1px solid var(--border);
+  border-radius: 0.9rem;
+  padding: 0.9rem 1rem;
+  color: var(--text);
+  background: rgba(255, 255, 255, 0.95);
+}
+
+.login-form__error {
+  margin: 0 0 0.9rem;
+  border: 1px solid rgba(161, 29, 42, 0.14);
+  border-radius: 0.85rem;
+  padding: 0.75rem 0.85rem;
+  color: #a11d2a;
+  background: rgba(161, 29, 42, 0.08);
+}
+
+.login-form__submit {
+  width: 100%;
+  border: 0;
+  border-radius: 0.95rem;
+  padding: 0.92rem 1rem;
+  color: #ffffff;
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+  box-shadow: 0 14px 30px rgba(15, 118, 110, 0.22);
+  cursor: pointer;
+}
+
+.login-form__submit:disabled {
+  cursor: progress;
+  opacity: 0.72;
+}
