@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import unittest
 
+from agents.knowledge.rendering import is_knowledge_payload, render_knowledge_payload
 from langchain_core.messages import AIMessage, ToolMessage
 
 from app.contracts import (
@@ -156,6 +157,22 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(envelope["tool_id"], "knowledge.search_documents")
         self.assertEqual(envelope["arguments"]["query"], "setup")
         self.assertEqual(envelope["arguments"]["limit"], 5)
+
+    def test_retrieval_payload_is_a_knowledge_payload_but_not_directly_rendered(self) -> None:
+        payload = {
+            "ok": True,
+            "query": "How does setup work?",
+            "retrieved_context": "Retrieved context block",
+            "retrieved_chunks": [
+                {
+                    "title": "Setup Guide",
+                    "path": "knowledge/Docs/00_Shared/SetupGuide.md",
+                }
+            ],
+        }
+
+        self.assertTrue(is_knowledge_payload(payload))
+        self.assertIsNone(render_knowledge_payload(payload))
 
     def test_skill_runtime_state_tracks_active_contracts_for_selected_agent(self) -> None:
         contracts = [

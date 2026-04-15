@@ -7,8 +7,6 @@ def render_knowledge_payload(payload: dict, *, preferred_language: str = "en") -
 
     if payload.get("ok") is False:
         return render_knowledge_error(payload, preferred_language=preferred_language)
-    if is_retrieval_payload(payload):
-        return render_retrieval_payload(payload, preferred_language=preferred_language)
     if is_read_payload(payload):
         return render_read_payload(payload, preferred_language=preferred_language)
     if is_search_payload(payload):
@@ -19,7 +17,15 @@ def render_knowledge_payload(payload: dict, *, preferred_language: str = "en") -
 
 
 def is_knowledge_payload(payload: dict) -> bool:
-    return render_knowledge_payload(payload) is not None
+    if not isinstance(payload, dict):
+        return False
+    return (
+        payload.get("ok") is False
+        or is_retrieval_payload(payload)
+        or is_read_payload(payload)
+        or is_search_payload(payload)
+        or is_list_payload(payload)
+    )
 
 
 def is_list_payload(payload: dict) -> bool:
@@ -81,17 +87,6 @@ def render_search_payload(payload: dict, *, preferred_language: str = "en") -> s
             )
         )
     return "\n\n".join(line for line in lines if line).strip()
-
-
-def render_retrieval_payload(payload: dict, *, preferred_language: str = "en") -> str:
-    query = first_non_empty(payload.get("query"), translate("document", preferred_language))
-    retrieved_context = first_non_empty(payload.get("retrieved_context"))
-    retrieved_chunk_count = payload.get("retrieved_chunk_count")
-    count = retrieved_chunk_count if isinstance(retrieved_chunk_count, int) else 0
-    header = translate_with_query("Retrieved knowledge for", query, count, preferred_language)
-    if not retrieved_context:
-        return header
-    return "\n\n".join([header, f"```text\n{retrieved_context}\n```"]).strip()
 
 
 def render_read_payload(payload: dict, *, preferred_language: str = "en") -> str:
@@ -196,7 +191,6 @@ def translate(text: str, preferred_language: str) -> str:
         "Documents": "文档",
         "document": "文档",
         "Matches for": "搜索结果",
-        "Retrieved knowledge for": "检索知识",
         "Document": "文档",
         "Path": "路径",
         "Type": "类型",
@@ -214,7 +208,5 @@ def translate(text: str, preferred_language: str) -> str:
 
 def translate_with_query(prefix: str, query: str, count: int, preferred_language: str) -> str:
     if preferred_language == "zh":
-        if prefix == "Retrieved knowledge for":
-            return f'检索“{query}”的知识片段 ({count})'
         return f'搜索“{query}”的结果 ({count})'
     return f'{prefix} "{query}" ({count})'
