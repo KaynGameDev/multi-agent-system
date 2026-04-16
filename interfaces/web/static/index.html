@@ -4,12 +4,22 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <title>Jade Agent</title>
+    <link rel="icon" type="image/png" sizes="32x32" href="{{ FAVICON_PNG_HREF }}" />
+    <link rel="apple-touch-icon" href="{{ APPLE_TOUCH_ICON_HREF }}" />
+    <link rel="shortcut icon" href="{{ FAVICON_ICO_HREF }}" />
     <link rel="stylesheet" href="{{ APP_CSS_HREF }}" />
   </head>
   <body>
     <div class="app-shell">
       <aside class="sidebar" id="sidebar">
         <div class="sidebar__header">
+          <a class="brand-lockup" href="/" aria-label="Jade Agent home">
+            <img class="brand-lockup__mark" src="{{ LOGO_HREF }}" alt="Jade Agent logo" />
+            <span class="brand-lockup__copy">
+              <span class="brand-lockup__name">Jade Agent</span>
+              <span class="brand-lockup__tag">Multi-agent workspace</span>
+            </span>
+          </a>
           <button class="new-chat-button" id="newChatButton" type="button">New chat</button>
           <div class="sidebar-auth" id="sidebarAuth" hidden>
             <div class="sidebar-auth__label">Protected session</div>
@@ -53,7 +63,10 @@
             <span></span>
             <span></span>
           </button>
-          <div class="mobile-header__title">Jade Agent</div>
+          <div class="mobile-header__brand">
+            <img class="mobile-header__logo" src="{{ LOGO_HREF }}" alt="" />
+            <div class="mobile-header__title">Jade Agent</div>
+          </div>
         </header>
 
         <section class="chat-stage" id="chatStage">

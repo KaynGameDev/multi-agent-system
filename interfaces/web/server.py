@@ -147,6 +147,10 @@ class WebServer:
             template = (self.static_dir / "index.html").read_text(encoding="utf-8")
             html = (
                 template
+                .replace("{{ LOGO_HREF }}", self._versioned_static_path("branding/jade-logo-512.png"))
+                .replace("{{ FAVICON_PNG_HREF }}", self._versioned_static_path("branding/favicon-32.png"))
+                .replace("{{ APPLE_TOUCH_ICON_HREF }}", self._versioned_static_path("branding/apple-touch-icon.png"))
+                .replace("{{ FAVICON_ICO_HREF }}", self._versioned_static_path("branding/favicon.ico"))
                 .replace("{{ APP_CSS_HREF }}", self._versioned_static_path("app.css"))
                 .replace("{{ APP_JS_HREF }}", self._versioned_static_path("app.js"))
             )
@@ -162,10 +166,18 @@ class WebServer:
             template = (self.static_dir / "login.html").read_text(encoding="utf-8")
             html = (
                 template
+                .replace("{{ LOGO_HREF }}", self._versioned_static_path("branding/jade-logo-512.png"))
+                .replace("{{ FAVICON_PNG_HREF }}", self._versioned_static_path("branding/favicon-32.png"))
+                .replace("{{ APPLE_TOUCH_ICON_HREF }}", self._versioned_static_path("branding/apple-touch-icon.png"))
+                .replace("{{ FAVICON_ICO_HREF }}", self._versioned_static_path("branding/favicon.ico"))
                 .replace("{{ LOGIN_CSS_HREF }}", self._versioned_static_path("login.css"))
                 .replace("{{ LOGIN_JS_HREF }}", self._versioned_static_path("login.js"))
             )
             return HTMLResponse(content=html)
+
+        @app.get("/favicon.ico")
+        def favicon() -> RedirectResponse:
+            return RedirectResponse(url=self._versioned_static_path("branding/favicon.ico"), status_code=307)
 
         @app.get("/api/health")
         def health() -> dict[str, bool]:
