@@ -5,7 +5,6 @@ from dataclasses import dataclass
 import re
 from typing import Any
 
-from langchain_core.messages import HumanMessage
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.context_window import token_count_with_estimation
@@ -319,7 +318,6 @@ def _resolve_continuation_summary_draft(
         return _coerce_summary_draft(summary_draft)
 
     prompt = build_continuation_summary_prompt(compacted_messages, attachments=attachments)
-    transcript_payload = render_compaction_source_messages(compacted_messages)
 
     if llm is None or not hasattr(llm, "invoke"):
         return _fallback_summary_draft(compacted_messages, attachments=attachments)
@@ -328,7 +326,6 @@ def _resolve_continuation_summary_draft(
     structured_llm = structured_builder(ContinuationSummaryDraft) if callable(structured_builder) else None
     request_messages = build_model_request_messages(
         system_prompt=prompt,
-        extra_messages=[HumanMessage(content=transcript_payload)],
         use_projection_pipeline=False,
     )
     if structured_llm is not None:

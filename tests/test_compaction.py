@@ -42,6 +42,20 @@ class ExplodingSummaryLLM:
         raise AssertionError("Fresh summarization should not run when session memory is usable.")
 
 
+class RecordingSummaryLLM:
+    def __init__(self) -> None:
+        self.requests = []
+
+    def with_structured_output(self, _schema):
+        return self
+
+    def invoke(self, messages):
+        self.requests.append(list(messages))
+        return ContinuationSummaryDraft(
+            durable_summary="Keep the durable implementation context.",
+        )
+
+
 class RecordingGraph:
     def __init__(self, reply_text: str = "Recorded reply.") -> None:
         self.reply_text = reply_text
@@ -136,6 +150,39 @@ class CompactionTests(unittest.TestCase):
             [message["type"] for message in bundle.compacted_messages],
             [TRANSCRIPT_TYPE_COMPACT_BOUNDARY, "message", "message"],
         )
+
+    def test_compact_conversation_sends_source_slice_once_to_summarizer(self) -> None:
+        messages = [
+            {
+                "id": "u1",
+                "role": "user",
+                "type": "message",
+                "markdown": "First request",
+                "created_at": "2026-04-16T00:00:00+00:00",
+            },
+            {
+                "id": "a1",
+                "role": "assistant",
+                "type": "message",
+                "markdown": "First answer",
+                "created_at": "2026-04-16T00:00:01+00:00",
+            },
+        ]
+        llm = RecordingSummaryLLM()
+
+        bundle = compact_conversation(
+            messages,
+            llm=llm,
+        )
+
+        self.assertIn("## Continuation Summary", bundle.summary_message["markdown"])
+        self.assertEqual(len(llm.requests), 1)
+        request_messages = llm.requests[0]
+        self.assertEqual(len(request_messages), 1)
+        self.assertTrue(isinstance(request_messages[0], SystemMessage))
+        request_content = request_messages[0].content
+        self.assertEqual(request_content.count("- user: First request"), 1)
+        self.assertEqual(request_content.count("- assistant: First answer"), 1)
 
     def test_compact_conversation_carries_runtime_rehydration_state_into_summary_metadata(self) -> None:
         messages = [
