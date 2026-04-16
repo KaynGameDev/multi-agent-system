@@ -3,7 +3,10 @@ from __future__ import annotations
 import json
 import math
 from dataclasses import asdict, dataclass
-from typing import Any, Literal
+from typing import TYPE_CHECKING, Any, Literal
+
+if TYPE_CHECKING:
+    from app.model_request import ModelRequestReductionConfig, ModelRequestReducerHooks
 
 DEFAULT_FALLBACK_CONTEXT_WINDOW = 128_000
 DEFAULT_OPENAI_CONTEXT_WINDOW = 400_000
@@ -242,6 +245,34 @@ def evaluate_context_window(
         remaining_percentage=remaining_percentage,
         estimate=estimate,
         decision=decision,
+    )
+
+
+def evaluate_context_window_for_transcript(
+    messages: list[dict[str, Any]] | list[Any] | None,
+    *,
+    model: str,
+    threshold_overrides: ContextWindowThresholdOverrides | None = None,
+    auto_compact_enabled: bool = True,
+    auto_compact_failure_count: int = 0,
+    auto_compact_failure_limit: int = DEFAULT_AUTO_COMPACT_FAILURE_LIMIT,
+    reducer_hooks: "ModelRequestReducerHooks | None" = None,
+    reduction_config: "ModelRequestReductionConfig | None" = None,
+) -> ContextWindowSnapshot:
+    from app.model_request import project_transcript_messages
+
+    projected_messages = project_transcript_messages(
+        messages,
+        reducer_hooks=reducer_hooks,
+        reduction_config=reduction_config,
+    )
+    return evaluate_context_window(
+        projected_messages,
+        model=model,
+        threshold_overrides=threshold_overrides,
+        auto_compact_enabled=auto_compact_enabled,
+        auto_compact_failure_count=auto_compact_failure_count,
+        auto_compact_failure_limit=auto_compact_failure_limit,
     )
 
 

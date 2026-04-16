@@ -23,7 +23,7 @@ from app.config import Settings
 from app.context_window import (
     ContextWindowThresholdOverrides,
     USAGE_BASELINE_STAGE_BEFORE_MESSAGE,
-    evaluate_context_window,
+    evaluate_context_window_for_transcript,
     format_context_window_status,
     serialize_context_window_snapshot,
 )
@@ -699,7 +699,7 @@ class WebServer:
         )
 
     def _evaluate_context_window_snapshot(self, thread_id: str, messages: list[dict[str, Any]]) -> Any:
-        return evaluate_context_window(
+        return evaluate_context_window_for_transcript(
             messages,
             model=self.settings.llm_model,
             threshold_overrides=self._context_window_threshold_overrides(),

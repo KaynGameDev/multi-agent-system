@@ -9,6 +9,7 @@ from app.model_request import (
     ModelRequestReducerHooks,
     build_model_request_messages,
     get_messages_after_compact_boundary,
+    project_transcript_messages,
 )
 from interfaces.web.conversations import TRANSCRIPT_TYPE_COMPACT_BOUNDARY
 
@@ -50,6 +51,41 @@ class ModelRequestTests(unittest.TestCase):
         self.assertTrue(isinstance(built[0], SystemMessage))
         self.assertEqual(built[0].content, "You are helpful.")
         self.assertEqual(built[1].content, "keep me")
+
+    def test_project_transcript_messages_matches_request_body_without_extras(self) -> None:
+        messages = [
+            HumanMessage(content="Find the architecture guide"),
+            AIMessage(
+                content="",
+                additional_kwargs={"created_at": "2026-04-16T00:00:01+00:00"},
+                tool_calls=[{"id": "call_old", "name": "read_knowledge_document", "args": {"document": "Guide"}}],
+            ),
+            ToolMessage(
+                content='{"ok": true, "document": {"title": "Architecture Guide"}, "content": "%s"}' % ("A" * 1200),
+                tool_call_id="call_old",
+                additional_kwargs={"created_at": "2026-04-16T00:00:02+00:00"},
+            ),
+            HumanMessage(content="What next?"),
+        ]
+
+        projected = project_transcript_messages(
+            messages,
+            reduction_config=ModelRequestReductionConfig(
+                microcompact_tool_result_threshold_chars=100,
+                preserve_recent_tool_results=0,
+            ),
+        )
+        built = build_model_request_messages(
+            transcript_messages=messages,
+            reduction_config=ModelRequestReductionConfig(
+                microcompact_tool_result_threshold_chars=100,
+                preserve_recent_tool_results=0,
+            ),
+        )
+
+        self.assertEqual(len(built), len(projected))
+        self.assertEqual([type(message).__name__ for message in built], [type(message).__name__ for message in projected])
+        self.assertEqual([message.content for message in built], [message.content for message in projected])
 
     def test_reducer_hooks_run_in_expected_order(self) -> None:
         calls: list[tuple[str, list[str]]] = []

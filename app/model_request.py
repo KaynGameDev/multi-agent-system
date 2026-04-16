@@ -61,7 +61,7 @@ def build_model_request_messages(
         request_messages.append(SystemMessage(content=cleaned_system_prompt))
 
     projected_messages = (
-        project_model_facing_messages(
+        project_transcript_messages(
             transcript_messages,
             reducer_hooks=reducer_hooks,
             reduction_config=reduction_config,
@@ -74,7 +74,7 @@ def build_model_request_messages(
     return request_messages
 
 
-def project_model_facing_messages(
+def project_transcript_messages(
     transcript_messages: Sequence[Any] | None,
     *,
     reducer_hooks: ModelRequestReducerHooks | None = None,
@@ -90,6 +90,19 @@ def project_model_facing_messages(
     projected_messages = _apply_optional_reducer(projected_messages, hooks.collapse)
     projected_messages = _apply_optional_reducer(projected_messages, hooks.auto_compact)
     return projected_messages
+
+
+def project_model_facing_messages(
+    transcript_messages: Sequence[Any] | None,
+    *,
+    reducer_hooks: ModelRequestReducerHooks | None = None,
+    reduction_config: ModelRequestReductionConfig | None = None,
+) -> list[Any]:
+    return project_transcript_messages(
+        transcript_messages,
+        reducer_hooks=reducer_hooks,
+        reduction_config=reduction_config,
+    )
 
 
 def is_compact_boundary_message(message: Any) -> bool:

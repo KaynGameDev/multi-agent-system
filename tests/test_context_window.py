@@ -2,16 +2,21 @@ from __future__ import annotations
 
 import unittest
 
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
 from app.context_window import (
     ContextWindowThresholdOverrides,
     USAGE_BASELINE_STAGE_BEFORE_MESSAGE,
     evaluate_context_window,
+    evaluate_context_window_for_transcript,
     estimate_transcript_message_tokens,
     format_context_window_status,
     get_context_window_for_model,
     should_auto_compact,
     token_count_with_estimation,
 )
+from app.model_request import ModelRequestReductionConfig, project_transcript_messages
+from interfaces.web.conversations import TRANSCRIPT_TYPE_COMPACT_BOUNDARY
 
 
 class ContextWindowTests(unittest.TestCase):
@@ -182,6 +187,91 @@ class ContextWindowTests(unittest.TestCase):
                 auto_compact_failure_limit=1,
             )
         )
+
+    def test_evaluate_context_window_for_transcript_ignores_archived_pre_boundary_usage(self) -> None:
+        messages = [
+            {
+                "id": "assistant-old",
+                "role": "assistant",
+                "type": "message",
+                "markdown": "Old heavy answer",
+                "created_at": "2026-04-16T00:00:01+00:00",
+                "usage": {"input_tokens": 760, "output_tokens": 20, "total_tokens": 780},
+            },
+            {
+                "id": "boundary-1",
+                "role": "system",
+                "type": TRANSCRIPT_TYPE_COMPACT_BOUNDARY,
+                "markdown": "",
+                "created_at": "2026-04-16T00:00:02+00:00",
+                "metadata": {"trigger": "manual", "preTokens": 780},
+            },
+            {
+                "id": "assistant-summary",
+                "role": "assistant",
+                "type": "message",
+                "markdown": "## Continuation Summary\nKeep working on the release checklist.",
+                "created_at": "2026-04-16T00:00:03+00:00",
+            },
+            {
+                "id": "user-new",
+                "role": "user",
+                "type": "message",
+                "markdown": "What should we do next?",
+                "created_at": "2026-04-16T00:00:04+00:00",
+            },
+        ]
+
+        projected_messages = project_transcript_messages(messages)
+        snapshot = evaluate_context_window_for_transcript(
+            messages,
+            model="gpt-5-mini",
+            threshold_overrides=ContextWindowThresholdOverrides(
+                effective_window=1_000,
+                warning_threshold=600,
+                auto_compact_threshold=700,
+                hard_block_threshold=950,
+            ),
+            auto_compact_enabled=False,
+        )
+
+        self.assertEqual(snapshot.used_tokens, token_count_with_estimation(projected_messages).estimated_total_tokens)
+        self.assertFalse(snapshot.estimate.used_baseline_usage)
+        self.assertEqual(snapshot.decision.level, "ok")
+
+    def test_evaluate_context_window_for_transcript_matches_reduced_projected_slice(self) -> None:
+        messages = [
+            HumanMessage(content="Find the architecture guide"),
+            AIMessage(
+                content="",
+                additional_kwargs={"created_at": "2026-04-16T00:00:01+00:00"},
+                tool_calls=[{"id": "call_old", "name": "read_knowledge_document", "args": {"document": "Guide"}}],
+            ),
+            ToolMessage(
+                content='{"ok": true, "document": {"title": "Architecture Guide"}, "content": "%s"}' % ("A" * 1200),
+                tool_call_id="call_old",
+                additional_kwargs={"created_at": "2026-04-16T00:00:02+00:00"},
+            ),
+            HumanMessage(content="What next?"),
+        ]
+        reduction_config = ModelRequestReductionConfig(
+            microcompact_tool_result_threshold_chars=100,
+            preserve_recent_tool_results=0,
+        )
+
+        raw_total = token_count_with_estimation(messages).estimated_total_tokens
+        projected_messages = project_transcript_messages(
+            messages,
+            reduction_config=reduction_config,
+        )
+        snapshot = evaluate_context_window_for_transcript(
+            messages,
+            model="gpt-5-mini",
+            reduction_config=reduction_config,
+        )
+
+        self.assertEqual(snapshot.used_tokens, token_count_with_estimation(projected_messages).estimated_total_tokens)
+        self.assertLess(snapshot.used_tokens, raw_total)
 
 
 if __name__ == "__main__":

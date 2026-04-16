@@ -717,6 +717,53 @@ class WebServerApiTests(unittest.TestCase):
         )
         self.assertIn("## Continuation Summary", payload["messages"][0]["markdown"])
 
+    def test_compacted_transcript_does_not_block_on_archived_pre_boundary_usage(self) -> None:
+        settings = replace(
+            self.settings,
+            context_window_effective_window=1_000,
+            context_window_warning_threshold=600,
+            context_window_auto_compact_threshold=700,
+            context_window_hard_block_threshold=950,
+            context_window_auto_compact_enabled=False,
+        )
+        graph = RecordingGraph(reply_text="Continued after compacted history.")
+        server = WebServer(agent_graph=graph, settings=settings)
+        client = TestClient(server.app)
+
+        conversation = client.post("/api/conversations", json={"title": "Projected accounting"}).json()
+        conversation_id = conversation["conversation_id"]
+        server.conversation_store.append_message(conversation_id, role="user", markdown="Earlier request")
+        server.conversation_store.append_transcript_message(
+            conversation_id,
+            role="assistant",
+            message_type="message",
+            markdown="Earlier heavy answer",
+            usage={"input_tokens": 760, "output_tokens": 20, "total_tokens": 780},
+        )
+        server.conversation_store.append_compact_boundary(
+            conversation_id,
+            trigger="manual",
+            pre_tokens=780,
+        )
+        server.conversation_store.append_message(
+            conversation_id,
+            role="assistant",
+            markdown="## Continuation Summary\nWe already reviewed the earlier request.",
+        )
+
+        response = client.post(
+            f"/api/conversations/{conversation_id}/messages",
+            json={"message": "What should we do next?", "display_name": "Tester", "email": "tester@example.com"},
+        )
+
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertFalse(payload["blocked"])
+        self.assertEqual(payload["context_window"]["decision"]["level"], "ok")
+        self.assertIsNone(payload["context_window"]["estimate"]["baseline_message_id"])
+        self.assertEqual(graph.invoke_count, 1)
+        self.assertEqual(payload["assistant_message"]["markdown"], "Continued after compacted history.")
+
     def test_blocks_before_hard_limit_when_auto_compact_is_disabled(self) -> None:
         settings = replace(
             self.settings,
