@@ -4,8 +4,9 @@ import json
 import logging
 from typing import Any
 
-from langchain_core.messages import HumanMessage, SystemMessage
+from langchain_core.messages import HumanMessage
 
+from app.model_request import build_model_request_messages
 from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
 from tools.document_conversion import ConversionSessionRecord, build_conversion_package_relative_path
 
@@ -35,10 +36,13 @@ def render_conversion_response(
     )
     try:
         response = llm.invoke(
-            [
-                SystemMessage(content=build_conversion_renderer_prompt()),
-                HumanMessage(content=json.dumps(payload, ensure_ascii=False, indent=2)),
-            ]
+            build_model_request_messages(
+                system_prompt=build_conversion_renderer_prompt(),
+                extra_messages=[
+                    HumanMessage(content=json.dumps(payload, ensure_ascii=False, indent=2))
+                ],
+                use_projection_pipeline=False,
+            )
         )
     except Exception:
         logger.debug(

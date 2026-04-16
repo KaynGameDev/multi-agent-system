@@ -2,12 +2,13 @@ from __future__ import annotations
 
 import logging
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic import ValidationError
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage
 
 from app.contracts import build_assistant_response
 from app.messages import stringify_message_content
+from app.model_request import build_model_request_messages
 from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
 from app.skill_runtime import build_skill_prompt_context
 from app.skills import SkillRegistry
@@ -18,10 +19,19 @@ logger = logging.getLogger(__name__)
 
 
 class GeneralChatReply(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
     final_answer: str = Field(
-        default="",
         description="User-facing final reply in Markdown. Return only the answer, with no analysis or role labels.",
     )
+
+    @field_validator("final_answer")
+    @classmethod
+    def validate_final_answer(cls, value: str) -> str:
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            raise ValueError("final_answer must not be empty.")
+        return cleaned
 
 
 class GeneralChatAgentNode:
@@ -34,20 +44,19 @@ class GeneralChatAgentNode:
         self.agent_name = agent_name
 
     def __call__(self, state: AgentState) -> dict:
-        messages = [
-            SystemMessage(
-                content=build_general_chat_prompt(
-                    state,
-                    skill_registry=self.skill_registry,
-                    agent_name=self.agent_name,
-                )
+        messages = build_model_request_messages(
+            system_prompt=build_general_chat_prompt(
+                state,
+                skill_registry=self.skill_registry,
+                agent_name=self.agent_name,
             ),
-            *state["messages"],
-        ]
+            transcript_messages=state["messages"],
+        )
         response = self._invoke_response_model(messages)
         assistant_text = extract_general_chat_reply_text(response)
+        assistant_message = build_general_chat_reply_message(response, assistant_text)
         return {
-            "messages": [AIMessage(content=assistant_text)],
+            "messages": [assistant_message],
             "assistant_response": build_assistant_response(
                 kind="text",
                 content=assistant_text,
@@ -120,3 +129,19 @@ def extract_general_chat_reply_text(response) -> str:
         if isinstance(dict_answer, str) and dict_answer.strip():
             return dict_answer.strip()
     return stringify_message_content(getattr(response, "content", response))
+
+
+def build_general_chat_reply_message(response, assistant_text: str) -> AIMessage:
+    if isinstance(response, AIMessage):
+        message_kwargs: dict[str, object] = {
+            "content": assistant_text,
+            "id": getattr(response, "id", None),
+            "name": getattr(response, "name", None),
+            "additional_kwargs": dict(getattr(response, "additional_kwargs", {}) or {}),
+            "response_metadata": dict(getattr(response, "response_metadata", {}) or {}),
+        }
+        usage_metadata = getattr(response, "usage_metadata", None)
+        if isinstance(usage_metadata, dict):
+            message_kwargs["usage_metadata"] = dict(usage_metadata)
+        return AIMessage(**message_kwargs)
+    return AIMessage(content=assistant_text)

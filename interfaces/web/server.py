@@ -3,6 +3,7 @@ from __future__ import annotations
 import logging
 import secrets
 from pathlib import Path
+from typing import Any
 
 import uvicorn
 from fastapi import FastAPI, HTTPException, Request
@@ -19,11 +20,35 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.checkpoints import GraphCheckpointStore
 from app.config import Settings
+from app.context_window import (
+    ContextWindowThresholdOverrides,
+    USAGE_BASELINE_STAGE_BEFORE_MESSAGE,
+    evaluate_context_window,
+    format_context_window_status,
+    serialize_context_window_snapshot,
+)
 from app.identity import build_user_identity_context
 from app.messages import extract_final_text
 from app.paths import resolve_project_path
+from app.reactive_recovery import (
+    ReactiveRecoverySignal,
+    build_reactive_recovery_detail,
+    detect_reactive_recovery_signal_from_exception,
+    detect_reactive_recovery_signal_from_final_state,
+)
+from app.rehydration import (
+    RUNTIME_REHYDRATION_METADATA_KEY,
+    build_runtime_rehydration_state,
+    extract_runtime_rehydration_state_from_transcript,
+    merge_runtime_rehydration_state,
+)
+from app.session_memory import (
+    SessionMemoryStore,
+    build_session_memory_record,
+)
 from interfaces.web.conversations import (
     ConversationNotFoundError,
+    TRANSCRIPT_TYPE_MESSAGE,
     WebConversationStore,
     transcript_to_langchain_messages,
 )
@@ -78,9 +103,13 @@ class WebServer:
         self.conversation_store = conversation_store or WebConversationStore(
             self._resolve_path(settings.conversion_work_dir) / "web_conversations.json"
         )
+        self.session_memory_store = SessionMemoryStore(
+            self._resolve_path(settings.conversion_work_dir) / "session_memory.json"
+        )
         self.conversion_store = conversion_store or ConversionSessionStore(self._resolve_path(settings.conversion_work_dir))
         self.checkpoint_store = checkpoint_store
         self.static_dir = Path(__file__).resolve().parent / "static"
+        self._auto_compact_failures: dict[str, int] = {}
         self._auth_credentials = {
             credential.username: credential.password
             for credential in self.settings.web_auth_credentials
@@ -277,6 +306,8 @@ class WebServer:
                     self.checkpoint_store.delete_thread(thread_id)
                 except Exception:
                     logger.warning("Failed to delete checkpoint thread=%s", thread_id, exc_info=True)
+            self._clear_auto_compact_failures(thread_id)
+            self._clear_session_memory(thread_id)
 
             return {
                 "deleted": True,
@@ -293,74 +324,124 @@ class WebServer:
                 raise HTTPException(status_code=404, detail="Conversation not found.") from exc
 
             user_message = payload.message.strip()
-            conversation = self.conversation_store.append_message(
+            self.conversation_store.append_message(
                 conversation_id,
                 role="user",
                 markdown=user_message,
             )
+            full_conversation = self.conversation_store.get_full_conversation(conversation_id)
             thread_id = f"web:{conversation_id}"
-            active_session = self.conversion_store.get_active_session_by_thread(thread_id)
-            seed_messages = self._build_seed_messages(
+            context_snapshot = self._evaluate_context_window_snapshot(
                 thread_id=thread_id,
-                conversation=conversation,
-                latest_user_message=user_message,
+                messages=full_conversation.get("messages", []),
             )
-
-            user_context = build_user_identity_context(
-                slack_display_name=payload.display_name,
-                slack_real_name=payload.display_name,
-                email=payload.email,
-            )
-            initial_state = {
-                "messages": seed_messages,
-                "interface_name": "web",
-                "thread_id": thread_id,
-                "user_id": payload.email.strip() or payload.display_name.strip() or thread_id,
-                "channel_id": conversation_id,
-                "requested_agent": "",
-                "requested_skill_ids": [],
-                "uploaded_files": [],
-                "context_paths": [],
-                "conversion_session_id": active_session.session_id if active_session is not None else "",
-                **user_context,
+            context_compaction: dict[str, Any] = {
+                "attempted": False,
+                "applied": False,
+                "failure_count": self._get_auto_compact_failure_count(thread_id),
             }
-
-            logger.debug(
-                "Invoking web graph conversation=%s thread=%s email=%s display_name=%s",
-                conversation_id,
-                thread_id,
-                payload.email.strip(),
-                payload.display_name.strip(),
-            )
-
-            try:
-                final_state = self.agent_graph.invoke(
-                    initial_state,
-                    config={"configurable": {"thread_id": thread_id}},
+            limit_recovery: dict[str, Any] = {
+                "attempted": False,
+                "recovered": False,
+                "reason": "",
+                "retry_count": 0,
+            }
+            if not context_snapshot.decision.should_auto_compact:
+                self._clear_auto_compact_failures(thread_id)
+            elif context_snapshot.decision.auto_compact_available:
+                attempted_auto_compaction = self._attempt_auto_compaction(
+                    conversation_id=conversation_id,
+                    thread_id=thread_id,
+                    conversation=full_conversation,
                 )
-                assistant_text = extract_final_text(final_state)
-                route = str(final_state.get("route", "")).strip()
-                route_reason = str(final_state.get("route_reason", "")).strip()
-                skill_resolution_diagnostics = final_state.get("skill_resolution_diagnostics", [])
-                agent_selection_diagnostics = final_state.get("agent_selection_diagnostics", [])
-                selection_warnings = final_state.get("selection_warnings", [])
-            except Exception as exc:
-                logger.exception("Failed while processing web conversation=%s", conversation_id)
-                assistant_text = "I hit an error while processing that request. Please try again."
-                route = ""
-                route_reason = "Request failed before a route completed."
-                skill_resolution_diagnostics = []
-                agent_selection_diagnostics = []
-                selection_warnings = []
+                if attempted_auto_compaction is None:
+                    blocked_snapshot = self._evaluate_context_window_snapshot(
+                        thread_id=thread_id,
+                        messages=full_conversation.get("messages", []),
+                    )
+                    return self._build_context_window_block_response(
+                        conversation_id=conversation_id,
+                        snapshot=blocked_snapshot,
+                        detail=self._build_context_window_block_detail(
+                            blocked_snapshot,
+                            auto_compaction_failed=True,
+                        ),
+                        context_compaction={
+                            "attempted": True,
+                            "applied": False,
+                            "failure_count": self._get_auto_compact_failure_count(thread_id),
+                        },
+                    )
+                full_conversation = attempted_auto_compaction["conversation"]
+                context_snapshot = attempted_auto_compaction["context_snapshot"]
+                context_compaction = attempted_auto_compaction["context_compaction"]
+            elif context_snapshot.decision.should_block:
+                return self._build_context_window_block_response(
+                    conversation_id=conversation_id,
+                    snapshot=context_snapshot,
+                    detail=self._build_context_window_block_detail(context_snapshot),
+                    context_compaction=context_compaction,
+                )
 
-            conversation = self.conversation_store.append_message(
+            if context_snapshot.decision.should_block:
+                return self._build_context_window_block_response(
+                    conversation_id=conversation_id,
+                    snapshot=context_snapshot,
+                    detail=self._build_context_window_block_detail(
+                        context_snapshot,
+                        after_auto_compaction=context_compaction.get("applied", False),
+                    ),
+                    context_compaction=context_compaction,
+                )
+
+            active_session = self.conversion_store.get_active_session_by_thread(thread_id)
+            invoke_result = self._invoke_with_reactive_recovery(
+                conversation_id=conversation_id,
+                thread_id=thread_id,
+                payload=payload,
+                latest_user_message=user_message,
+                conversation=full_conversation,
+                context_snapshot=context_snapshot,
+                context_compaction=context_compaction,
+                active_session=active_session,
+            )
+            if isinstance(invoke_result, JSONResponse):
+                return invoke_result
+
+            invoke_succeeded = invoke_result["invoke_succeeded"]
+            assistant_text = invoke_result["assistant_text"]
+            route = invoke_result["route"]
+            route_reason = invoke_result["route_reason"]
+            skill_resolution_diagnostics = invoke_result["skill_resolution_diagnostics"]
+            agent_selection_diagnostics = invoke_result["agent_selection_diagnostics"]
+            selection_warnings = invoke_result["selection_warnings"]
+            assistant_usage = invoke_result["assistant_usage"]
+            assistant_metadata = invoke_result["assistant_metadata"]
+            context_snapshot = invoke_result["context_snapshot"]
+            context_compaction = invoke_result["context_compaction"]
+            limit_recovery = invoke_result["limit_recovery"]
+
+            self.conversation_store.append_transcript_message(
                 conversation_id,
                 role="assistant",
+                message_type=TRANSCRIPT_TYPE_MESSAGE,
                 markdown=assistant_text,
+                usage=assistant_usage,
+                metadata=assistant_metadata,
             )
+            if invoke_succeeded:
+                self._refresh_session_memory(
+                    thread_id=thread_id,
+                    conversation=self.conversation_store.get_full_conversation(conversation_id),
+                )
+            conversation = self.conversation_store.get_conversation(conversation_id)
             return {
                 **conversation,
                 "assistant_message": conversation["messages"][-1],
+                "blocked": False,
+                "context_window": serialize_context_window_snapshot(context_snapshot),
+                "context_compaction": context_compaction,
+                "limit_recovery": limit_recovery,
                 "route": route,
                 "route_reason": route_reason,
                 "skill_resolution_diagnostics": skill_resolution_diagnostics,
@@ -369,6 +450,544 @@ class WebServer:
             }
 
         return app
+
+    def _build_web_initial_state(
+        self,
+        *,
+        conversation_id: str,
+        thread_id: str,
+        payload: WebMessageRequest,
+        latest_user_message: str,
+        conversation: dict[str, Any],
+        active_session: Any | None,
+    ) -> dict[str, Any]:
+        seed_messages = self._build_seed_messages(
+            thread_id=thread_id,
+            conversation=conversation,
+            latest_user_message=latest_user_message,
+        )
+        user_context = build_user_identity_context(
+            slack_display_name=payload.display_name,
+            slack_real_name=payload.display_name,
+            email=payload.email,
+        )
+        initial_state = {
+            "messages": seed_messages,
+            "interface_name": "web",
+            "thread_id": thread_id,
+            "user_id": payload.email.strip() or payload.display_name.strip() or thread_id,
+            "channel_id": conversation_id,
+            "requested_agent": "",
+            "requested_skill_ids": [],
+            "uploaded_files": [],
+            "context_paths": [],
+            "conversion_session_id": active_session.session_id if active_session is not None else "",
+            **user_context,
+        }
+        return self._apply_transcript_rehydration(
+            initial_state,
+            conversation=conversation,
+        )
+
+    def _invoke_with_reactive_recovery(
+        self,
+        *,
+        conversation_id: str,
+        thread_id: str,
+        payload: WebMessageRequest,
+        latest_user_message: str,
+        conversation: dict[str, Any],
+        context_snapshot: Any,
+        context_compaction: dict[str, Any],
+        active_session: Any | None,
+    ) -> dict[str, Any] | JSONResponse:
+        limit_recovery: dict[str, Any] = {
+            "attempted": False,
+            "recovered": False,
+            "reason": "",
+            "retry_count": 0,
+        }
+        current_conversation = conversation
+        current_context_snapshot = context_snapshot
+        current_context_compaction = dict(context_compaction)
+
+        for attempt_index in range(2):
+            initial_state = self._build_web_initial_state(
+                conversation_id=conversation_id,
+                thread_id=thread_id,
+                payload=payload,
+                latest_user_message=latest_user_message,
+                conversation=current_conversation,
+                active_session=active_session,
+            )
+            logger.debug(
+                "Invoking web graph conversation=%s thread=%s email=%s display_name=%s attempt=%s",
+                conversation_id,
+                thread_id,
+                payload.email.strip(),
+                payload.display_name.strip(),
+                attempt_index + 1,
+            )
+            logger.info(
+                "Context window thread=%s model=%s %s",
+                thread_id,
+                self.settings.llm_model,
+                format_context_window_status(current_context_snapshot),
+            )
+
+            try:
+                final_state = self.agent_graph.invoke(
+                    initial_state,
+                    config={"configurable": {"thread_id": thread_id}},
+                )
+            except Exception as exc:
+                signal = detect_reactive_recovery_signal_from_exception(exc)
+                if signal is not None and attempt_index == 0:
+                    recovery_result = self._attempt_reactive_limit_recovery(
+                        conversation_id=conversation_id,
+                        thread_id=thread_id,
+                        conversation=current_conversation,
+                        signal=signal,
+                    )
+                    limit_recovery.update(
+                        {
+                            "attempted": True,
+                            "reason": signal.kind,
+                            "retry_count": 1,
+                        }
+                    )
+                    if recovery_result is None:
+                        return self._build_context_window_block_response(
+                            conversation_id=conversation_id,
+                            snapshot=current_context_snapshot,
+                            detail=build_reactive_recovery_detail(
+                                signal,
+                                compaction_failed=True,
+                            ),
+                            context_compaction=current_context_compaction,
+                            limit_recovery=limit_recovery,
+                        )
+                    current_conversation = recovery_result["conversation"]
+                    current_context_snapshot = recovery_result["context_snapshot"]
+                    current_context_compaction = recovery_result["context_compaction"]
+                    continue
+
+                if signal is not None:
+                    return self._build_context_window_block_response(
+                        conversation_id=conversation_id,
+                        snapshot=current_context_snapshot,
+                        detail=build_reactive_recovery_detail(
+                            signal,
+                            retry_exhausted=bool(limit_recovery["attempted"]),
+                        ),
+                        context_compaction=current_context_compaction,
+                        limit_recovery=limit_recovery,
+                    )
+
+                logger.exception("Failed while processing web conversation=%s", conversation_id)
+                return {
+                    "invoke_succeeded": False,
+                    "assistant_text": "I hit an error while processing that request. Please try again.",
+                    "route": "",
+                    "route_reason": "Request failed before a route completed.",
+                    "skill_resolution_diagnostics": [],
+                    "agent_selection_diagnostics": [],
+                    "selection_warnings": [],
+                    "assistant_usage": None,
+                    "assistant_metadata": None,
+                    "context_snapshot": current_context_snapshot,
+                    "context_compaction": current_context_compaction,
+                    "limit_recovery": limit_recovery,
+                }
+
+            signal = detect_reactive_recovery_signal_from_final_state(final_state)
+            if signal is not None and attempt_index == 0:
+                recovery_result = self._attempt_reactive_limit_recovery(
+                    conversation_id=conversation_id,
+                    thread_id=thread_id,
+                    conversation=current_conversation,
+                    signal=signal,
+                )
+                limit_recovery.update(
+                    {
+                        "attempted": True,
+                        "reason": signal.kind,
+                        "retry_count": 1,
+                    }
+                )
+                if recovery_result is None:
+                    return self._build_context_window_block_response(
+                        conversation_id=conversation_id,
+                        snapshot=current_context_snapshot,
+                        detail=build_reactive_recovery_detail(
+                            signal,
+                            compaction_failed=True,
+                        ),
+                        context_compaction=current_context_compaction,
+                        limit_recovery=limit_recovery,
+                    )
+                current_conversation = recovery_result["conversation"]
+                current_context_snapshot = recovery_result["context_snapshot"]
+                current_context_compaction = recovery_result["context_compaction"]
+                continue
+
+            if signal is not None:
+                return self._build_context_window_block_response(
+                    conversation_id=conversation_id,
+                    snapshot=current_context_snapshot,
+                    detail=build_reactive_recovery_detail(
+                        signal,
+                        retry_exhausted=bool(limit_recovery["attempted"]),
+                    ),
+                    context_compaction=current_context_compaction,
+                    limit_recovery=limit_recovery,
+                )
+
+            assistant_text = extract_final_text(final_state)
+            route = str(final_state.get("route", "")).strip()
+            route_reason = str(final_state.get("route_reason", "")).strip()
+            skill_resolution_diagnostics = final_state.get("skill_resolution_diagnostics", [])
+            agent_selection_diagnostics = final_state.get("agent_selection_diagnostics", [])
+            selection_warnings = final_state.get("selection_warnings", [])
+            assistant_usage, assistant_metadata = self._extract_transcript_usage_metadata(final_state)
+            assistant_metadata = self._augment_transcript_metadata_with_runtime_state(
+                assistant_metadata,
+                final_state,
+            )
+            if limit_recovery["attempted"]:
+                limit_recovery["recovered"] = True
+            return {
+                "invoke_succeeded": True,
+                "assistant_text": assistant_text,
+                "route": route,
+                "route_reason": route_reason,
+                "skill_resolution_diagnostics": skill_resolution_diagnostics,
+                "agent_selection_diagnostics": agent_selection_diagnostics,
+                "selection_warnings": selection_warnings,
+                "assistant_usage": assistant_usage,
+                "assistant_metadata": assistant_metadata,
+                "context_snapshot": current_context_snapshot,
+                "context_compaction": current_context_compaction,
+                "limit_recovery": limit_recovery,
+            }
+
+        unreachable = ReactiveRecoverySignal(kind="prompt_too_long", detail="retry exhausted")
+        return self._build_context_window_block_response(
+            conversation_id=conversation_id,
+            snapshot=current_context_snapshot,
+            detail=build_reactive_recovery_detail(unreachable, retry_exhausted=True),
+            context_compaction=current_context_compaction,
+            limit_recovery=limit_recovery,
+        )
+
+    def _context_window_threshold_overrides(self) -> ContextWindowThresholdOverrides | None:
+        if not any(
+            value is not None
+            for value in (
+                self.settings.context_window_effective_window,
+                self.settings.context_window_warning_threshold,
+                self.settings.context_window_auto_compact_threshold,
+                self.settings.context_window_hard_block_threshold,
+            )
+        ):
+            return None
+        return ContextWindowThresholdOverrides(
+            effective_window=self.settings.context_window_effective_window,
+            warning_threshold=self.settings.context_window_warning_threshold,
+            auto_compact_threshold=self.settings.context_window_auto_compact_threshold,
+            hard_block_threshold=self.settings.context_window_hard_block_threshold,
+        )
+
+    def _evaluate_context_window_snapshot(self, thread_id: str, messages: list[dict[str, Any]]) -> Any:
+        return evaluate_context_window(
+            messages,
+            model=self.settings.llm_model,
+            threshold_overrides=self._context_window_threshold_overrides(),
+            auto_compact_enabled=self.settings.context_window_auto_compact_enabled,
+            auto_compact_failure_count=self._get_auto_compact_failure_count(thread_id),
+            auto_compact_failure_limit=self.settings.context_window_auto_compact_failure_limit,
+        )
+
+    def _attempt_auto_compaction(
+        self,
+        *,
+        conversation_id: str,
+        thread_id: str,
+        conversation: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        try:
+            return self._apply_compaction_to_conversation(
+                conversation_id=conversation_id,
+                thread_id=thread_id,
+                conversation=conversation,
+                trigger="auto",
+                boundary_trigger="auto",
+                record_auto_compact_failure=True,
+            )
+        except Exception:
+            failure_count = self._record_auto_compact_failure(thread_id)
+            logger.warning(
+                "Auto compaction failed conversation=%s thread=%s failures=%s",
+                conversation_id,
+                thread_id,
+                failure_count,
+                exc_info=True,
+            )
+            return None
+
+    def _build_context_window_block_response(
+        self,
+        *,
+        conversation_id: str,
+        snapshot: Any,
+        detail: str,
+        context_compaction: dict[str, Any],
+        limit_recovery: dict[str, Any] | None = None,
+    ) -> JSONResponse:
+        conversation = self.conversation_store.get_conversation(conversation_id)
+        payload = {
+            **conversation,
+            "assistant_message": None,
+            "blocked": True,
+            "detail": detail,
+            "context_window": serialize_context_window_snapshot(snapshot),
+            "context_compaction": context_compaction,
+            "limit_recovery": limit_recovery or {
+                "attempted": False,
+                "recovered": False,
+                "reason": "",
+                "retry_count": 0,
+            },
+            "route": "",
+            "route_reason": detail,
+            "skill_resolution_diagnostics": [],
+            "agent_selection_diagnostics": [],
+            "selection_warnings": [detail],
+        }
+        return JSONResponse(status_code=409, content=payload)
+
+    def _build_context_window_block_detail(
+        self,
+        snapshot: Any,
+        *,
+        auto_compaction_failed: bool = False,
+        after_auto_compaction: bool = False,
+    ) -> str:
+        usage_summary = (
+            f"Context usage is {snapshot.used_tokens}/{snapshot.thresholds.effective_window} tokens "
+            f"({snapshot.remaining_percentage:.1f}% remaining)."
+        )
+        if after_auto_compaction:
+            return (
+                f"{usage_summary} I auto-compacted the conversation, but the projected request is still too large. "
+                "Please compact the conversation manually before continuing."
+            )
+        if auto_compaction_failed:
+            if snapshot.decision.auto_compact_breaker_open:
+                return (
+                    f"{usage_summary} Automatic compaction is now paused for this conversation after repeated failures. "
+                    "Please compact the conversation manually before continuing."
+                )
+            return (
+                f"{usage_summary} I couldn't auto-compact this conversation safely, so I stopped before sending the "
+                "next model request. Please compact the conversation manually and try again."
+            )
+        if snapshot.decision.auto_compact_breaker_open:
+            return (
+                f"{usage_summary} Automatic compaction is temporarily paused after repeated failures. "
+                "Please compact the conversation manually before sending another request."
+            )
+        if not snapshot.decision.auto_compact_enabled:
+            return (
+                f"{usage_summary} Automatic compaction is disabled, so please compact the conversation manually "
+                "before sending another request."
+            )
+        if snapshot.decision.should_hard_block:
+            return (
+                f"{usage_summary} This conversation is already at the hard context limit. "
+                "Please compact it manually before continuing."
+            )
+        return (
+            f"{usage_summary} This conversation needs manual compaction before I can send another model request."
+        )
+
+    def _get_auto_compact_failure_count(self, thread_id: str) -> int:
+        return max(int(self._auto_compact_failures.get(thread_id, 0) or 0), 0)
+
+    def _record_auto_compact_failure(self, thread_id: str) -> int:
+        failure_count = self._get_auto_compact_failure_count(thread_id) + 1
+        self._auto_compact_failures[thread_id] = failure_count
+        return failure_count
+
+    def _clear_auto_compact_failures(self, thread_id: str) -> None:
+        self._auto_compact_failures.pop(thread_id, None)
+
+    def _attempt_reactive_limit_recovery(
+        self,
+        *,
+        conversation_id: str,
+        thread_id: str,
+        conversation: dict[str, Any],
+        signal: ReactiveRecoverySignal,
+    ) -> dict[str, Any] | None:
+        try:
+            return self._apply_compaction_to_conversation(
+                conversation_id=conversation_id,
+                thread_id=thread_id,
+                conversation=conversation,
+                trigger="reactive_recovery",
+                boundary_trigger=f"reactive_recovery:{signal.kind}",
+                preserved_tail_count=max(self.settings.context_window_auto_compact_preserved_tail_count, 1),
+                record_auto_compact_failure=False,
+                extra_context_compaction_fields={"reason": signal.kind},
+            )
+        except Exception:
+            logger.warning(
+                "Reactive recovery compaction failed conversation=%s thread=%s reason=%s",
+                conversation_id,
+                thread_id,
+                signal.kind,
+                exc_info=True,
+            )
+            return None
+
+    def _apply_compaction_to_conversation(
+        self,
+        *,
+        conversation_id: str,
+        thread_id: str,
+        conversation: dict[str, Any],
+        trigger: str,
+        boundary_trigger: str,
+        preserved_tail_count: int | None = None,
+        record_auto_compact_failure: bool,
+        extra_context_compaction_fields: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        from app.compaction import compact_conversation
+
+        session_memory = self.session_memory_store.get(thread_id) if self.settings.session_memory_enabled else None
+        bundle = compact_conversation(
+            conversation.get("messages", []),
+            trigger=boundary_trigger,
+            preserved_tail_count=(
+                self.settings.context_window_auto_compact_preserved_tail_count
+                if preserved_tail_count is None
+                else preserved_tail_count
+            ),
+            session_memory=session_memory,
+        )
+        self.conversation_store.replace_transcript(
+            conversation_id,
+            messages=bundle.compacted_messages,
+        )
+        self._clear_session_memory(thread_id)
+        self._reset_checkpoint_thread(thread_id)
+        if record_auto_compact_failure:
+            self._clear_auto_compact_failures(thread_id)
+
+        compacted_conversation = self.conversation_store.get_full_conversation(conversation_id)
+        compacted_snapshot = self._evaluate_context_window_snapshot(
+            thread_id=thread_id,
+            messages=compacted_conversation.get("messages", []),
+        )
+        logger.info(
+            "%s compaction applied thread=%s %s",
+            trigger,
+            thread_id,
+            format_context_window_status(compacted_snapshot),
+        )
+        context_compaction = {
+            "attempted": True,
+            "applied": True,
+            "failure_count": 0 if record_auto_compact_failure else self._get_auto_compact_failure_count(thread_id),
+            "trigger": trigger,
+            "compacted_source_count": bundle.compacted_source_count,
+            "preserved_tail_count": len(bundle.preserved_tail_messages),
+            "summary_message_id": bundle.summary_message["id"],
+            "used_session_memory": bundle.used_session_memory,
+        }
+        if extra_context_compaction_fields:
+            context_compaction.update(extra_context_compaction_fields)
+        return {
+            "conversation": compacted_conversation,
+            "context_snapshot": compacted_snapshot,
+            "context_compaction": context_compaction,
+        }
+
+    def _apply_transcript_rehydration(
+        self,
+        initial_state: dict[str, Any],
+        *,
+        conversation: dict[str, Any],
+    ) -> dict[str, Any]:
+        transcript_messages = conversation.get("messages", [])
+        if not isinstance(transcript_messages, list):
+            return dict(initial_state)
+
+        runtime_rehydration_state = extract_runtime_rehydration_state_from_transcript(transcript_messages)
+        if not runtime_rehydration_state:
+            return dict(initial_state)
+
+        merged_state = merge_runtime_rehydration_state(initial_state, runtime_rehydration_state)
+        logger.info(
+            "Applied transcript rehydration thread=%s fields=%s recent_file_reads=%s",
+            str(merged_state.get("thread_id", "")).strip(),
+            sorted(runtime_rehydration_state.keys()),
+            runtime_rehydration_state.get("recent_file_reads", []),
+        )
+        return merged_state
+
+    def _augment_transcript_metadata_with_runtime_state(
+        self,
+        metadata: dict[str, object] | None,
+        final_state: dict[str, Any],
+    ) -> dict[str, object] | None:
+        runtime_rehydration_state = build_runtime_rehydration_state(final_state)
+        if not runtime_rehydration_state:
+            return metadata
+
+        merged_metadata = dict(metadata or {})
+        merged_metadata[RUNTIME_REHYDRATION_METADATA_KEY] = runtime_rehydration_state
+        return merged_metadata
+
+    def _refresh_session_memory(
+        self,
+        *,
+        thread_id: str,
+        conversation: dict[str, Any],
+    ) -> None:
+        if not self.settings.session_memory_enabled:
+            return
+
+        transcript_messages = conversation.get("messages", [])
+        if not isinstance(transcript_messages, list):
+            return
+
+        existing_record = self.session_memory_store.get(thread_id)
+        updated_record = build_session_memory_record(
+            thread_id,
+            transcript_messages,
+            session_memory=existing_record,
+            initialize_threshold_tokens=self.settings.session_memory_initialize_threshold_tokens,
+            update_growth_threshold_tokens=self.settings.session_memory_update_growth_threshold_tokens,
+        )
+        if updated_record is None:
+            return
+
+        self.session_memory_store.upsert(updated_record)
+        logger.info(
+            "Updated session memory thread=%s source=%s covered_messages=%s covered_tokens=%s",
+            thread_id,
+            updated_record.source,
+            updated_record.covered_message_count,
+            updated_record.covered_tokens,
+        )
+
+    def _clear_session_memory(self, thread_id: str) -> None:
+        try:
+            self.session_memory_store.delete(thread_id)
+        except Exception:
+            logger.warning("Failed to clear session memory thread=%s", thread_id, exc_info=True)
 
     def _versioned_static_path(self, relative_path: str) -> str:
         asset_path = self.static_dir / relative_path
@@ -434,3 +1053,34 @@ class WebServer:
             self.checkpoint_store.delete_thread(thread_id)
         except Exception:
             logger.warning("Failed to reset checkpoint thread=%s", thread_id, exc_info=True)
+
+    def _extract_transcript_usage_metadata(self, final_state: dict) -> tuple[dict[str, int] | None, dict[str, object] | None]:
+        messages = final_state.get("messages") or []
+        if not isinstance(messages, list):
+            return None, None
+
+        usage_message_index: int | None = None
+        usage_metadata: dict[str, int] | None = None
+        for index in range(len(messages) - 1, -1, -1):
+            message = messages[index]
+            raw_usage = getattr(message, "usage_metadata", None)
+            if not isinstance(raw_usage, dict):
+                continue
+            normalized_usage = {
+                str(key): value
+                for key, value in raw_usage.items()
+                if isinstance(key, str) and isinstance(value, int) and not isinstance(value, bool)
+            }
+            if not normalized_usage:
+                continue
+            usage_message_index = index
+            usage_metadata = normalized_usage
+            break
+
+        if usage_message_index is None or usage_metadata is None:
+            return None, None
+
+        metadata: dict[str, object] = {}
+        if usage_message_index != len(messages) - 1:
+            metadata["usage_baseline_stage"] = USAGE_BASELINE_STAGE_BEFORE_MESSAGE
+        return usage_metadata, metadata or None

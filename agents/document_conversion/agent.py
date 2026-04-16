@@ -11,6 +11,7 @@ from pydantic import BaseModel, Field
 from app.config import DEFAULT_KNOWLEDGE_BASE_DIR, load_settings
 from app.contracts import build_assistant_response, build_tool_execution_record
 from app.messages import extract_latest_human_text, stringify_message_content
+from app.model_request import build_model_request_messages
 from app.paths import resolve_project_path
 from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
 from app.skill_runtime import build_skill_prompt_context
@@ -915,16 +916,15 @@ class DocumentConversionAgentNode:
         return dict(raw_result or {}), invocation, result
 
     def _invoke_extractor(self, source_bundle: str, state: AgentState) -> dict[str, Any]:
-        messages = [
-            SystemMessage(
-                content=build_conversion_extractor_prompt(
-                    self.skill_registry,
-                    agent_name=self.agent_name,
-                    state=state,
-                )
+        messages = build_model_request_messages(
+            system_prompt=build_conversion_extractor_prompt(
+                self.skill_registry,
+                agent_name=self.agent_name,
+                state=state,
             ),
-            HumanMessage(content=source_bundle),
-        ]
+            extra_messages=[HumanMessage(content=source_bundle)],
+            use_projection_pipeline=False,
+        )
         last_error: Exception | None = None
 
         for attempt in range(1, EXTRACT_DRAFT_MAX_ATTEMPTS + 1):

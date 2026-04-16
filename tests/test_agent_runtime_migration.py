@@ -399,6 +399,71 @@ class AgentRuntimeMigrationTests(unittest.TestCase):
         self.assertEqual(second_result["pending_action"]["status"], "ask_clarification")
         self.assertNotIn("tool_invocation", second_result)
 
+    def test_knowledge_agent_follow_up_reuses_persisted_tool_result_after_rehydration(self) -> None:
+        read_payload = {
+            "ok": True,
+            "document": {
+                "name": "ArchitectureOverview",
+                "title": "Architecture Overview",
+                "path": "knowledge/Docs/00_Shared/ArchitectureOverview.md",
+            },
+            "content": "Architecture excerpt",
+            "start_line": 1,
+            "end_line": 10,
+            "section_query": "",
+            "truncated": False,
+        }
+        node = KnowledgeAgentNode(
+            NoopLLM(),
+            [],
+            pending_action_router=build_pending_action_router(
+                {
+                    "details": {
+                        "decision": "select",
+                        "selected_index": 0,
+                        "reason": "The user asked to reopen the current document details.",
+                    }
+                }
+            ),
+            agent_name="knowledge_agent",
+        )
+        pending_action = {
+            "id": "pending-doc",
+            "requested_by_agent": "knowledge_agent",
+            "status": "awaiting_confirmation",
+            "summary": "Review the opened knowledge document.",
+            "metadata": {
+                "source_tool_id": "knowledge.read_document",
+                "selection_options": [
+                    {
+                        "id": "Architecture Overview",
+                        "label": "Architecture Overview",
+                        "value": "Architecture Overview",
+                        "payload": {"document_name": "Architecture Overview"},
+                    }
+                ],
+                "selection_phase": "awaiting_selection",
+            },
+        }
+
+        result = node(
+            {
+                "thread_id": "thread-1",
+                "messages": [HumanMessage(content="details")],
+                "pending_action": pending_action,
+                "tool_result": {
+                    "tool_name": "read_knowledge_document",
+                    "tool_id": "knowledge.read_document",
+                    "status": "ok",
+                    "payload": read_payload,
+                },
+            }
+        )
+
+        self.assertIn("Architecture Overview", result["messages"][-1].content)
+        self.assertIn("Architecture excerpt", result["messages"][-1].content)
+        self.assertEqual(result["pending_action"]["metadata"]["source_tool_id"], "knowledge.read_document")
+
     def test_project_task_tool_result_renders_deterministically_and_details_reuse_payload(self) -> None:
         payload = {
             "ok": True,
