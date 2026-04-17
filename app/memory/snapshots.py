@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import re
 from datetime import datetime, timezone
 from pathlib import Path
@@ -16,6 +17,7 @@ from app.memory.long_term import (
     list_long_term_memories,
     load_long_term_memory_catalog,
 )
+from app.memory.observability import emit_memory_telemetry
 from app.memory.types import (
     LongTermMemoryFile,
     LongTermMemorySnapshot,
@@ -29,6 +31,8 @@ LONG_TERM_MEMORY_SNAPSHOTS_DIRNAME = "snapshots"
 LONG_TERM_MEMORY_SNAPSHOT_SYNC_FILENAME = ".snapshot_sync.json"
 _LIST_PREFIX_PATTERN = re.compile(r"^\s*(?:[-*+]\s+|\d+\.\s+)")
 _WHITESPACE_PATTERN = re.compile(r"\s+")
+
+logger = logging.getLogger(__name__)
 
 
 class LongTermMemorySnapshotError(ValueError):
@@ -153,6 +157,14 @@ def get_pending_long_term_memory_snapshot(
 ) -> LongTermMemorySnapshot | None:
     snapshot = select_long_term_memory_snapshot(project_root_dir, snapshot_id=snapshot_id)
     if snapshot is None:
+        emit_memory_telemetry(
+            logger,
+            "snapshots.pending",
+            status="skip",
+            project_root_dir=project_root_dir,
+            user_root_dir=user_root_dir,
+            reason="no_snapshot",
+        )
         return None
 
     sync_state = load_long_term_memory_snapshot_sync_state(user_root_dir)
@@ -161,7 +173,24 @@ def get_pending_long_term_memory_snapshot(
         and sync_state.snapshot_id == snapshot.snapshot_id
         and sync_state.fingerprint == snapshot.fingerprint
     ):
+        emit_memory_telemetry(
+            logger,
+            "snapshots.pending",
+            status="skip",
+            project_root_dir=project_root_dir,
+            user_root_dir=user_root_dir,
+            snapshot_id=snapshot.snapshot_id,
+            reason="already_synced",
+        )
         return None
+    emit_memory_telemetry(
+        logger,
+        "snapshots.pending",
+        project_root_dir=project_root_dir,
+        user_root_dir=user_root_dir,
+        snapshot_id=snapshot.snapshot_id,
+        memory_count=snapshot.memory_count,
+    )
     return snapshot
 
 
@@ -172,77 +201,103 @@ def apply_long_term_memory_snapshot(
     action: LongTermMemorySnapshotChoice,
     snapshot_id: str = "",
 ) -> LongTermMemorySnapshotApplySummary:
-    normalized_action = normalize_long_term_memory_snapshot_choice(action)
-    snapshot = select_long_term_memory_snapshot(project_root_dir, snapshot_id=snapshot_id)
-    if snapshot is None:
-        raise LongTermMemorySnapshotError("No project-provided memory snapshot is available.")
-
     resolved_user_root_dir = Path(user_root_dir).expanduser().resolve()
     resolved_project_root_dir = Path(project_root_dir).expanduser().resolve()
-    resolved_user_root_dir.mkdir(parents=True, exist_ok=True)
-
     created_memory_ids: list[str] = []
     updated_memory_ids: list[str] = []
     deleted_memory_ids: list[str] = []
+    normalized_action = str(action or "").strip().lower()
+    try:
+        normalized_action = normalize_long_term_memory_snapshot_choice(action)
+        snapshot = select_long_term_memory_snapshot(project_root_dir, snapshot_id=snapshot_id)
+        if snapshot is None:
+            raise LongTermMemorySnapshotError("No project-provided memory snapshot is available.")
 
-    if normalized_action == "keep":
-        write_long_term_memory_snapshot_sync_state(
-            resolved_user_root_dir,
-            snapshot=snapshot,
+        resolved_user_root_dir.mkdir(parents=True, exist_ok=True)
+
+        if normalized_action == "keep":
+            write_long_term_memory_snapshot_sync_state(
+                resolved_user_root_dir,
+                snapshot=snapshot,
+                action=normalized_action,
+            )
+            summary = LongTermMemorySnapshotApplySummary(
+                snapshot_id=snapshot.snapshot_id,
+                fingerprint=snapshot.fingerprint,
+                action=normalized_action,
+                user_root_dir=str(resolved_user_root_dir),
+                project_root_dir=str(resolved_project_root_dir),
+            )
+        else:
+            store = FileLongTermMemoryStore(resolved_user_root_dir)
+            existing_entries = {entry.memory_id: entry for entry in list_long_term_memories(resolved_user_root_dir)}
+
+            if normalized_action == "replace":
+                for memory_id in sorted(existing_entries):
+                    if delete_long_term_memory(resolved_user_root_dir, memory_id):
+                        deleted_memory_ids.append(memory_id)
+
+            for snapshot_memory in snapshot.memories:
+                existing_memory = None if normalized_action == "replace" else get_long_term_memory(
+                    resolved_user_root_dir,
+                    snapshot_memory.memory_id,
+                )
+                if existing_memory is None:
+                    store.upsert(_build_snapshot_memory_write(snapshot_memory))
+                    created_memory_ids.append(snapshot_memory.memory_id)
+                    continue
+
+                merged_payload = _build_merged_snapshot_memory(existing_memory, snapshot_memory)
+                if (
+                    existing_memory.name == merged_payload["name"]
+                    and existing_memory.description == merged_payload["description"]
+                    and existing_memory.memory_type == merged_payload["memory_type"]
+                    and existing_memory.content_markdown == merged_payload["content_markdown"]
+                ):
+                    continue
+                store.upsert(merged_payload)
+                updated_memory_ids.append(snapshot_memory.memory_id)
+
+            write_long_term_memory_snapshot_sync_state(
+                resolved_user_root_dir,
+                snapshot=snapshot,
+                action=normalized_action,
+            )
+            summary = LongTermMemorySnapshotApplySummary(
+                snapshot_id=snapshot.snapshot_id,
+                fingerprint=snapshot.fingerprint,
+                action=normalized_action,
+                user_root_dir=str(resolved_user_root_dir),
+                project_root_dir=str(resolved_project_root_dir),
+                created_memory_ids=created_memory_ids,
+                updated_memory_ids=updated_memory_ids,
+                deleted_memory_ids=deleted_memory_ids,
+            )
+    except Exception as exc:
+        emit_memory_telemetry(
+            logger,
+            "snapshots.apply",
+            status="error",
             action=normalized_action,
+            user_root_dir=resolved_user_root_dir,
+            project_root_dir=resolved_project_root_dir,
+            snapshot_id=str(snapshot_id or "").strip(),
+            error=str(exc),
         )
-        return LongTermMemorySnapshotApplySummary(
-            snapshot_id=snapshot.snapshot_id,
-            fingerprint=snapshot.fingerprint,
-            action=normalized_action,
-            user_root_dir=str(resolved_user_root_dir),
-            project_root_dir=str(resolved_project_root_dir),
-        )
+        raise
 
-    store = FileLongTermMemoryStore(resolved_user_root_dir)
-    existing_entries = {entry.memory_id: entry for entry in list_long_term_memories(resolved_user_root_dir)}
-
-    if normalized_action == "replace":
-        for memory_id in sorted(existing_entries):
-            if delete_long_term_memory(resolved_user_root_dir, memory_id):
-                deleted_memory_ids.append(memory_id)
-
-    for snapshot_memory in snapshot.memories:
-        existing_memory = None if normalized_action == "replace" else get_long_term_memory(
-            resolved_user_root_dir,
-            snapshot_memory.memory_id,
-        )
-        if existing_memory is None:
-            store.upsert(_build_snapshot_memory_write(snapshot_memory))
-            created_memory_ids.append(snapshot_memory.memory_id)
-            continue
-
-        merged_payload = _build_merged_snapshot_memory(existing_memory, snapshot_memory)
-        if (
-            existing_memory.name == merged_payload["name"]
-            and existing_memory.description == merged_payload["description"]
-            and existing_memory.memory_type == merged_payload["memory_type"]
-            and existing_memory.content_markdown == merged_payload["content_markdown"]
-        ):
-            continue
-        store.upsert(merged_payload)
-        updated_memory_ids.append(snapshot_memory.memory_id)
-
-    write_long_term_memory_snapshot_sync_state(
-        resolved_user_root_dir,
-        snapshot=snapshot,
-        action=normalized_action,
+    emit_memory_telemetry(
+        logger,
+        "snapshots.apply",
+        action=summary.action,
+        snapshot_id=summary.snapshot_id,
+        user_root_dir=summary.user_root_dir,
+        project_root_dir=summary.project_root_dir,
+        created_count=len(summary.created_memory_ids),
+        updated_count=len(summary.updated_memory_ids),
+        deleted_count=len(summary.deleted_memory_ids),
     )
-    return LongTermMemorySnapshotApplySummary(
-        snapshot_id=snapshot.snapshot_id,
-        fingerprint=snapshot.fingerprint,
-        action=normalized_action,
-        user_root_dir=str(resolved_user_root_dir),
-        project_root_dir=str(resolved_project_root_dir),
-        created_memory_ids=created_memory_ids,
-        updated_memory_ids=updated_memory_ids,
-        deleted_memory_ids=deleted_memory_ids,
-    )
+    return summary
 
 
 def normalize_long_term_memory_snapshot_choice(value: LongTermMemorySnapshotChoice | str) -> LongTermMemorySnapshotChoice:

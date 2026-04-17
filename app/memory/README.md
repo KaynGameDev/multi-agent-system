@@ -99,6 +99,19 @@ The current consolidation pass is intentionally conservative:
 
 The background consolidator is optional and off by default. When enabled, the web runtime debounces consolidation by memory root so the main request path stays non-blocking.
 
+## Observability
+
+The memory subsystem now emits structured telemetry through the repo's existing logging path. Each event is logged as a `memory telemetry` JSON payload so tests and operators can inspect behavior without adding a separate metrics backend first.
+
+Current event families include:
+
+- `long_term.*` for CRUD outcomes and validation failures
+- `retrieval.search` for header-first candidate counts, selected results, and retrieval failures
+- `session_memory.*` for session-summary build/store/delete flows
+- `compaction.run` for compaction boundaries, preserved-tail sizing, and fallback failures
+- `extraction.*` for durable-memory extraction and persistence outcomes
+- `snapshots.*` for pending snapshot detection and keep/merge/replace application
+
 ## Default Path Layout
 
 By default, `MEMORY_WORK_DIR` resolves to `runtime/memory/` and future memory assets are expected to live under:

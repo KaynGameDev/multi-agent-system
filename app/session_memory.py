@@ -11,6 +11,7 @@ from threading import RLock
 from typing import Any
 
 from app.context_window import token_count_with_estimation
+from app.memory.observability import emit_memory_telemetry
 from app.memory.session_files import (
     delete_session_memory_file,
     resolve_session_memory_file_path,
@@ -72,10 +73,25 @@ class SessionMemoryStore:
     def upsert(self, record: SessionMemoryRecord | dict[str, Any]) -> SessionMemoryRecord:
         normalized_record = normalize_session_memory_record(record)
         if normalized_record is None:
+            emit_memory_telemetry(
+                logger,
+                "session_memory.store_upsert",
+                status="error",
+                thread_id=str(record.get("thread_id", "")).strip() if isinstance(record, dict) else "",
+                error="Session memory record must include a thread_id and summary_markdown.",
+            )
             raise ValueError("Session memory record must include a thread_id and summary_markdown.")
         with self._lock:
             self._upsert_locked(normalized_record)
-            return deepcopy(normalized_record)
+        emit_memory_telemetry(
+            logger,
+            "session_memory.store_upsert",
+            thread_id=normalized_record.thread_id,
+            source=normalized_record.source,
+            covered_message_count=normalized_record.covered_message_count,
+            covered_tokens=normalized_record.covered_tokens,
+        )
+        return deepcopy(normalized_record)
 
     def upsert_scoped(
         self,
@@ -86,31 +102,85 @@ class SessionMemoryStore:
     ) -> SessionMemoryRecord:
         normalized_record = normalize_session_memory_record(record)
         if normalized_record is None:
+            emit_memory_telemetry(
+                logger,
+                "session_memory.store_upsert_scoped",
+                status="error",
+                thread_id=str(record.get("thread_id", "")).strip() if isinstance(record, dict) else "",
+                error="Session memory record must include a thread_id and summary_markdown.",
+            )
             raise ValueError("Session memory record must include a thread_id and summary_markdown.")
 
         normalized_allowed_thread_id = str(allowed_thread_id or "").strip()
         if not normalized_allowed_thread_id or normalized_record.thread_id != normalized_allowed_thread_id:
+            emit_memory_telemetry(
+                logger,
+                "session_memory.store_upsert_scoped",
+                status="error",
+                thread_id=normalized_record.thread_id,
+                allowed_thread_id=normalized_allowed_thread_id,
+                error="Scoped session memory update must stay on the allowed thread.",
+            )
             raise ValueError("Scoped session memory update must stay on the allowed thread.")
 
         resolved_allowed_path = Path(allowed_session_file_path).expanduser().resolve()
         expected_session_file_path = self.resolve_session_file_path(normalized_allowed_thread_id)
         if resolved_allowed_path != expected_session_file_path:
+            emit_memory_telemetry(
+                logger,
+                "session_memory.store_upsert_scoped",
+                status="error",
+                thread_id=normalized_record.thread_id,
+                allowed_thread_id=normalized_allowed_thread_id,
+                allowed_session_file_path=resolved_allowed_path,
+                expected_session_file_path=expected_session_file_path,
+                error="Scoped session memory update must stay on the allowed session file path.",
+            )
             raise ValueError("Scoped session memory update must stay on the allowed session file path.")
 
         with self._lock:
             self._upsert_locked(normalized_record, session_file_path=resolved_allowed_path)
-            return deepcopy(normalized_record)
+        emit_memory_telemetry(
+            logger,
+            "session_memory.store_upsert_scoped",
+            thread_id=normalized_record.thread_id,
+            source=normalized_record.source,
+            covered_message_count=normalized_record.covered_message_count,
+            covered_tokens=normalized_record.covered_tokens,
+        )
+        return deepcopy(normalized_record)
 
     def delete(self, thread_id: str) -> None:
         normalized_thread_id = str(thread_id or "").strip()
         if not normalized_thread_id:
+            emit_memory_telemetry(
+                logger,
+                "session_memory.store_delete",
+                status="skip",
+                thread_id="",
+                deleted=False,
+                reason="empty_thread_id",
+            )
             return
         with self._lock:
             if normalized_thread_id not in self._records:
+                emit_memory_telemetry(
+                    logger,
+                    "session_memory.store_delete",
+                    status="miss",
+                    thread_id=normalized_thread_id,
+                    deleted=False,
+                )
                 return
             self._records.pop(normalized_thread_id, None)
             self._persist_locked()
             self._delete_session_file_locked(normalized_thread_id)
+        emit_memory_telemetry(
+            logger,
+            "session_memory.store_delete",
+            thread_id=normalized_thread_id,
+            deleted=True,
+        )
 
     def resolve_session_file_path(self, thread_id: str) -> Path:
         return resolve_session_memory_file_path(self._session_files_root_dir, thread_id)
@@ -353,10 +423,27 @@ def build_session_memory_record(
 ) -> SessionMemoryRecord | None:
     normalized_thread_id = str(thread_id or "").strip()
     if not normalized_thread_id:
+        emit_memory_telemetry(
+            logger,
+            "session_memory.build_record",
+            status="skip",
+            thread_id="",
+            reason="empty_thread_id",
+            force_refresh=force_refresh,
+        )
         return None
 
     active_slice = _project_active_slice(messages)
     if not active_slice or not is_safe_session_memory_extraction_point(active_slice):
+        emit_memory_telemetry(
+            logger,
+            "session_memory.build_record",
+            status="skip",
+            thread_id=normalized_thread_id,
+            active_slice_count=len(active_slice),
+            reason="unsafe_extraction_point",
+            force_refresh=force_refresh,
+        )
         return None
 
     existing_record = normalize_session_memory_record(session_memory)
@@ -366,18 +453,47 @@ def build_session_memory_record(
             active_slice,
             initialize_threshold_tokens=initialize_threshold_tokens,
         ):
+            emit_memory_telemetry(
+                logger,
+                "session_memory.build_record",
+                status="skip",
+                thread_id=normalized_thread_id,
+                active_slice_count=len(active_slice),
+                reason="initialize_threshold_not_met",
+                force_refresh=force_refresh,
+            )
             return None
     else:
         last_message_index = _find_message_index(active_slice, existing_record.last_message_id)
         if last_message_index >= 0:
             growth_messages = active_slice[last_message_index + 1 :]
             if not growth_messages:
+                emit_memory_telemetry(
+                    logger,
+                    "session_memory.build_record",
+                    status="skip",
+                    thread_id=normalized_thread_id,
+                    active_slice_count=len(active_slice),
+                    reason="no_growth_messages",
+                    force_refresh=force_refresh,
+                    source="update",
+                )
                 return None
             if not force_refresh and not should_update_session_memory(
                 active_slice,
                 existing_record,
                 update_growth_threshold_tokens=update_growth_threshold_tokens,
             ):
+                emit_memory_telemetry(
+                    logger,
+                    "session_memory.build_record",
+                    status="skip",
+                    thread_id=normalized_thread_id,
+                    active_slice_count=len(active_slice),
+                    reason="update_threshold_not_met",
+                    force_refresh=force_refresh,
+                    source="update",
+                )
                 return None
             source = "update"
         else:
@@ -385,6 +501,16 @@ def build_session_memory_record(
                 active_slice,
                 initialize_threshold_tokens=initialize_threshold_tokens,
             ):
+                emit_memory_telemetry(
+                    logger,
+                    "session_memory.build_record",
+                    status="skip",
+                    thread_id=normalized_thread_id,
+                    active_slice_count=len(active_slice),
+                    reason="reinitialize_threshold_not_met",
+                    force_refresh=force_refresh,
+                    source="reinitialize",
+                )
                 return None
             source = "reinitialize"
 
@@ -399,11 +525,20 @@ def build_session_memory_record(
     )
     summary_markdown = str(bundle.summary_message.get("markdown", "") or "").strip()
     if not summary_markdown:
+        emit_memory_telemetry(
+            logger,
+            "session_memory.build_record",
+            status="error",
+            thread_id=normalized_thread_id,
+            active_slice_count=len(active_slice),
+            source=source,
+            error="Compaction summary markdown was empty.",
+        )
         return None
 
     active_tokens = token_count_with_estimation(active_slice).estimated_total_tokens
     last_message = active_slice[-1]
-    return SessionMemoryRecord(
+    record = SessionMemoryRecord(
         thread_id=normalized_thread_id,
         updated_at=utc_now_iso(),
         last_message_id=last_message["id"],
@@ -413,6 +548,17 @@ def build_session_memory_record(
         summary_markdown=summary_markdown,
         source=source,
     )
+    emit_memory_telemetry(
+        logger,
+        "session_memory.build_record",
+        thread_id=normalized_thread_id,
+        active_slice_count=len(active_slice),
+        covered_message_count=record.covered_message_count,
+        covered_tokens=record.covered_tokens,
+        source=source,
+        force_refresh=force_refresh,
+    )
+    return record
 
 
 def build_session_memory_compaction_plan(

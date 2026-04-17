@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from dataclasses import dataclass
+import logging
 import re
 from typing import Any
 
@@ -9,6 +10,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_valida
 
 from app.context_window import token_count_with_estimation
 from app.messages import strip_internal_reasoning, stringify_message_content
+from app.memory.observability import emit_memory_telemetry
 from app.model_request import build_model_request_messages, is_compact_boundary_message
 from app.rehydration import (
     RUNTIME_REHYDRATION_METADATA_KEY,
@@ -26,6 +28,8 @@ from interfaces.web.conversations import (
 )
 
 DRAFT_ANALYSIS_BLOCK_PATTERN = re.compile(r"<draft_analysis>.*?</draft_analysis>", re.IGNORECASE | re.DOTALL)
+
+logger = logging.getLogger(__name__)
 
 
 class ContinuationSummaryDraft(BaseModel):
@@ -92,139 +96,171 @@ def compact_conversation(
     session_memory: SessionMemoryRecord | dict[str, Any] | None = None,
 ) -> ConversationCompactionBundle:
     normalized_messages = [_normalize_transcript_message_payload(message) for message in messages]
-    active_slice_start = _find_active_slice_start(normalized_messages)
-    prefix_messages = [deepcopy(message) for message in normalized_messages[:active_slice_start]]
-    active_slice = [deepcopy(message) for message in normalized_messages[active_slice_start:]]
-    if not active_slice:
-        raise ValueError("Cannot compact an empty active transcript slice.")
+    active_slice_count = 0
+    compacted_source_count = 0
+    resolved_preserved_tail_count = 0
+    used_session_memory = False
+    try:
+        active_slice_start = _find_active_slice_start(normalized_messages)
+        prefix_messages = [deepcopy(message) for message in normalized_messages[:active_slice_start]]
+        active_slice = [deepcopy(message) for message in normalized_messages[active_slice_start:]]
+        active_slice_count = len(active_slice)
+        if not active_slice:
+            raise ValueError("Cannot compact an empty active transcript slice.")
 
-    normalized_attachments = _normalize_attachments(attachments)
-    resolved_preserved_tail_count = min(
-        max(int(preserved_tail_count or 0), 0),
-        max(len(active_slice) - 1, 0),
-    )
-    session_memory_plan = build_session_memory_compaction_plan(
-        active_slice,
-        session_memory,
-        preserved_tail_count=resolved_preserved_tail_count,
-    )
-    used_session_memory = session_memory_plan is not None
-    session_memory_record = session_memory_plan.record if session_memory_plan is not None else None
-    if session_memory_plan is not None:
-        compacted_source_messages = [
-            deepcopy(message)
-            for message in active_slice[: session_memory_plan.compacted_source_count]
-        ]
-        preserved_tail_messages = [deepcopy(message) for message in session_memory_plan.preserved_tail_messages]
-        resolved_preserved_tail_count = len(preserved_tail_messages)
-    else:
-        preserved_tail_start = resolve_safe_preserved_tail_start(
+        normalized_attachments = _normalize_attachments(attachments)
+        resolved_preserved_tail_count = min(
+            max(int(preserved_tail_count or 0), 0),
+            max(len(active_slice) - 1, 0),
+        )
+        session_memory_plan = build_session_memory_compaction_plan(
             active_slice,
+            session_memory,
             preserved_tail_count=resolved_preserved_tail_count,
         )
-        compacted_source_messages = (
-            active_slice[:preserved_tail_start]
-            if preserved_tail_start < len(active_slice)
-            else active_slice
-        )
-        preserved_tail_messages = (
-            [deepcopy(message) for message in active_slice[preserved_tail_start:]]
-            if preserved_tail_start < len(active_slice)
-            else []
-        )
-        resolved_preserved_tail_count = len(preserved_tail_messages)
+        used_session_memory = session_memory_plan is not None
+        session_memory_record = session_memory_plan.record if session_memory_plan is not None else None
+        if session_memory_plan is not None:
+            compacted_source_messages = [
+                deepcopy(message)
+                for message in active_slice[: session_memory_plan.compacted_source_count]
+            ]
+            preserved_tail_messages = [deepcopy(message) for message in session_memory_plan.preserved_tail_messages]
+            resolved_preserved_tail_count = len(preserved_tail_messages)
+        else:
+            preserved_tail_start = resolve_safe_preserved_tail_start(
+                active_slice,
+                preserved_tail_count=resolved_preserved_tail_count,
+            )
+            compacted_source_messages = (
+                active_slice[:preserved_tail_start]
+                if preserved_tail_start < len(active_slice)
+                else active_slice
+            )
+            preserved_tail_messages = (
+                [deepcopy(message) for message in active_slice[preserved_tail_start:]]
+                if preserved_tail_start < len(active_slice)
+                else []
+            )
+            resolved_preserved_tail_count = len(preserved_tail_messages)
 
-    if not compacted_source_messages:
-        raise ValueError("Manual compaction must summarize at least one message.")
+        if not compacted_source_messages:
+            raise ValueError("Manual compaction must summarize at least one message.")
 
-    compaction_timestamp = utc_now_iso()
-    estimated_pre_tokens = pre_tokens
-    if estimated_pre_tokens is None:
-        estimated_pre_tokens = token_count_with_estimation(active_slice).estimated_total_tokens
+        compacted_source_count = len(compacted_source_messages)
+        compaction_timestamp = utc_now_iso()
+        estimated_pre_tokens = pre_tokens
+        if estimated_pre_tokens is None:
+            estimated_pre_tokens = token_count_with_estimation(active_slice).estimated_total_tokens
 
-    if used_session_memory and session_memory_record is not None:
-        formatted_summary = session_memory_record.summary_markdown
-    else:
-        resolved_summary_draft = _resolve_continuation_summary_draft(
-            llm,
-            compacted_source_messages,
-            attachments=normalized_attachments,
-            summary_draft=summary_draft,
+        if used_session_memory and session_memory_record is not None:
+            formatted_summary = session_memory_record.summary_markdown
+        else:
+            resolved_summary_draft = _resolve_continuation_summary_draft(
+                llm,
+                compacted_source_messages,
+                attachments=normalized_attachments,
+                summary_draft=summary_draft,
+            )
+            formatted_summary = format_continuation_summary(
+                resolved_summary_draft,
+                attachments=normalized_attachments,
+            )
+        runtime_rehydration_state = extract_runtime_rehydration_state_from_transcript(
+            normalized_messages,
+            require_compact_boundary=False,
         )
-        formatted_summary = format_continuation_summary(
-            resolved_summary_draft,
-            attachments=normalized_attachments,
-        )
-    runtime_rehydration_state = extract_runtime_rehydration_state_from_transcript(
-        normalized_messages,
-        require_compact_boundary=False,
-    )
 
-    boundary_message = {
-        "id": _generate_message_id(),
-        "role": "system",
-        "type": TRANSCRIPT_TYPE_COMPACT_BOUNDARY,
-        "markdown": "",
-        "created_at": compaction_timestamp,
-        "metadata": {
-            "trigger": str(trigger or "").strip() or "manual",
-            "preTokens": int(estimated_pre_tokens),
-            "preservedTail": {
-                "count": resolved_preserved_tail_count,
-                "messageIds": [message["id"] for message in preserved_tail_messages],
+        boundary_message = {
+            "id": _generate_message_id(),
+            "role": "system",
+            "type": TRANSCRIPT_TYPE_COMPACT_BOUNDARY,
+            "markdown": "",
+            "created_at": compaction_timestamp,
+            "metadata": {
+                "trigger": str(trigger or "").strip() or "manual",
+                "preTokens": int(estimated_pre_tokens),
+                "preservedTail": {
+                    "count": resolved_preserved_tail_count,
+                    "messageIds": [message["id"] for message in preserved_tail_messages],
+                },
             },
-        },
-    }
-    if normalized_attachments:
-        boundary_message["metadata"]["attachments"] = deepcopy(normalized_attachments)
-
-    summary_message = {
-        "id": _generate_message_id(),
-        "role": "assistant",
-        "type": TRANSCRIPT_TYPE_MESSAGE,
-        "markdown": formatted_summary,
-        "created_at": compaction_timestamp,
-        "metadata": {
-            "compaction": {
-                "kind": "continuation_summary",
-                "source": "session_memory" if used_session_memory else "fresh_summary",
-                "sourceMessageIds": [message["id"] for message in compacted_source_messages],
-                "sourceMessageCount": len(compacted_source_messages),
-            }
-        },
-    }
-    if used_session_memory and session_memory_record is not None:
-        summary_message["metadata"]["compaction"]["sessionMemory"] = {
-            "updatedAt": session_memory_record.updated_at,
-            "lastMessageId": session_memory_record.last_message_id,
-            "coveredMessageCount": session_memory_record.covered_message_count,
-            "coveredTokens": session_memory_record.covered_tokens,
-            "source": session_memory_record.source,
         }
-    if runtime_rehydration_state:
-        summary_message["metadata"][RUNTIME_REHYDRATION_METADATA_KEY] = deepcopy(runtime_rehydration_state)
-    if normalized_attachments:
-        summary_message["metadata"]["attachments"] = deepcopy(normalized_attachments)
+        if normalized_attachments:
+            boundary_message["metadata"]["attachments"] = deepcopy(normalized_attachments)
 
-    compacted_messages = [
-        *prefix_messages,
-        boundary_message,
-        summary_message,
-        *preserved_tail_messages,
-    ]
-    return ConversationCompactionBundle(
-        prefix_messages=prefix_messages,
-        boundary_message=boundary_message,
-        summary_message=summary_message,
-        preserved_tail_messages=preserved_tail_messages,
-        attachments=normalized_attachments,
-        compacted_messages=compacted_messages,
-        active_slice_start=active_slice_start,
-        active_slice_count=len(active_slice),
-        compacted_source_count=len(compacted_source_messages),
-        used_session_memory=used_session_memory,
-        session_memory_record=session_memory_record,
+        summary_message = {
+            "id": _generate_message_id(),
+            "role": "assistant",
+            "type": TRANSCRIPT_TYPE_MESSAGE,
+            "markdown": formatted_summary,
+            "created_at": compaction_timestamp,
+            "metadata": {
+                "compaction": {
+                    "kind": "continuation_summary",
+                    "source": "session_memory" if used_session_memory else "fresh_summary",
+                    "sourceMessageIds": [message["id"] for message in compacted_source_messages],
+                    "sourceMessageCount": len(compacted_source_messages),
+                }
+            },
+        }
+        if used_session_memory and session_memory_record is not None:
+            summary_message["metadata"]["compaction"]["sessionMemory"] = {
+                "updatedAt": session_memory_record.updated_at,
+                "lastMessageId": session_memory_record.last_message_id,
+                "coveredMessageCount": session_memory_record.covered_message_count,
+                "coveredTokens": session_memory_record.covered_tokens,
+                "source": session_memory_record.source,
+            }
+        if runtime_rehydration_state:
+            summary_message["metadata"][RUNTIME_REHYDRATION_METADATA_KEY] = deepcopy(runtime_rehydration_state)
+        if normalized_attachments:
+            summary_message["metadata"]["attachments"] = deepcopy(normalized_attachments)
+
+        compacted_messages = [
+            *prefix_messages,
+            boundary_message,
+            summary_message,
+            *preserved_tail_messages,
+        ]
+        bundle = ConversationCompactionBundle(
+            prefix_messages=prefix_messages,
+            boundary_message=boundary_message,
+            summary_message=summary_message,
+            preserved_tail_messages=preserved_tail_messages,
+            attachments=normalized_attachments,
+            compacted_messages=compacted_messages,
+            active_slice_start=active_slice_start,
+            active_slice_count=len(active_slice),
+            compacted_source_count=len(compacted_source_messages),
+            used_session_memory=used_session_memory,
+            session_memory_record=session_memory_record,
+        )
+    except Exception as exc:
+        emit_memory_telemetry(
+            logger,
+            "compaction.run",
+            status="error",
+            trigger=str(trigger or "").strip() or "manual",
+            active_slice_count=active_slice_count,
+            compacted_source_count=compacted_source_count,
+            preserved_tail_count=resolved_preserved_tail_count,
+            used_session_memory=used_session_memory,
+            error=str(exc),
+        )
+        raise
+
+    emit_memory_telemetry(
+        logger,
+        "compaction.run",
+        trigger=str(trigger or "").strip() or "manual",
+        active_slice_count=bundle.active_slice_count,
+        compacted_source_count=bundle.compacted_source_count,
+        preserved_tail_count=len(bundle.preserved_tail_messages),
+        used_session_memory=bundle.used_session_memory,
+        attachments_count=len(bundle.attachments),
     )
+    return bundle
 
 
 def build_continuation_summary_prompt(

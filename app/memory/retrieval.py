@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import Iterable, Sequence
@@ -9,6 +10,7 @@ from app.memory.long_term import (
     list_long_term_memories,
     load_long_term_memory_file,
 )
+from app.memory.observability import emit_memory_telemetry
 from app.memory.types import AgentMemoryRetrievalResult, AgentMemoryScope, LongTermMemoryIndexEntry
 
 QUERY_TOKEN_PATTERN = re.compile(r"[a-z0-9]+")
@@ -47,6 +49,8 @@ QUERY_STOPWORDS = {
     "with",
 }
 
+logger = logging.getLogger(__name__)
+
 
 def retrieve_relevant_long_term_memories(
     root_dir: str | Path,
@@ -57,22 +61,56 @@ def retrieve_relevant_long_term_memories(
     top_k: int = 3,
     loaded_paths: Sequence[str] | None = None,
 ) -> list[AgentMemoryRetrievalResult]:
+    resolved_root_dir = Path(root_dir).expanduser().resolve()
     normalized_query = str(query_text or "").strip()
     if not normalized_query:
+        emit_memory_telemetry(
+            logger,
+            "retrieval.search",
+            status="skip",
+            root_dir=resolved_root_dir,
+            selected_count=0,
+            reason="empty_query",
+        )
         return []
 
     effective_limit = max(int(top_k or 0), 0)
     if effective_limit <= 0:
+        emit_memory_telemetry(
+            logger,
+            "retrieval.search",
+            status="skip",
+            root_dir=resolved_root_dir,
+            selected_count=0,
+            reason="non_positive_limit",
+        )
         return []
 
     try:
-        entries = list_long_term_memories(root_dir)
-    except LongTermMemoryFormatError:
+        entries = list_long_term_memories(resolved_root_dir)
+    except LongTermMemoryFormatError as exc:
+        emit_memory_telemetry(
+            logger,
+            "retrieval.search",
+            status="error",
+            root_dir=resolved_root_dir,
+            query_token_count=len(_tokenize_query(normalized_query)),
+            selected_count=0,
+            error=str(exc),
+        )
         return []
     if not entries:
+        emit_memory_telemetry(
+            logger,
+            "retrieval.search",
+            status="empty",
+            root_dir=resolved_root_dir,
+            query_token_count=len(_tokenize_query(normalized_query)),
+            candidate_count=0,
+            selected_count=0,
+        )
         return []
 
-    resolved_root_dir = Path(root_dir).expanduser().resolve()
     excluded_refs = normalize_loaded_memory_refs(loaded_paths or (), root_dir=resolved_root_dir)
     scored_entries = [
         (entry, score)
@@ -82,6 +120,16 @@ def retrieve_relevant_long_term_memories(
         if score > 0
     ]
     if not scored_entries:
+        emit_memory_telemetry(
+            logger,
+            "retrieval.search",
+            status="empty",
+            root_dir=resolved_root_dir,
+            query_token_count=len(_tokenize_query(normalized_query)),
+            candidate_count=len(entries),
+            excluded_count=len(excluded_refs),
+            selected_count=0,
+        )
         return []
 
     ranked_entries = sorted(
@@ -90,23 +138,50 @@ def retrieve_relevant_long_term_memories(
     )
 
     results: list[AgentMemoryRetrievalResult] = []
-    for entry, score in ranked_entries[:effective_limit]:
-        topic_path = _resolve_memory_topic_path(resolved_root_dir, entry.relative_path)
-        topic_file = load_long_term_memory_file(topic_path, root_dir=resolved_root_dir)
-        results.append(
-            AgentMemoryRetrievalResult(
-                memory_id=topic_file.memory_id,
-                scope=memory_scope,
-                scope_key=scope_key,
-                relative_path=topic_file.relative_path,
-                source_path=topic_file.source_path,
-                name=topic_file.name,
-                description=topic_file.description,
-                memory_type=topic_file.memory_type,
-                content_markdown=topic_file.content_markdown,
-                score=score,
+    try:
+        for entry, score in ranked_entries[:effective_limit]:
+            topic_path = _resolve_memory_topic_path(resolved_root_dir, entry.relative_path)
+            topic_file = load_long_term_memory_file(topic_path, root_dir=resolved_root_dir)
+            results.append(
+                AgentMemoryRetrievalResult(
+                    memory_id=topic_file.memory_id,
+                    scope=memory_scope,
+                    scope_key=scope_key,
+                    relative_path=topic_file.relative_path,
+                    source_path=topic_file.source_path,
+                    name=topic_file.name,
+                    description=topic_file.description,
+                    memory_type=topic_file.memory_type,
+                    content_markdown=topic_file.content_markdown,
+                    score=score,
+                )
             )
+    except LongTermMemoryFormatError as exc:
+        emit_memory_telemetry(
+            logger,
+            "retrieval.search",
+            status="error",
+            root_dir=resolved_root_dir,
+            query_token_count=len(_tokenize_query(normalized_query)),
+            candidate_count=len(entries),
+            scored_count=len(scored_entries),
+            selected_count=0,
+            error=str(exc),
         )
+        return []
+
+    emit_memory_telemetry(
+        logger,
+        "retrieval.search",
+        root_dir=resolved_root_dir,
+        query_token_count=len(_tokenize_query(normalized_query)),
+        candidate_count=len(entries),
+        scored_count=len(scored_entries),
+        excluded_count=len(excluded_refs),
+        selected_count=len(results),
+        loaded_count=len(results),
+        top_score=results[0].score if results else 0.0,
+    )
     return results
 
 

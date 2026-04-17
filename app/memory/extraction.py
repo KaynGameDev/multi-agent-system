@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from copy import deepcopy
 from typing import Any
@@ -7,6 +8,7 @@ from typing import Any
 from app.config import Settings
 from app.memory.agent_scope import resolve_agent_memory_context
 from app.memory.long_term import FileLongTermMemoryStore
+from app.memory.observability import emit_memory_telemetry
 from app.memory.types import AgentMemoryScope, LongTermMemoryFile, LongTermMemoryWrite
 from app.rehydration import RUNTIME_REHYDRATION_METADATA_KEY, TRANSCRIPT_TYPE_COMPACT_BOUNDARY
 from app.tool_registry import TOOL_MEMORY_WRITE
@@ -19,6 +21,8 @@ _NAME_PATTERNS = (
 )
 _SENTENCE_SPLIT_PATTERN = re.compile(r"(?:\r?\n)+|(?<=[.!?;])\s+")
 _NON_SLUG_PATTERN = re.compile(r"[^a-z0-9]+")
+
+logger = logging.getLogger(__name__)
 
 
 def persist_durable_turn_memories(
@@ -35,18 +39,50 @@ def persist_durable_turn_memories(
         max_candidates=max_candidates,
     )
     if not candidates:
+        emit_memory_telemetry(
+            logger,
+            "extraction.persist",
+            status="skip",
+            agent_name=agent_name,
+            memory_scope=str(memory_scope or "").strip().lower(),
+            candidate_count=0,
+            saved_count=0,
+        )
         return []
 
-    context = resolve_agent_memory_context(
-        settings,
+    try:
+        context = resolve_agent_memory_context(
+            settings,
+            agent_name=agent_name,
+            memory_scope=str(memory_scope or "").strip().lower(),  # type: ignore[arg-type]
+            state=state,
+        )
+        store = FileLongTermMemoryStore(context.root_dir)
+        saved: list[LongTermMemoryFile] = []
+        for candidate in candidates:
+            saved.append(store.upsert(candidate.model_dump(mode="python")))
+    except Exception as exc:
+        emit_memory_telemetry(
+            logger,
+            "extraction.persist",
+            status="error",
+            agent_name=agent_name,
+            memory_scope=str(memory_scope or "").strip().lower(),
+            candidate_count=len(candidates),
+            saved_count=0,
+            error=str(exc),
+        )
+        raise
+
+    emit_memory_telemetry(
+        logger,
+        "extraction.persist",
         agent_name=agent_name,
-        memory_scope=str(memory_scope or "").strip().lower(),  # type: ignore[arg-type]
-        state=state,
+        memory_scope=context.scope,
+        scope_key=context.scope_key,
+        candidate_count=len(candidates),
+        saved_count=len(saved),
     )
-    store = FileLongTermMemoryStore(context.root_dir)
-    saved: list[LongTermMemoryFile] = []
-    for candidate in candidates:
-        saved.append(store.upsert(candidate.model_dump(mode="python")))
     return saved
 
 
@@ -57,10 +93,26 @@ def extract_durable_turn_memories(
 ) -> list[LongTermMemoryWrite]:
     latest_turn = _extract_latest_completed_turn(transcript_messages)
     if not latest_turn:
+        emit_memory_telemetry(
+            logger,
+            "extraction.extract",
+            status="skip",
+            candidate_count=0,
+            max_candidates=max(int(max_candidates or 0), 0),
+            reason="no_completed_turn",
+        )
         return []
 
     user_messages = [message for message in latest_turn if message["role"] == "user"]
     if not user_messages:
+        emit_memory_telemetry(
+            logger,
+            "extraction.extract",
+            status="skip",
+            candidate_count=0,
+            max_candidates=max(int(max_candidates or 0), 0),
+            reason="no_user_messages",
+        )
         return []
 
     candidate_map: dict[str, LongTermMemoryWrite] = {}
@@ -69,9 +121,26 @@ def extract_durable_turn_memories(
             for candidate in _extract_candidates_from_sentence(sentence):
                 candidate_map[candidate.memory_id] = candidate
                 if len(candidate_map) >= max(int(max_candidates or 0), 0):
-                    return list(candidate_map.values())[: max(int(max_candidates or 0), 0)]
+                    selected = list(candidate_map.values())[: max(int(max_candidates or 0), 0)]
+                    emit_memory_telemetry(
+                        logger,
+                        "extraction.extract",
+                        candidate_count=len(selected),
+                        max_candidates=max(int(max_candidates or 0), 0),
+                        turn_message_count=len(latest_turn),
+                    )
+                    return selected
 
-    return list(candidate_map.values())[: max(int(max_candidates or 0), 0)]
+    selected = list(candidate_map.values())[: max(int(max_candidates or 0), 0)]
+    emit_memory_telemetry(
+        logger,
+        "extraction.extract",
+        status="ok" if selected else "empty",
+        candidate_count=len(selected),
+        max_candidates=max(int(max_candidates or 0), 0),
+        turn_message_count=len(latest_turn),
+    )
+    return selected
 
 
 def turn_has_direct_memory_write(assistant_metadata: dict[str, Any] | None) -> bool:

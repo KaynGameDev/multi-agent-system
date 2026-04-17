@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import re
 from pathlib import Path
 from typing import Any
@@ -7,6 +8,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from app.frontmatter import normalize_metadata_keys, render_frontmatter_document, split_frontmatter
+from app.memory.observability import emit_memory_telemetry
 from app.memory.types import (
     LongTermMemoryCatalog,
     LongTermMemoryFile,
@@ -30,6 +32,8 @@ DEFAULT_LONG_TERM_MEMORY_INDEX_TYPE = "reference"
 LONG_TERM_MEMORY_INDEX_ENTRY_PATTERN = re.compile(
     r"^- \[(?P<name>[^\]]+)\]\((?P<relative_path>[^)]+)\)\s+\(`(?P<memory_type>user|feedback|project|reference)`\):\s+(?P<description>.+)$"
 )
+
+logger = logging.getLogger(__name__)
 
 
 class LongTermMemoryFormatError(ValueError):
@@ -133,29 +137,98 @@ def load_long_term_memory_file(path: str | Path, *, root_dir: str | Path) -> Lon
 def list_long_term_memories(root_dir: str | Path) -> list[LongTermMemoryIndexEntry]:
     resolved_root_dir = Path(root_dir).expanduser().resolve()
     if not resolved_root_dir.exists():
+        emit_memory_telemetry(
+            logger,
+            "long_term.list",
+            status="empty",
+            root_dir=resolved_root_dir,
+            count=0,
+            reason="missing_root",
+        )
         return []
 
     try:
         index_path = resolve_long_term_memory_index_file(resolved_root_dir)
     except LongTermMemoryFormatError as exc:
         if not _is_missing_index_error(exc):
+            emit_memory_telemetry(
+                logger,
+                "long_term.list",
+                status="error",
+                root_dir=resolved_root_dir,
+                error=str(exc),
+            )
             raise
+        emit_memory_telemetry(
+            logger,
+            "long_term.list",
+            status="empty",
+            root_dir=resolved_root_dir,
+            count=0,
+            reason="missing_index",
+        )
         return []
 
-    index_file = load_long_term_memory_file(index_path, root_dir=resolved_root_dir)
-    return parse_long_term_memory_index(index_file.content_markdown)
+    try:
+        index_file = load_long_term_memory_file(index_path, root_dir=resolved_root_dir)
+        entries = parse_long_term_memory_index(index_file.content_markdown)
+    except LongTermMemoryFormatError as exc:
+        emit_memory_telemetry(
+            logger,
+            "long_term.list",
+            status="error",
+            root_dir=resolved_root_dir,
+            error=str(exc),
+        )
+        raise
+
+    emit_memory_telemetry(
+        logger,
+        "long_term.list",
+        root_dir=resolved_root_dir,
+        count=len(entries),
+    )
+    return entries
 
 
 def get_long_term_memory(root_dir: str | Path, memory_id: str) -> LongTermMemoryFile | None:
-    normalized_memory_id = normalize_long_term_memory_id(memory_id)
-    entry_map = {entry.memory_id: entry for entry in list_long_term_memories(root_dir)}
-    entry = entry_map.get(normalized_memory_id)
-    if entry is None:
-        return None
-    return load_long_term_memory_file(
-        _resolve_indexed_topic_path(root_dir, entry.relative_path),
-        root_dir=root_dir,
+    resolved_root_dir = Path(root_dir).expanduser().resolve()
+    try:
+        normalized_memory_id = normalize_long_term_memory_id(memory_id)
+        entry_map = {entry.memory_id: entry for entry in list_long_term_memories(resolved_root_dir)}
+        entry = entry_map.get(normalized_memory_id)
+        if entry is None:
+            emit_memory_telemetry(
+                logger,
+                "long_term.get",
+                status="miss",
+                root_dir=resolved_root_dir,
+                memory_id=normalized_memory_id,
+            )
+            return None
+        memory_file = load_long_term_memory_file(
+            _resolve_indexed_topic_path(resolved_root_dir, entry.relative_path),
+            root_dir=resolved_root_dir,
+        )
+    except Exception as exc:
+        emit_memory_telemetry(
+            logger,
+            "long_term.get",
+            status="error",
+            root_dir=resolved_root_dir,
+            memory_id=str(memory_id or "").strip(),
+            error=str(exc),
+        )
+        raise
+
+    emit_memory_telemetry(
+        logger,
+        "long_term.get",
+        root_dir=resolved_root_dir,
+        memory_id=normalized_memory_id,
+        relative_path=memory_file.relative_path,
     )
+    return memory_file
 
 
 def upsert_long_term_memory(
@@ -163,48 +236,98 @@ def upsert_long_term_memory(
     memory: LongTermMemoryWrite | dict[str, Any],
 ) -> LongTermMemoryFile:
     resolved_root_dir = Path(root_dir).expanduser().resolve()
-    resolved_root_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        resolved_root_dir.mkdir(parents=True, exist_ok=True)
 
-    memory_write = LongTermMemoryWrite.model_validate(memory)
-    normalized_memory_id = normalize_long_term_memory_id(memory_write.memory_id)
-    topic_relative_path = build_long_term_memory_topic_relative_path(normalized_memory_id)
-    topic_path = (resolved_root_dir / topic_relative_path).resolve()
-    topic_path.parent.mkdir(parents=True, exist_ok=True)
+        memory_write = LongTermMemoryWrite.model_validate(memory)
+        normalized_memory_id = normalize_long_term_memory_id(memory_write.memory_id)
+        topic_relative_path = build_long_term_memory_topic_relative_path(normalized_memory_id)
+        topic_path = (resolved_root_dir / topic_relative_path).resolve()
+        topic_path.parent.mkdir(parents=True, exist_ok=True)
 
-    topic_document = render_long_term_memory_topic(memory_write, relative_path=topic_relative_path.as_posix())
-    topic_path.write_text(topic_document, encoding="utf-8")
+        topic_document = render_long_term_memory_topic(memory_write, relative_path=topic_relative_path.as_posix())
+        topic_path.write_text(topic_document, encoding="utf-8")
 
-    existing_index_file = _load_existing_index_file_or_default(resolved_root_dir)
-    entry_map = {entry.memory_id: entry for entry in parse_long_term_memory_index(existing_index_file.content_markdown)}
-    entry_map[normalized_memory_id] = LongTermMemoryIndexEntry(
+        existing_index_file = _load_existing_index_file_or_default(resolved_root_dir)
+        entry_map = {
+            entry.memory_id: entry
+            for entry in parse_long_term_memory_index(existing_index_file.content_markdown)
+        }
+        created = normalized_memory_id not in entry_map
+        entry_map[normalized_memory_id] = LongTermMemoryIndexEntry(
+            memory_id=normalized_memory_id,
+            relative_path=topic_relative_path.as_posix(),
+            name=memory_write.name,
+            description=memory_write.description,
+            memory_type=memory_write.memory_type,
+        )
+        _write_index_file(
+            resolved_root_dir,
+            index_file=existing_index_file,
+            index_entries=sorted(entry_map.values(), key=lambda item: item.memory_id),
+        )
+        memory_file = load_long_term_memory_file(topic_path, root_dir=resolved_root_dir)
+    except Exception as exc:
+        emit_memory_telemetry(
+            logger,
+            "long_term.upsert",
+            status="error",
+            root_dir=resolved_root_dir,
+            memory_id=str(getattr(memory, "memory_id", "") or getattr(memory, "get", lambda *_: "")("memory_id") or ""),
+            error=str(exc),
+        )
+        raise
+
+    emit_memory_telemetry(
+        logger,
+        "long_term.upsert",
+        root_dir=resolved_root_dir,
         memory_id=normalized_memory_id,
-        relative_path=topic_relative_path.as_posix(),
-        name=memory_write.name,
-        description=memory_write.description,
-        memory_type=memory_write.memory_type,
+        relative_path=memory_file.relative_path,
+        created=created,
     )
-    _write_index_file(
-        resolved_root_dir,
-        index_file=existing_index_file,
-        index_entries=sorted(entry_map.values(), key=lambda item: item.memory_id),
-    )
-    return load_long_term_memory_file(topic_path, root_dir=resolved_root_dir)
+    return memory_file
 
 
 def delete_long_term_memory(root_dir: str | Path, memory_id: str) -> bool:
     resolved_root_dir = Path(root_dir).expanduser().resolve()
     if not resolved_root_dir.exists():
+        emit_memory_telemetry(
+            logger,
+            "long_term.delete",
+            status="miss",
+            root_dir=resolved_root_dir,
+            memory_id=str(memory_id or "").strip(),
+            deleted=False,
+            reason="missing_root",
+        )
         return False
 
-    normalized_memory_id = normalize_long_term_memory_id(memory_id)
     try:
+        normalized_memory_id = normalize_long_term_memory_id(memory_id)
         existing_index_file = _load_existing_index_file_or_default(resolved_root_dir, require_existing=True)
-    except LongTermMemoryFormatError:
+    except LongTermMemoryFormatError as exc:
+        emit_memory_telemetry(
+            logger,
+            "long_term.delete",
+            status="error",
+            root_dir=resolved_root_dir,
+            memory_id=str(memory_id or "").strip(),
+            error=str(exc),
+        )
         return False
 
     entry_map = {entry.memory_id: entry for entry in parse_long_term_memory_index(existing_index_file.content_markdown)}
     entry = entry_map.pop(normalized_memory_id, None)
     if entry is None:
+        emit_memory_telemetry(
+            logger,
+            "long_term.delete",
+            status="miss",
+            root_dir=resolved_root_dir,
+            memory_id=normalized_memory_id,
+            deleted=False,
+        )
         return False
 
     topic_path = _resolve_indexed_topic_path(resolved_root_dir, entry.relative_path)
@@ -216,6 +339,13 @@ def delete_long_term_memory(root_dir: str | Path, memory_id: str) -> bool:
         resolved_root_dir,
         index_file=existing_index_file,
         index_entries=sorted(entry_map.values(), key=lambda item: item.memory_id),
+    )
+    emit_memory_telemetry(
+        logger,
+        "long_term.delete",
+        root_dir=resolved_root_dir,
+        memory_id=normalized_memory_id,
+        deleted=True,
     )
     return True
 
