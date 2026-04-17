@@ -1,7 +1,10 @@
 from __future__ import annotations
 
+import tempfile
 import json
 import unittest
+from dataclasses import replace
+from pathlib import Path
 
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 
@@ -10,9 +13,13 @@ from agents.knowledge_base_builder.agent import KnowledgeBaseBuilderAgentNode
 from agents.project_task.agent import ProjectTaskAgentNode
 from app.contracts import validate_pending_action_decision
 from app.graph import build_default_agent_registrations
+from app.memory.agent_scope import resolve_agent_memory_context
+from app.memory.long_term import get_long_term_memory, upsert_long_term_memory
+from app.memory.snapshots import resolve_long_term_memory_snapshot_dir
 from app.pending_actions import get_pending_action_selection_options
 from app.routing.pending_action_router import PendingActionRouter
 from app.tool_registry import resolve_tool_ids_for_runtime_tools
+from tests.common import make_settings
 
 
 class NoopLLM:
@@ -599,6 +606,89 @@ class AgentRuntimeMigrationTests(unittest.TestCase):
 
         self.assertEqual(result["messages"][-1].content, "task fallback")
         self.assertNotIn("pending_action", result)
+
+    def test_project_task_agent_can_apply_project_snapshot_to_user_memory(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            runtime_root = Path(tempdir) / "runtime"
+            settings = replace(make_settings(runtime_root), long_term_memory_enabled=True)
+            base_state = {
+                "thread_id": "thread-1",
+                "user_id": "User-123",
+                "target_market_slug": "indonesia-main",
+                "target_game_slug": "f4buyu",
+                "target_feature_slug": "memory-subsystem",
+            }
+            project_context = resolve_agent_memory_context(
+                settings,
+                agent_name="project_task_agent",
+                memory_scope="project",
+                state=base_state,
+            )
+            user_context = resolve_agent_memory_context(
+                settings,
+                agent_name="project_task_agent",
+                memory_scope="user",
+                state=base_state,
+            )
+            snapshot_root = resolve_long_term_memory_snapshot_dir(project_context.root_dir, "default")
+            upsert_long_term_memory(
+                snapshot_root,
+                {
+                    "memory_id": "project/overview",
+                    "name": "Project Overview",
+                    "description": "Shared roadmap context.",
+                    "memory_type": "project",
+                    "content_markdown": "The roadmap is focused on the memory subsystem.",
+                },
+            )
+            node = ProjectTaskAgentNode(
+                NoopLLM(),
+                [],
+                settings=settings,
+                pending_action_router=build_pending_action_router(
+                    {
+                        "merge": {
+                            "decision": "select",
+                            "selected_index": 1,
+                            "reason": "The user chose to merge the snapshot.",
+                        }
+                    }
+                ),
+                agent_name="project_task_agent",
+                memory_scope="user",
+            )
+
+            first_result = node(
+                {
+                    **base_state,
+                    "messages": [HumanMessage(content="show my project tasks")],
+                }
+            )
+
+            self.assertEqual(first_result["pending_action"]["type"], "apply_memory_snapshot")
+            self.assertEqual(
+                [option["id"] for option in get_pending_action_selection_options(first_result["pending_action"])],
+                ["keep", "merge", "replace"],
+            )
+            self.assertIn("Project memory snapshot `default`", first_result["messages"][-1].content)
+
+            second_result = node(
+                {
+                    **base_state,
+                    "messages": [
+                        HumanMessage(content="show my project tasks"),
+                        *first_result["messages"],
+                        HumanMessage(content="merge"),
+                    ],
+                    "pending_action": first_result["pending_action"],
+                }
+            )
+
+            self.assertIsNone(second_result["pending_action"])
+            self.assertIn("Merged snapshot `default`", second_result["messages"][-1].content)
+            merged_memory = get_long_term_memory(user_context.root_dir, "project/overview")
+            self.assertIsNotNone(merged_memory)
+            self.assertIn("memory subsystem", merged_memory.content_markdown)
 
     def test_project_task_ignores_persisted_result_for_fresh_turn(self) -> None:
         payload = {

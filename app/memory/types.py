@@ -8,6 +8,7 @@ from typing_extensions import Literal
 MemoryScope = Literal["thread", "user", "workspace", "global"]
 LongTermMemoryType = Literal["user", "feedback", "project", "reference"]
 AgentMemoryScope = Literal["user", "project", "local"]
+LongTermMemorySnapshotChoice = Literal["keep", "merge", "replace"]
 SessionMemorySectionName = Literal[
     "current_state",
     "task_spec",
@@ -393,6 +394,91 @@ class LongTermMemoryConsolidationSummary(BaseModel):
     @field_validator("updated_memory_ids", "deleted_memory_ids")
     @classmethod
     def validate_memory_id_lists(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            cleaned = str(item or "").strip()
+            if not cleaned or cleaned in seen:
+                continue
+            seen.add(cleaned)
+            normalized.append(cleaned)
+        return normalized
+
+
+class LongTermMemorySnapshot(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    snapshot_id: str = Field(min_length=1)
+    root_dir: str = Field(min_length=1)
+    fingerprint: str = Field(min_length=1)
+    memory_count: int = Field(default=0, ge=0)
+    memories: list[LongTermMemoryFile] = Field(default_factory=list)
+
+    @field_validator("snapshot_id", "root_dir", "fingerprint")
+    @classmethod
+    def validate_required_snapshot_text(cls, value: str) -> str:
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            raise ValueError("Value must not be empty.")
+        return cleaned
+
+
+class LongTermMemorySnapshotSyncState(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    snapshot_id: str = Field(min_length=1)
+    fingerprint: str = Field(min_length=1)
+    action: LongTermMemorySnapshotChoice
+    updated_at: str = ""
+
+    @field_validator("snapshot_id", "fingerprint")
+    @classmethod
+    def validate_required_sync_text(cls, value: str) -> str:
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            raise ValueError("Value must not be empty.")
+        return cleaned
+
+    @field_validator("updated_at")
+    @classmethod
+    def validate_optional_sync_text(cls, value: str) -> str:
+        return str(value or "").strip()
+
+
+class LongTermMemorySnapshotApplySummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    snapshot_id: str = Field(min_length=1)
+    fingerprint: str = Field(min_length=1)
+    action: LongTermMemorySnapshotChoice
+    user_root_dir: str = Field(min_length=1)
+    project_root_dir: str = Field(min_length=1)
+    created_memory_ids: list[str] = Field(default_factory=list)
+    updated_memory_ids: list[str] = Field(default_factory=list)
+    deleted_memory_ids: list[str] = Field(default_factory=list)
+
+    @field_validator("snapshot_id", "fingerprint", "user_root_dir", "project_root_dir")
+    @classmethod
+    def validate_required_apply_text(cls, value: str) -> str:
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            raise ValueError("Value must not be empty.")
+        return cleaned
+
+    @field_validator("created_memory_ids", "updated_memory_ids", "deleted_memory_ids", mode="before")
+    @classmethod
+    def normalize_snapshot_memory_id_lists(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("Value must be a list of strings.")
+        return [str(item) for item in value]
+
+    @field_validator("created_memory_ids", "updated_memory_ids", "deleted_memory_ids")
+    @classmethod
+    def validate_snapshot_memory_id_lists(cls, value: list[str]) -> list[str]:
         normalized: list[str] = []
         seen: set[str] = set()
         for item in value:

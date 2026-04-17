@@ -10,6 +10,7 @@ This folder contains the shared memory subsystem surface for Jade, including fil
 - `session_files.py`: creates, reads, and updates per-conversation Markdown session files with a fixed template.
 - `long_term.py`: reads, validates, and mutates file-based long-term memory on disk.
 - `retrieval.py`: header-first retrieval helpers that rank index entries before opening a few topic files.
+- `snapshots.py`: project-provided memory snapshot helpers that seed or refresh personal memory with explicit keep/merge/replace flows.
 - `extraction.py`: conservative post-turn durable-memory extraction helpers that promote a few stable facts into long-term memory.
 - `consolidation.py`: cleanup helpers that merge noisy daily/session memories into cleaner topic memories and prune duplicates.
 - `consolidation_background.py`: optional debounced background scheduler for consolidation jobs.
@@ -45,6 +46,23 @@ The current file-based retrieval pass is intentionally header-first:
 - ranks candidates from `name`, `description`, `type`, id, and path metadata
 - skips memories already present in `context_paths` or `recent_file_reads`
 - opens only the top few topic files after ranking
+
+### Snapshot Seeding
+
+Project-scoped memory can publish reusable snapshot bundles that initialize or refresh a user's personal memory without turning the shared project root into the user's writable store.
+
+The current snapshot layout uses two roots:
+
+- project snapshots live under `snapshots/<snapshot-id>/` inside the project-scoped memory root
+- each snapshot is itself a normal file-based long-term memory store with its own `MEMORY.md` and `topics/`
+- user memory stays under the user-scoped root
+- a hidden sync-state file records which snapshot fingerprint the user last chose to `keep`, `merge`, or `replace`
+
+Supported update choices are real file operations:
+
+- `keep`: record that the current snapshot was intentionally skipped, without mutating personal memory
+- `merge`: upsert snapshot memories into personal memory and merge overlapping topic content
+- `replace`: delete existing personal topic memories and copy the snapshot in as the new personal baseline
 
 ### Durable extraction
 
@@ -95,6 +113,21 @@ runtime/memory/
     MEMORY.md
     topics/
       project_overview.md
+    agents/
+      project_task_agent/
+        users/
+          user-123/
+            MEMORY.md
+            topics/
+            .snapshot_sync.json
+        projects/
+          indonesia-main/
+            f4buyu/
+              memory-subsystem/
+                snapshots/
+                  default/
+                    MEMORY.md
+                    topics/
   retrieval/
   compaction/
 ```
@@ -210,6 +243,8 @@ When retrieval is enabled, scoped agents can also inject a compact `Relevant Mem
 Scoped agents can also opt into automatic durable-memory promotion after a successful turn. That promotion writes into the same scope-resolved long-term memory root, so the automatic path follows the same directory boundary as explicit memory tool use.
 
 If consolidation is enabled, the same scoped memory root can also receive a background cleanup pass. That cleanup still stays inside the same scope-resolved directory.
+
+When a project snapshot exists, the runtime can compare the project snapshot fingerprint with the user root's sync-state file and raise an explicit keep/merge/replace decision before applying any update.
 
 ## Current Repo Mapping
 

@@ -7,7 +7,12 @@ from langchain_core.messages import AIMessage
 from app.contracts import build_assistant_response
 from app.language import detect_response_language
 from app.messages import extract_latest_human_text, stringify_message_content
-from app.memory.agent_scope import build_agent_memory_prompt
+from app.memory.agent_scope import build_agent_memory_prompt, resolve_agent_memory_context
+from app.memory.snapshots import (
+    LongTermMemorySnapshotError,
+    apply_long_term_memory_snapshot,
+    get_pending_long_term_memory_snapshot,
+)
 from app.model_request import build_model_request_messages
 from app.pending_actions import (
     PendingActionSelectionOption,
@@ -56,7 +61,9 @@ class ProjectTaskAgentNode:
     def __call__(self, state: AgentState) -> dict:
         rendered_response = build_project_task_response(
             state,
+            settings=self.settings,
             agent_name=self.agent_name,
+            memory_scope=self.memory_scope,
             pending_action_router=self.pending_action_router,
         )
         if rendered_response is not None:
@@ -201,7 +208,9 @@ TASK_FIELD_LABELS_ZH = {
 def build_project_task_response(
     state: AgentState,
     *,
+    settings=None,
     agent_name: str,
+    memory_scope: str = "",
     pending_action_router: PendingActionRouter | None = None,
 ) -> dict[str, Any] | None:
     latest_user_text = extract_latest_human_text(state)
@@ -210,8 +219,11 @@ def build_project_task_response(
         state, agent_name=agent_name, pending_action_router=pending_action_router,
     )
     if pending_action is not None:
-        follow_up_result = build_task_pending_action_response(
+        follow_up_result = build_project_task_pending_action_response(
             state,
+            settings=settings,
+            agent_name=agent_name,
+            memory_scope=memory_scope,
             pending_action=pending_action,
             pending_action_turn=pending_action_turn,
             preferred_language=preferred_language,
@@ -222,6 +234,31 @@ def build_project_task_response(
     latest_tool_result = get_latest_task_tool_result(state)
     if latest_tool_result is not None:
         return render_task_update(state, latest_tool_result, preferred_language=preferred_language)
+
+    active_pending_action = get_pending_action(state)
+    if (
+        settings is not None
+        and str(memory_scope or "").strip().lower() == "user"
+        and getattr(settings, "long_term_memory_enabled", False)
+        and not is_pending_action_active(active_pending_action)
+    ):
+        snapshot_pending_action = build_memory_snapshot_pending_action(
+            state,
+            settings=settings,
+            agent_name=agent_name,
+            preferred_language=preferred_language,
+        )
+        if snapshot_pending_action is not None:
+            content = str(get_pending_action_metadata(snapshot_pending_action).get("prompt_context", "")).strip()
+            return {
+                "messages": [AIMessage(content=content)],
+                "assistant_response": build_assistant_response(
+                    kind="await_confirmation",
+                    content=content,
+                    pending_action=snapshot_pending_action,
+                ),
+                "pending_action": snapshot_pending_action,
+            }
     return None
 
 
@@ -341,6 +378,326 @@ def resolve_project_source_tool_id(tool_result: dict[str, Any], payload: dict[st
     if "total_rows" in payload:
         return TOOL_PROJECT_SHEET_OVERVIEW
     return TOOL_PROJECT_READ_TASKS
+
+
+def build_project_task_pending_action_response(
+    state: AgentState,
+    *,
+    settings=None,
+    agent_name: str,
+    memory_scope: str,
+    pending_action: dict[str, Any],
+    pending_action_turn: PendingActionTurnResult,
+    preferred_language: str,
+) -> dict[str, Any] | None:
+    action_type = str(pending_action.get("type", "")).strip()
+    if action_type == "apply_memory_snapshot":
+        return build_memory_snapshot_pending_action_response(
+            state,
+            settings=settings,
+            agent_name=agent_name,
+            memory_scope=memory_scope,
+            pending_action=pending_action,
+            pending_action_turn=pending_action_turn,
+            preferred_language=preferred_language,
+        )
+    if action_type == "select_project_task":
+        return build_task_pending_action_response(
+            state,
+            pending_action=pending_action,
+            pending_action_turn=pending_action_turn,
+            preferred_language=preferred_language,
+        )
+    return None
+
+
+def build_memory_snapshot_pending_action(
+    state: AgentState,
+    *,
+    settings,
+    agent_name: str,
+    preferred_language: str,
+) -> dict[str, Any] | None:
+    thread_id = str(state.get("thread_id", "")).strip()
+    if not thread_id:
+        return None
+
+    user_context = resolve_agent_memory_context(
+        settings,
+        agent_name=agent_name,
+        memory_scope="user",
+        state=state,
+    )
+    project_context = resolve_agent_memory_context(
+        settings,
+        agent_name=agent_name,
+        memory_scope="project",
+        state=state,
+    )
+    snapshot = get_pending_long_term_memory_snapshot(
+        project_context.root_dir,
+        user_context.root_dir,
+    )
+    if snapshot is None:
+        return None
+
+    options = build_memory_snapshot_selection_options(preferred_language=preferred_language)
+    prompt_context = build_memory_snapshot_prompt_text(
+        snapshot_id=snapshot.snapshot_id,
+        memory_count=snapshot.memory_count,
+        preferred_language=preferred_language,
+    )
+    return build_pending_action(
+        session_id=thread_id,
+        action_type="apply_memory_snapshot",
+        requested_by_agent=agent_name,
+        summary="Choose how to apply the project memory snapshot to personal memory.",
+        risk_level="low",
+        requires_explicit_approval=False,
+        metadata={
+            "prompt_context": prompt_context,
+            "selection_options": options,
+            "snapshot_id": snapshot.snapshot_id,
+            "snapshot_fingerprint": snapshot.fingerprint,
+            "snapshot_memory_count": snapshot.memory_count,
+            "project_memory_root": str(project_context.root_dir),
+            "user_memory_root": str(user_context.root_dir),
+        },
+    )
+
+
+def build_memory_snapshot_selection_options(*, preferred_language: str) -> list[PendingActionSelectionOption]:
+    if preferred_language == "zh":
+        return [
+            {
+                "id": "keep",
+                "label": "保留当前记忆",
+                "aliases": ["keep", "保留", "跳过", "保持现状"],
+                "value": "keep",
+                "payload": {"action": "keep"},
+            },
+            {
+                "id": "merge",
+                "label": "合并快照",
+                "aliases": ["merge", "合并", "组合"],
+                "value": "merge",
+                "payload": {"action": "merge"},
+            },
+            {
+                "id": "replace",
+                "label": "替换为快照",
+                "aliases": ["replace", "替换", "覆盖"],
+                "value": "replace",
+                "payload": {"action": "replace"},
+            },
+        ]
+
+    return [
+        {
+            "id": "keep",
+            "label": "Keep current memory",
+            "aliases": ["keep", "skip", "keep mine", "leave it"],
+            "value": "keep",
+            "payload": {"action": "keep"},
+        },
+        {
+            "id": "merge",
+            "label": "Merge snapshot",
+            "aliases": ["merge", "combine", "blend"],
+            "value": "merge",
+            "payload": {"action": "merge"},
+        },
+        {
+            "id": "replace",
+            "label": "Replace with snapshot",
+            "aliases": ["replace", "overwrite", "use snapshot"],
+            "value": "replace",
+            "payload": {"action": "replace"},
+        },
+    ]
+
+
+def build_memory_snapshot_prompt_text(
+    *,
+    snapshot_id: str,
+    memory_count: int,
+    preferred_language: str,
+) -> str:
+    if preferred_language == "zh":
+        return (
+            f"检测到项目记忆快照 `{snapshot_id}`，包含 {memory_count} 条主题记忆。\n\n"
+            "请选择如何更新你的个人记忆：`keep` 保持现有记忆不变，`merge` 将快照内容合并进去，"
+            "`replace` 用快照替换现有个人记忆。"
+        )
+
+    return (
+        f"Project memory snapshot `{snapshot_id}` is available with {memory_count} topic memories.\n\n"
+        "Choose how to update your personal memory: `keep` leaves it unchanged, `merge` combines the snapshot "
+        "with it, and `replace` swaps your current personal memory for the snapshot."
+    )
+
+
+def build_memory_snapshot_pending_action_response(
+    state: AgentState,
+    *,
+    settings=None,
+    agent_name: str,
+    memory_scope: str,
+    pending_action: dict[str, Any],
+    pending_action_turn: PendingActionTurnResult,
+    preferred_language: str,
+) -> dict[str, Any] | None:
+    if settings is None or str(memory_scope or "").strip().lower() != "user":
+        return None
+
+    contract = pending_action_turn.execution_contract
+    validation = pending_action_turn.validation
+    if contract is None or validation is None:
+        content = build_task_clarification_text(
+            pending_action=pending_action,
+            validation={"reason": "The snapshot decision could not be validated."},
+            preferred_language=preferred_language,
+        )
+        return {
+            "messages": [AIMessage(content=content)],
+            "assistant_response": build_assistant_response(
+                kind="await_confirmation",
+                content=content,
+                pending_action=pending_action,
+            ),
+            "pending_action": pending_action,
+        }
+
+    if validation.get("runtime_action") == "cancel":
+        content = (
+            "已取消此次快照更新，之后需要时可以再选择。"
+            if preferred_language == "zh"
+            else "Cancelled this snapshot update for now."
+        )
+        return {
+            "messages": [AIMessage(content=content)],
+            "assistant_response": build_assistant_response(kind="text", content=content),
+            "pending_action": None,
+        }
+
+    normalized_scope = validation.get("normalized_scope") or {}
+    updated_action = update_pending_action(
+        pending_action,
+        status=str(validation.get("next_status", "ask_clarification")).strip() or "ask_clarification",
+        target_scope=normalized_scope or None,
+        metadata_updates={"last_contract": dict(contract)},
+    )
+
+    if not validation.get("valid") or validation.get("runtime_action") != "select":
+        content = build_task_clarification_text(
+            pending_action=updated_action,
+            validation=validation or {"reason": "The snapshot decision was unclear."},
+            preferred_language=preferred_language,
+        )
+        return {
+            "messages": [AIMessage(content=content)],
+            "assistant_response": build_assistant_response(
+                kind="await_confirmation",
+                content=content,
+                pending_action=updated_action,
+            ),
+            "pending_action": updated_action,
+        }
+
+    selected_option = validation.get("selected_option") if isinstance(validation.get("selected_option"), dict) else None
+    payload = selected_option.get("payload") if isinstance(selected_option, dict) else {}
+    action = str(payload.get("action") or selected_option.get("value") or selected_option.get("id") or "").strip().lower()
+    if action not in {"keep", "merge", "replace"}:
+        content = build_task_clarification_text(
+            pending_action=updated_action,
+            validation={"reason": "The snapshot choice did not resolve to keep, merge, or replace."},
+            preferred_language=preferred_language,
+        )
+        return {
+            "messages": [AIMessage(content=content)],
+            "assistant_response": build_assistant_response(
+                kind="await_confirmation",
+                content=content,
+                pending_action=updated_action,
+            ),
+            "pending_action": updated_action,
+        }
+
+    metadata = get_pending_action_metadata(updated_action)
+    project_memory_root = str(metadata.get("project_memory_root", "")).strip()
+    user_memory_root = str(metadata.get("user_memory_root", "")).strip()
+    snapshot_id = str(metadata.get("snapshot_id", "")).strip()
+    if not project_memory_root or not user_memory_root:
+        content = build_task_clarification_text(
+            pending_action=updated_action,
+            validation={"reason": "The snapshot roots were missing from the pending action."},
+            preferred_language=preferred_language,
+        )
+        return {
+            "messages": [AIMessage(content=content)],
+            "assistant_response": build_assistant_response(
+                kind="await_confirmation",
+                content=content,
+                pending_action=updated_action,
+            ),
+            "pending_action": updated_action,
+        }
+
+    try:
+        summary = apply_long_term_memory_snapshot(
+            user_memory_root,
+            project_memory_root,
+            action=action,
+            snapshot_id=snapshot_id,
+        )
+    except LongTermMemorySnapshotError as exc:
+        content = build_task_clarification_text(
+            pending_action=updated_action,
+            validation={"reason": str(exc)},
+            preferred_language=preferred_language,
+        )
+        return {
+            "messages": [AIMessage(content=content)],
+            "assistant_response": build_assistant_response(
+                kind="await_confirmation",
+                content=content,
+                pending_action=updated_action,
+            ),
+            "pending_action": updated_action,
+        }
+    content = build_memory_snapshot_result_text(summary, preferred_language=preferred_language)
+    return {
+        "messages": [AIMessage(content=content)],
+        "assistant_response": build_assistant_response(kind="text", content=content),
+        "pending_action": None,
+    }
+
+
+def build_memory_snapshot_result_text(summary, *, preferred_language: str) -> str:
+    if preferred_language == "zh":
+        if summary.action == "keep":
+            return f"已记录：项目快照 `{summary.snapshot_id}` 暂不应用到你的个人记忆。"
+        if summary.action == "merge":
+            return (
+                f"已将项目快照 `{summary.snapshot_id}` 合并到你的个人记忆中。"
+                f" 新增 {len(summary.created_memory_ids)} 条，更新 {len(summary.updated_memory_ids)} 条。"
+            )
+        return (
+            f"已用项目快照 `{summary.snapshot_id}` 替换你的个人记忆基线。"
+            f" 删除 {len(summary.deleted_memory_ids)} 条，写入 {len(summary.created_memory_ids)} 条。"
+        )
+
+    if summary.action == "keep":
+        return f"Recorded that snapshot `{summary.snapshot_id}` should be kept out of your personal memory for now."
+    if summary.action == "merge":
+        return (
+            f"Merged snapshot `{summary.snapshot_id}` into your personal memory. "
+            f"Created {len(summary.created_memory_ids)} memories and updated {len(summary.updated_memory_ids)}."
+        )
+    return (
+        f"Replaced your personal memory baseline with snapshot `{summary.snapshot_id}`. "
+        f"Deleted {len(summary.deleted_memory_ids)} memories and wrote {len(summary.created_memory_ids)}."
+    )
 
 
 def build_task_pending_action_response(
