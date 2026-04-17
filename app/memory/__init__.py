@@ -19,6 +19,13 @@ from app.memory.agent_scope import (
     resolve_agent_memory_context,
     resolve_agent_memory_scope_key,
 )
+from app.memory.extraction import (
+    DIRECT_MEMORY_WRITE_TOOL_NAMES,
+    MAX_AUTOMATIC_DURABLE_MEMORIES_PER_TURN,
+    extract_durable_turn_memories,
+    persist_durable_turn_memories,
+    turn_has_direct_memory_write,
+)
 from app.memory.long_term import (
     DEFAULT_LONG_TERM_MEMORY_INDEX_DESCRIPTION,
     DEFAULT_LONG_TERM_MEMORY_INDEX_NAME,
@@ -107,6 +114,7 @@ __all__ = [
     "DEFAULT_LONG_TERM_MEMORY_INDEX_TYPE",
     "DEFAULT_PROJECT_MEMORY_KEY",
     "DEFAULT_USER_MEMORY_KEY",
+    "DIRECT_MEMORY_WRITE_TOOL_NAMES",
     "FileLongTermMemoryStore",
     "LONG_TERM_MEMORY_INDEX_BASENAME",
     "LONG_TERM_MEMORY_TOPICS_DIRNAME",
@@ -125,6 +133,7 @@ __all__ = [
     "MemoryRetrievalResult",
     "MemoryScope",
     "MemorySubsystemPaths",
+    "MAX_AUTOMATIC_DURABLE_MEMORIES_PER_TURN",
     "ResolvedAgentMemoryContext",
     "SessionMemoryBackend",
     "SessionMemoryFile",
@@ -144,6 +153,7 @@ __all__ = [
     "delete_long_term_memory",
     "delete_session_memory_file",
     "ensure_session_memory_file",
+    "extract_durable_turn_memories",
     "format_long_term_memory_index",
     "format_retrieved_memories_prompt",
     "get_long_term_memory",
@@ -160,6 +170,7 @@ __all__ = [
     "normalize_session_memory_thread_id",
     "parse_long_term_memory_index",
     "parse_session_memory_sections",
+    "persist_durable_turn_memories",
     "render_session_memory_document",
     "resolve_agent_memory_context",
     "resolve_agent_memory_scope_key",
@@ -176,6 +187,7 @@ __all__ = [
     "resolve_session_memory_store_path",
     "retrieve_relevant_agent_memories",
     "retrieve_relevant_long_term_memories",
+    "turn_has_direct_memory_write",
     "update_session_memory_file",
     "upsert_long_term_memory",
 ]

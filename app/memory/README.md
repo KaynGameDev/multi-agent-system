@@ -10,6 +10,7 @@ This folder contains the shared memory subsystem surface for Jade, including fil
 - `session_files.py`: creates, reads, and updates per-conversation Markdown session files with a fixed template.
 - `long_term.py`: reads, validates, and mutates file-based long-term memory on disk.
 - `retrieval.py`: header-first retrieval helpers that rank index entries before opening a few topic files.
+- `extraction.py`: conservative post-turn durable-memory extraction helpers that promote a few stable facts into long-term memory.
 - `__init__.py`: convenience exports for the package surface.
 
 ## Runtime Concepts
@@ -42,6 +43,20 @@ The current file-based retrieval pass is intentionally header-first:
 - ranks candidates from `name`, `description`, `type`, id, and path metadata
 - skips memories already present in `context_paths` or `recent_file_reads`
 - opens only the top few topic files after ranking
+
+### Durable extraction
+
+Durable extraction is the post-turn promotion step that looks at a completed conversation turn and writes only a few stable facts into long-term memory. It is intentionally more conservative than session memory or compaction.
+
+The current extractor is heuristic-first and prefers explicit durable user signals such as:
+
+- preferred name
+- stable response preferences
+- workflow/output-format preferences
+- durable behavior corrections
+- explicit project context statements
+
+It intentionally skips ordinary ephemeral asks like "what is due today?" and it also skips automatic extraction for a turn if the agent already called `memory.write` directly during that turn.
 
 ### Compaction
 
@@ -172,6 +187,8 @@ Agent definitions can opt into a memory scope:
 Scoped agent memory is exposed through dedicated memory tools rather than raw path input. The tool layer resolves the scope-specific directory from runtime state and only reads or writes inside that directory.
 
 When retrieval is enabled, scoped agents can also inject a compact `Relevant Memories` block into their prompt. That block is built from the agent's own scoped memory root only, so retrieval stays aligned with the same path-scoped permission boundary as read and write operations.
+
+Scoped agents can also opt into automatic durable-memory promotion after a successful turn. That promotion writes into the same scope-resolved long-term memory root, so the automatic path follows the same directory boundary as explicit memory tool use.
 
 ## Current Repo Mapping
 

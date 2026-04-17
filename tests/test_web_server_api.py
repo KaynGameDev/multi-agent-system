@@ -10,6 +10,8 @@ from unittest.mock import patch
 from agents.conversation_mode.agent import ConversationModeAgentNode
 from app.contracts import build_assistant_response
 from app.graph import build_graph
+from app.memory.agent_scope import resolve_agent_memory_context
+from app.memory.long_term import FileLongTermMemoryStore
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import InMemorySaver
@@ -204,6 +206,56 @@ class RehydrationStateGraph:
                 }
             ],
             "messages": [AIMessage(content="Opened the architecture overview.")],
+        }
+
+
+class ProjectTaskDurableMemoryGraph:
+    def __init__(self) -> None:
+        self.last_state = None
+
+    def invoke(self, initial_state, config=None):
+        self.last_state = dict(initial_state)
+        return {
+            **initial_state,
+            "route": "project_task_agent",
+            "route_reason": "Captured a durable user preference.",
+            "skill_resolution_diagnostics": [],
+            "agent_selection_diagnostics": [],
+            "selection_warnings": [],
+            "messages": [AIMessage(content="I will keep future updates concise and call you Kay.")],
+        }
+
+
+class ProjectTaskDirectMemoryWriteGraph:
+    def __init__(self) -> None:
+        self.last_state = None
+
+    def invoke(self, initial_state, config=None):
+        self.last_state = dict(initial_state)
+        return {
+            **initial_state,
+            "route": "project_task_agent",
+            "route_reason": "The agent already wrote memory directly.",
+            "skill_resolution_diagnostics": [],
+            "agent_selection_diagnostics": [],
+            "selection_warnings": [],
+            "tool_result": {
+                "tool_name": "write_agent_memory",
+                "tool_id": "memory.write",
+                "status": "ok",
+                "payload": {"ok": True},
+            },
+            "tool_execution_trace": [
+                {
+                    "result": {
+                        "tool_name": "write_agent_memory",
+                        "tool_id": "memory.write",
+                        "status": "ok",
+                        "payload": {"ok": True},
+                    }
+                }
+            ],
+            "messages": [AIMessage(content="Saved that preference to memory.")],
         }
 
 
@@ -517,7 +569,6 @@ class WebServerApiTests(unittest.TestCase):
             public_payload["assistant_message"]["usage"],
             {"input_tokens": 240, "output_tokens": 30, "total_tokens": 270},
         )
-
         full_conversation = server.conversation_store.get_full_conversation(conversation["conversation_id"])
         assistant_message = full_conversation["messages"][-1]
         self.assertEqual(assistant_message["usage"], {"input_tokens": 240, "output_tokens": 30, "total_tokens": 270})
@@ -525,6 +576,76 @@ class WebServerApiTests(unittest.TestCase):
             assistant_message["metadata"]["usage_baseline_stage"],
             "before_message",
         )
+
+    def test_project_task_turn_extracts_durable_memories_into_scoped_store(self) -> None:
+        settings = replace(self.settings, long_term_memory_enabled=True)
+        server = WebServer(agent_graph=ProjectTaskDurableMemoryGraph(), settings=settings)
+        client = TestClient(server.app)
+
+        conversation = client.post("/api/conversations", json={"title": "Memory extraction"}).json()
+        response = client.post(
+            f"/api/conversations/{conversation['conversation_id']}/messages",
+            json={
+                "message": "Please keep future updates concise, include file references, and call me Kay.",
+                "display_name": "Tester",
+                "email": "tester@example.com",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        state = {
+            "user_id": "tester@example.com",
+            "thread_id": f"web:{conversation['conversation_id']}",
+            "channel_id": conversation["conversation_id"],
+        }
+        context = resolve_agent_memory_context(
+            settings,
+            agent_name="project_task_agent",
+            memory_scope="user",
+            state=state,
+        )
+        store = FileLongTermMemoryStore(context.root_dir)
+
+        self.assertEqual(
+            [entry.memory_id for entry in store.list()],
+            [
+                "preferences/file-references",
+                "preferences/response-style",
+                "profile/preferred-name",
+            ],
+        )
+        self.assertEqual(store.get("profile/preferred-name").content_markdown, "Call the user `Kay` in future replies.")
+
+    def test_project_task_turn_skips_auto_extraction_when_agent_wrote_memory_directly(self) -> None:
+        settings = replace(self.settings, long_term_memory_enabled=True)
+        server = WebServer(agent_graph=ProjectTaskDirectMemoryWriteGraph(), settings=settings)
+        client = TestClient(server.app)
+
+        conversation = client.post("/api/conversations", json={"title": "Memory write skip"}).json()
+        response = client.post(
+            f"/api/conversations/{conversation['conversation_id']}/messages",
+            json={
+                "message": "Please keep future updates concise and call me Kay.",
+                "display_name": "Tester",
+                "email": "tester@example.com",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        state = {
+            "user_id": "tester@example.com",
+            "thread_id": f"web:{conversation['conversation_id']}",
+            "channel_id": conversation["conversation_id"],
+        }
+        context = resolve_agent_memory_context(
+            settings,
+            agent_name="project_task_agent",
+            memory_scope="user",
+            state=state,
+        )
+        store = FileLongTermMemoryStore(context.root_dir)
+
+        self.assertEqual(store.list(), [])
 
     def test_web_transcript_persists_runtime_rehydration_state_in_assistant_metadata(self) -> None:
         graph = RehydrationStateGraph()

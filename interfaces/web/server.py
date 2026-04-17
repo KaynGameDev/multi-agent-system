@@ -30,6 +30,7 @@ from app.context_window import (
 )
 from app.identity import build_user_identity_context
 from app.messages import extract_final_text
+from app.memory.extraction import persist_durable_turn_memories, turn_has_direct_memory_write
 from app.paths import resolve_project_path
 from app.reactive_recovery import (
     ReactiveRecoverySignal,
@@ -122,6 +123,13 @@ class WebServer:
         self._auth_credentials = {
             credential.username: credential.password
             for credential in self.settings.web_auth_credentials
+        }
+        from app.graph import build_web_agent_registrations
+
+        self._agent_memory_scopes = {
+            registration.name: registration.memory_scope
+            for registration in build_web_agent_registrations(settings=self.settings)
+            if registration.memory_scope is not None
         }
         self.app = self._build_app()
         self._server: uvicorn.Server | None = None
@@ -441,10 +449,20 @@ class WebServer:
                 metadata=assistant_metadata,
             )
             if invoke_succeeded:
+                updated_conversation = self.conversation_store.get_full_conversation(conversation_id)
+                self._extract_durable_memories_after_turn(
+                    conversation_id=conversation_id,
+                    thread_id=thread_id,
+                    route=route,
+                    payload=payload,
+                    conversation=updated_conversation,
+                    assistant_metadata=assistant_metadata,
+                    active_session=active_session,
+                )
                 self._schedule_session_memory_refresh(
                     conversation_id=conversation_id,
                     thread_id=thread_id,
-                    conversation=self.conversation_store.get_full_conversation(conversation_id),
+                    conversation=updated_conversation,
                 )
             conversation = self._build_public_conversation_payload(conversation_id)
             return {
@@ -1019,6 +1037,96 @@ class WebServer:
                 allowed_session_file_path=str(self.session_memory_store.resolve_session_file_path(thread_id)),
             )
         )
+
+    def _extract_durable_memories_after_turn(
+        self,
+        *,
+        conversation_id: str,
+        thread_id: str,
+        route: str,
+        payload: WebMessageRequest,
+        conversation: dict[str, Any],
+        assistant_metadata: dict[str, object] | None,
+        active_session: Any | None,
+    ) -> None:
+        if not self.settings.long_term_memory_enabled:
+            return
+
+        memory_scope = self._agent_memory_scopes.get(str(route or "").strip())
+        if memory_scope is None:
+            return
+        if turn_has_direct_memory_write(assistant_metadata if isinstance(assistant_metadata, dict) else None):
+            return
+
+        transcript_messages = conversation.get("messages", [])
+        if not isinstance(transcript_messages, list):
+            return
+
+        try:
+            persisted = persist_durable_turn_memories(
+                self.settings,
+                agent_name=str(route or "").strip(),
+                memory_scope=memory_scope,
+                state=self._build_web_memory_runtime_state(
+                    conversation_id=conversation_id,
+                    thread_id=thread_id,
+                    payload=payload,
+                    conversation=conversation,
+                    route=route,
+                    active_session=active_session,
+                ),
+                transcript_messages=transcript_messages,
+            )
+        except Exception:
+            logger.warning(
+                "Automatic durable memory extraction failed conversation=%s thread=%s route=%s",
+                conversation_id,
+                thread_id,
+                route,
+                exc_info=True,
+            )
+            return
+
+        if persisted:
+            logger.info(
+                "Persisted durable memories conversation=%s thread=%s route=%s count=%s ids=%s",
+                conversation_id,
+                thread_id,
+                route,
+                len(persisted),
+                [memory.memory_id for memory in persisted],
+            )
+
+    def _build_web_memory_runtime_state(
+        self,
+        *,
+        conversation_id: str,
+        thread_id: str,
+        payload: WebMessageRequest,
+        conversation: dict[str, Any],
+        route: str,
+        active_session: Any | None,
+    ) -> dict[str, Any]:
+        user_context = build_user_identity_context(
+            slack_display_name=payload.display_name,
+            slack_real_name=payload.display_name,
+            email=payload.email,
+        )
+        base_state = {
+            "interface_name": "web",
+            "thread_id": thread_id,
+            "channel_id": conversation_id,
+            "requested_agent": str(route or "").strip(),
+            "user_id": payload.email.strip() or payload.display_name.strip() or thread_id,
+            "conversion_session_id": active_session.session_id if active_session is not None else "",
+            **user_context,
+        }
+        merged_state = self._apply_transcript_rehydration(
+            base_state,
+            conversation=conversation,
+        )
+        merged_state["requested_agent"] = str(route or "").strip()
+        return merged_state
 
     def _refresh_session_memory_in_background(
         self,
