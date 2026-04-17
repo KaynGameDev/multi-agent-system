@@ -29,7 +29,6 @@ from app.tool_runtime import (
     extract_first_tool_invocation,
     extract_tool_result_from_message,
     find_matching_tool_call_request,
-    get_persisted_tool_result,
     normalize_runtime_tool_invocation,
 )
 from app.tool_registry import TOOL_KNOWLEDGE_WRITE_MARKDOWN, build_agent_tool_prompt
@@ -137,12 +136,6 @@ def build_knowledge_base_builder_response(state: AgentState) -> dict[str, Any] |
         if latest_message is not None
         else None
     )
-    if tool_result is None:
-        tool_result = get_persisted_tool_result(
-            state,
-            source="knowledge_base_builder_agent",
-            reason="Using persisted knowledge-base tool state after transcript rehydration.",
-        )
     if tool_result is None:
         return None
     payload = tool_result.get("payload") if isinstance(tool_result.get("payload"), dict) else {}

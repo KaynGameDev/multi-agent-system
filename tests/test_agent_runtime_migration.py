@@ -464,6 +464,36 @@ class AgentRuntimeMigrationTests(unittest.TestCase):
         self.assertIn("Architecture excerpt", result["messages"][-1].content)
         self.assertEqual(result["pending_action"]["metadata"]["source_tool_id"], "knowledge.read_document")
 
+    def test_knowledge_agent_ignores_persisted_list_payload_for_fresh_turn(self) -> None:
+        payload = {
+            "ok": True,
+            "document_count": 1,
+            "documents": [
+                {
+                    "name": "SetupGuide",
+                    "title": "Setup Guide",
+                    "path": "knowledge/Docs/00_Shared/SetupGuide.md",
+                }
+            ],
+        }
+        node = KnowledgeAgentNode(FallbackLLM("knowledge fallback"), [], agent_name="knowledge_agent")
+
+        result = node(
+            {
+                "thread_id": "thread-1",
+                "messages": [HumanMessage(content="thanks")],
+                "tool_result": {
+                    "tool_name": "knowledge_documents",
+                    "tool_id": "knowledge.list_documents",
+                    "status": "ok",
+                    "payload": payload,
+                },
+            }
+        )
+
+        self.assertEqual(result["messages"][-1].content, "knowledge fallback")
+        self.assertNotIn("pending_action", result)
+
     def test_project_task_tool_result_renders_deterministically_and_details_reuse_payload(self) -> None:
         payload = {
             "ok": True,
@@ -564,6 +594,45 @@ class AgentRuntimeMigrationTests(unittest.TestCase):
                     AIMessage(content="Tasks due today for Tester (1)\n\n1. Ship durable memory"),
                     HumanMessage(content="details"),
                 ],
+            }
+        )
+
+        self.assertEqual(result["messages"][-1].content, "task fallback")
+        self.assertNotIn("pending_action", result)
+
+    def test_project_task_ignores_persisted_result_for_fresh_turn(self) -> None:
+        payload = {
+            "ok": True,
+            "tasks": [
+                {
+                    "content": "Ship durable memory",
+                    "project": "Infra",
+                    "iteration": "S1",
+                    "platform": "Web",
+                    "priority": "P1",
+                    "assignee": "Tester",
+                    "end_date": "2026-04-04",
+                    "due_status": "today",
+                }
+            ],
+            "match_count": 1,
+            "filters": {
+                "due_scope": "today",
+                "assignee": "Tester",
+            },
+        }
+        node = ProjectTaskAgentNode(FallbackLLM("task fallback"), [], agent_name="project_task_agent")
+
+        result = node(
+            {
+                "thread_id": "thread-1",
+                "messages": [HumanMessage(content="what about next week?")],
+                "tool_result": {
+                    "tool_name": "project_task",
+                    "tool_id": "project.read_tasks",
+                    "status": "ok",
+                    "payload": payload,
+                },
             }
         )
 
@@ -752,6 +821,37 @@ class AgentRuntimeMigrationTests(unittest.TestCase):
                 self.assertEqual(last_message.tool_calls[0]["name"], "write_knowledge_markdown_document")
                 self.assertEqual(second_result["execution_contract"]["decision"], "approve")
                 self.assertEqual(second_result["pending_action"]["status"], "approved")
+
+    def test_builder_ignores_persisted_write_result_without_pending_action(self) -> None:
+        blocked_payload = {
+            "ok": False,
+            "knowledge_mutation": "write_markdown",
+            "requires_confirmation": True,
+            "relative_path": "Docs/10_GameLines/BuYuDaLuanDou/LineOverview/Test.md",
+            "absolute_path": "/tmp/Test.md",
+            "target_exists": False,
+        }
+        node = KnowledgeBaseBuilderAgentNode(
+            FallbackLLM("builder fallback"),
+            [],
+            agent_name="knowledge_base_builder_agent",
+        )
+
+        result = node(
+            {
+                "thread_id": "thread-1",
+                "messages": [HumanMessage(content="can you summarize the docs?")],
+                "tool_result": {
+                    "tool_name": "write_knowledge_markdown_document",
+                    "tool_id": "knowledge.write_document",
+                    "status": "ok",
+                    "payload": blocked_payload,
+                },
+            }
+        )
+
+        self.assertEqual(result["messages"][-1].content, "builder fallback")
+        self.assertNotIn("pending_action", result)
 
     def test_builder_pending_action_can_render_diff_before_execution(self) -> None:
         write_request = AIMessage(

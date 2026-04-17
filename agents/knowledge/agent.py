@@ -185,12 +185,22 @@ def is_read_like_payload(payload: dict) -> bool:
     return isinstance(payload.get("document"), dict) and "content" in payload
 
 
-def get_latest_tool_result(state: AgentState) -> dict[str, Any] | None:
+def get_latest_tool_result(
+    state: AgentState,
+    *,
+    allow_persisted: bool = False,
+) -> dict[str, Any] | None:
     messages = state.get("messages", [])
     if messages:
         latest_result = get_tool_result(messages[-1], messages=messages)
         if latest_result is not None:
             return latest_result
+    if not allow_persisted:
+        return None
+    return get_persisted_knowledge_tool_result(state)
+
+
+def get_persisted_knowledge_tool_result(state: AgentState) -> dict[str, Any] | None:
     persisted_result = get_persisted_tool_result(
         state,
         source="knowledge_agent",
@@ -204,22 +214,18 @@ def get_latest_tool_result(state: AgentState) -> dict[str, Any] | None:
     return persisted_result
 
 
-def get_latest_knowledge_result(state: AgentState) -> dict[str, Any] | None:
+def get_latest_knowledge_result(
+    state: AgentState,
+    *,
+    allow_persisted: bool = False,
+) -> dict[str, Any] | None:
     for message in reversed(state.get("messages", [])):
         result = get_tool_result(message, messages=state.get("messages", []))
         if result is not None:
             return result
-    persisted_result = get_persisted_tool_result(
-        state,
-        source="knowledge_agent",
-        reason="Using persisted knowledge tool state after transcript rehydration.",
-    )
-    if persisted_result is None:
+    if not allow_persisted:
         return None
-    payload = persisted_result.get("payload") if isinstance(persisted_result.get("payload"), dict) else {}
-    if not is_knowledge_payload(payload):
-        return None
-    return persisted_result
+    return get_persisted_knowledge_tool_result(state)
 
 
 def render_knowledge_update(state: AgentState, tool_result: dict[str, Any], *, preferred_language: str) -> dict[str, Any] | None:
@@ -340,7 +346,7 @@ def build_knowledge_pending_action_response(
 ) -> dict[str, Any] | None:
     selection_phase = get_pending_action_selection_phase(pending_action)
     if selection_phase == "render_after_tool_result":
-        latest_tool_result = get_latest_tool_result(state)
+        latest_tool_result = get_latest_tool_result(state, allow_persisted=True)
         if latest_tool_result is None:
             content = translate_knowledge_text("I couldn't find the latest document payload to reopen.", preferred_language)
             reopened_action = update_pending_action(
@@ -431,7 +437,7 @@ def build_knowledge_pending_action_response(
 
         source_tool_id = str(get_pending_action_metadata(pending_action).get("source_tool_id", "")).strip()
         if source_tool_id == TOOL_KNOWLEDGE_READ_DOCUMENT:
-            tool_result = get_latest_knowledge_result(state)
+            tool_result = get_latest_knowledge_result(state, allow_persisted=True)
             if tool_result is None:
                 content = translate_knowledge_text("I couldn't find the latest document payload to reopen.", preferred_language)
                 reopened_action = update_pending_action(

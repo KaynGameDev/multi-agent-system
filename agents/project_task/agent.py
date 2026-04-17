@@ -25,7 +25,6 @@ from app.tool_runtime import (
     build_tool_execution_record_for_message,
     extract_first_tool_invocation,
     extract_tool_result_from_message,
-    get_persisted_tool_result,
 )
 from app.tool_registry import TOOL_PROJECT_READ_TASKS, TOOL_PROJECT_SHEET_OVERVIEW, build_agent_tool_prompt
 
@@ -212,17 +211,7 @@ def get_latest_task_tool_result(state: AgentState) -> dict[str, Any] | None:
         latest_result = get_task_tool_result(messages[-1], messages=messages)
         if latest_result is not None:
             return latest_result
-    persisted_result = get_persisted_tool_result(
-        state,
-        source="project_task_agent",
-        reason="Using persisted project-task tool state after transcript rehydration.",
-    )
-    if persisted_result is None:
-        return None
-    payload = persisted_result.get("payload") if isinstance(persisted_result.get("payload"), dict) else {}
-    if not isinstance(payload.get("tasks"), list):
-        return None
-    return persisted_result
+    return None
 
 
 def get_task_tool_result(message, *, messages: list[Any] | None = None) -> dict[str, Any] | None:
