@@ -2,11 +2,12 @@ from __future__ import annotations
 from datetime import date
 from typing import Any
 
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage
 
 from app.contracts import build_assistant_response
 from app.language import detect_response_language
 from app.messages import extract_latest_human_text, stringify_message_content
+from app.model_request import build_model_request_messages
 from app.pending_actions import (
     PendingActionSelectionOption,
     build_pending_action,
@@ -56,17 +57,15 @@ class ProjectTaskAgentNode:
         if rendered_response is not None:
             return rendered_response
 
-        messages = [
-            SystemMessage(
-                content=build_project_task_prompt(
-                    state,
-                    skill_registry=self.skill_registry,
-                    agent_name=self.agent_name,
-                    tool_ids=self.tool_ids,
-                )
+        messages = build_model_request_messages(
+            system_prompt=build_project_task_prompt(
+                state,
+                skill_registry=self.skill_registry,
+                agent_name=self.agent_name,
+                tool_ids=self.tool_ids,
             ),
-            *state["messages"],
-        ]
+            transcript_messages=state["messages"],
+        )
         response = self.llm.invoke(messages)
         assistant_text = stringify_message_content(getattr(response, "content", ""))
         tool_invocation = extract_first_tool_invocation(
@@ -208,9 +207,11 @@ def build_project_task_response(
 
 def get_latest_task_tool_result(state: AgentState) -> dict[str, Any] | None:
     messages = state.get("messages", [])
-    if not messages:
-        return None
-    return get_task_tool_result(messages[-1], messages=messages)
+    if messages:
+        latest_result = get_task_tool_result(messages[-1], messages=messages)
+        if latest_result is not None:
+            return latest_result
+    return None
 
 
 def get_task_tool_result(message, *, messages: list[Any] | None = None) -> dict[str, Any] | None:

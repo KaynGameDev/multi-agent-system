@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import unittest
 
-from pydantic import BaseModel
-from langchain_core.messages import AIMessage
+from pydantic import BaseModel, ValidationError
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 
-from agents.general_chat.agent import GeneralChatAgentNode, build_general_chat_prompt
+from agents.general_chat.agent import GeneralChatAgentNode, GeneralChatReply, build_general_chat_prompt
+from interfaces.web.conversations import TRANSCRIPT_TYPE_COMPACT_BOUNDARY
 
 
 class StructuredContentLLM:
@@ -53,7 +54,40 @@ class FallbackStructuredOutputLLM:
         return AIMessage(content="Hello from the plain-text fallback.")
 
 
+class UsageTrackingLLM:
+    def invoke(self, _messages):
+        return AIMessage(
+            content="Usage-aware reply.",
+            usage_metadata={"input_tokens": 50, "output_tokens": 12, "total_tokens": 62},
+            response_metadata={"stop_reason": "end_turn"},
+            additional_kwargs={"provider": "test"},
+            id="ai-usage-1",
+        )
+
+
+class CapturingLLM:
+    def __init__(self) -> None:
+        self.last_messages = None
+
+    def invoke(self, messages):
+        self.last_messages = list(messages)
+        return AIMessage(content="Tail reply.")
+
+
 class GeneralChatAgentTests(unittest.TestCase):
+    def test_general_chat_reply_schema_requires_non_empty_answer(self) -> None:
+        with self.assertRaises(ValidationError):
+            GeneralChatReply.model_validate({"final_answer": "   "})
+
+    def test_general_chat_reply_schema_rejects_extra_fields(self) -> None:
+        with self.assertRaises(ValidationError):
+            GeneralChatReply.model_validate(
+                {
+                    "final_answer": "Hello! I'm Jade.",
+                    "role": "assistant",
+                }
+            )
+
     def test_general_chat_prompt_forbids_claiming_persistent_save_without_real_action(self) -> None:
         prompt = build_general_chat_prompt(
             {
@@ -131,6 +165,54 @@ class GeneralChatAgentTests(unittest.TestCase):
         self.assertEqual(second_result["assistant_response"]["content"], "Hello from the plain-text fallback.")
         self.assertEqual(llm.structured_calls, 2)
         self.assertEqual(llm.raw_calls, 2)
+
+    def test_general_chat_preserves_usage_metadata_on_ai_message(self) -> None:
+        node = GeneralChatAgentNode(UsageTrackingLLM(), agent_name="general_chat_agent")
+
+        result = node(
+            {
+                "messages": [],
+                "interface_name": "web",
+            }
+        )
+
+        reply_message = result["messages"][-1]
+        self.assertEqual(reply_message.content, "Usage-aware reply.")
+        self.assertEqual(reply_message.id, "ai-usage-1")
+        self.assertEqual(
+            reply_message.usage_metadata,
+            {"input_tokens": 50, "output_tokens": 12, "total_tokens": 62},
+        )
+        self.assertEqual(reply_message.response_metadata, {"stop_reason": "end_turn"})
+        self.assertEqual(reply_message.additional_kwargs, {"provider": "test"})
+
+    def test_general_chat_request_builder_uses_only_messages_after_boundary(self) -> None:
+        llm = CapturingLLM()
+        node = GeneralChatAgentNode(llm, agent_name="general_chat_agent")
+
+        result = node(
+            {
+                "messages": [
+                    HumanMessage(content="older request"),
+                    SystemMessage(
+                        content="",
+                        additional_kwargs={"transcript_type": TRANSCRIPT_TYPE_COMPACT_BOUNDARY},
+                    ),
+                    HumanMessage(content="latest request"),
+                ],
+                "interface_name": "web",
+            }
+        )
+
+        self.assertEqual(result["assistant_response"]["content"], "Tail reply.")
+        self.assertIsNotNone(llm.last_messages)
+        self.assertEqual(len(llm.last_messages), 2)
+        self.assertTrue(isinstance(llm.last_messages[0], SystemMessage))
+        self.assertEqual(llm.last_messages[1].content, "latest request")
+        self.assertNotIn(
+            TRANSCRIPT_TYPE_COMPACT_BOUNDARY,
+            str(getattr(llm.last_messages[1], "additional_kwargs", {})),
+        )
 
 
 if __name__ == "__main__":

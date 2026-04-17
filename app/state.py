@@ -46,6 +46,7 @@ class AgentState(TypedDict, total=False):
     requested_skill_ids: list[str]
     resolved_skill_ids: list[str]
     context_paths: list[str]
+    recent_file_reads: list[str]
     skill_resolution_diagnostics: list[dict[str, Any]]
     agent_selection_diagnostics: list[dict[str, Any]]
     selection_warnings: list[str]

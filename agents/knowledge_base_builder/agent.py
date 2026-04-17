@@ -4,11 +4,12 @@ import difflib
 from pathlib import Path
 from typing import Any
 
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage
 
 from app.contracts import build_assistant_response
 from app.language import detect_response_language
 from app.messages import extract_latest_human_text, stringify_message_content
+from app.model_request import build_model_request_messages
 from app.pending_actions import (
     build_pending_action,
     build_write_knowledge_approval_payload,
@@ -69,17 +70,15 @@ class KnowledgeBaseBuilderAgentNode:
         if rendered_response is not None:
             return rendered_response
 
-        messages = [
-            SystemMessage(
-                content=build_knowledge_base_builder_prompt(
-                    state,
-                    skill_registry=self.skill_registry,
-                    agent_name=self.agent_name,
-                    tool_ids=self.tool_ids,
-                )
+        messages = build_model_request_messages(
+            system_prompt=build_knowledge_base_builder_prompt(
+                state,
+                skill_registry=self.skill_registry,
+                agent_name=self.agent_name,
+                tool_ids=self.tool_ids,
             ),
-            *state["messages"],
-        ]
+            transcript_messages=state["messages"],
+        )
         response = self.llm.invoke(messages)
         assistant_text = stringify_message_content(getattr(response, "content", ""))
         tool_invocation = extract_first_tool_invocation(
@@ -131,11 +130,12 @@ def build_knowledge_base_builder_prompt(
 
 def build_knowledge_base_builder_response(state: AgentState) -> dict[str, Any] | None:
     messages = state.get("messages", [])
-    if not messages:
-        return None
-
-    latest_message = messages[-1]
-    tool_result = get_builder_tool_result(latest_message, messages=messages)
+    latest_message = messages[-1] if messages else None
+    tool_result = (
+        get_builder_tool_result(latest_message, messages=messages)
+        if latest_message is not None
+        else None
+    )
     if tool_result is None:
         return None
     payload = tool_result.get("payload") if isinstance(tool_result.get("payload"), dict) else {}
@@ -156,13 +156,15 @@ def build_knowledge_base_builder_response(state: AgentState) -> dict[str, Any] |
             "tool_result": tool_result,
             "execution_contract": None,
         }
-        tool_execution_record = build_tool_execution_record_for_message(
-            latest_message,
-            messages=messages,
-            tool_name=str(tool_result.get("tool_name", "")).strip() or "write_knowledge_markdown_document",
-            source="knowledge_base_builder_agent",
-            reason="Knowledge-base builder ToolNode returned a result.",
-        )
+        tool_execution_record = None
+        if latest_message is not None:
+            tool_execution_record = build_tool_execution_record_for_message(
+                latest_message,
+                messages=messages,
+                tool_name=str(tool_result.get("tool_name", "")).strip() or "write_knowledge_markdown_document",
+                source="knowledge_base_builder_agent",
+                reason="Knowledge-base builder ToolNode returned a result.",
+            )
         if tool_execution_record is not None:
             result["tool_execution_trace"] = [tool_execution_record]
         return result

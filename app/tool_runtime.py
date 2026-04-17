@@ -395,6 +395,50 @@ def run_internal_tool_operation(
     return invocation, result, raw_result, None
 
 
+def get_persisted_tool_result(
+    state: dict[str, Any] | None,
+    *,
+    source: str = "",
+    reason: str = "",
+    execution_backend: str = LANGGRAPH_TOOL_NODE_BACKEND,
+) -> ToolResultEnvelope | None:
+    if not isinstance(state, dict):
+        return None
+
+    tool_result = state.get("tool_result")
+    if isinstance(tool_result, dict):
+        normalized_result = dict(tool_result)
+        if "payload" in normalized_result and "status" in normalized_result and "arguments" not in normalized_result:
+            normalized_result["arguments"] = {}
+        return normalize_runtime_tool_result(
+            normalized_result,
+            source=source,
+            reason=reason,
+            execution_backend=execution_backend,
+        )
+
+    trace = state.get("tool_execution_trace")
+    if not isinstance(trace, list):
+        return None
+
+    for record in reversed(trace):
+        if not isinstance(record, dict):
+            continue
+        result = record.get("result")
+        if not isinstance(result, dict):
+            continue
+        normalized_result = dict(result)
+        if "payload" in normalized_result and "status" in normalized_result and "arguments" not in normalized_result:
+            normalized_result["arguments"] = {}
+        return normalize_runtime_tool_result(
+            normalized_result,
+            source=source,
+            reason=reason,
+            execution_backend=execution_backend,
+        )
+    return None
+
+
 def parse_tool_message_content(content: Any) -> dict[str, Any] | None:
     if isinstance(content, dict):
         return dict(content)

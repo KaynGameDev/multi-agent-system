@@ -1,7 +1,7 @@
 from __future__ import annotations
 from typing import Any
 
-from langchain_core.messages import AIMessage, SystemMessage
+from langchain_core.messages import AIMessage
 
 from agents.knowledge.rendering import first_non_empty, is_retrieval_payload, is_search_payload
 from app.contracts import (
@@ -10,6 +10,7 @@ from app.contracts import (
 )
 from app.language import detect_response_language
 from app.messages import extract_latest_human_text, stringify_message_content
+from app.model_request import build_model_request_messages
 from app.pending_actions import (
     PendingActionSelectionOption,
     build_pending_action,
@@ -28,6 +29,7 @@ from app.tool_runtime import (
     build_tool_execution_record_for_message,
     extract_first_tool_invocation,
     extract_tool_result_from_message,
+    get_persisted_tool_result,
 )
 from app.tool_registry import (
     TOOL_KNOWLEDGE_LIST_DOCUMENTS,
@@ -68,17 +70,15 @@ class KnowledgeAgentNode:
         if rendered_response is not None:
             return rendered_response
 
-        messages = [
-            SystemMessage(
-                content=build_knowledge_prompt(
-                    state,
-                    skill_registry=self.skill_registry,
-                    agent_name=self.agent_name,
-                    tool_ids=self.tool_ids,
-                )
+        messages = build_model_request_messages(
+            system_prompt=build_knowledge_prompt(
+                state,
+                skill_registry=self.skill_registry,
+                agent_name=self.agent_name,
+                tool_ids=self.tool_ids,
             ),
-            *state["messages"],
-        ]
+            transcript_messages=state["messages"],
+        )
         response = self.llm.invoke(messages)
         assistant_text = stringify_message_content(getattr(response, "content", ""))
         tool_invocation = extract_first_tool_invocation(
@@ -185,19 +185,47 @@ def is_read_like_payload(payload: dict) -> bool:
     return isinstance(payload.get("document"), dict) and "content" in payload
 
 
-def get_latest_tool_result(state: AgentState) -> dict[str, Any] | None:
+def get_latest_tool_result(
+    state: AgentState,
+    *,
+    allow_persisted: bool = False,
+) -> dict[str, Any] | None:
     messages = state.get("messages", [])
-    if not messages:
+    if messages:
+        latest_result = get_tool_result(messages[-1], messages=messages)
+        if latest_result is not None:
+            return latest_result
+    if not allow_persisted:
         return None
-    return get_tool_result(messages[-1], messages=messages)
+    return get_persisted_knowledge_tool_result(state)
 
 
-def get_latest_knowledge_result(state: AgentState) -> dict[str, Any] | None:
+def get_persisted_knowledge_tool_result(state: AgentState) -> dict[str, Any] | None:
+    persisted_result = get_persisted_tool_result(
+        state,
+        source="knowledge_agent",
+        reason="Using persisted knowledge tool state after transcript rehydration.",
+    )
+    if persisted_result is None:
+        return None
+    payload = persisted_result.get("payload") if isinstance(persisted_result.get("payload"), dict) else {}
+    if not is_knowledge_payload(payload):
+        return None
+    return persisted_result
+
+
+def get_latest_knowledge_result(
+    state: AgentState,
+    *,
+    allow_persisted: bool = False,
+) -> dict[str, Any] | None:
     for message in reversed(state.get("messages", [])):
         result = get_tool_result(message, messages=state.get("messages", []))
         if result is not None:
             return result
-    return None
+    if not allow_persisted:
+        return None
+    return get_persisted_knowledge_tool_result(state)
 
 
 def render_knowledge_update(state: AgentState, tool_result: dict[str, Any], *, preferred_language: str) -> dict[str, Any] | None:
@@ -318,7 +346,7 @@ def build_knowledge_pending_action_response(
 ) -> dict[str, Any] | None:
     selection_phase = get_pending_action_selection_phase(pending_action)
     if selection_phase == "render_after_tool_result":
-        latest_tool_result = get_latest_tool_result(state)
+        latest_tool_result = get_latest_tool_result(state, allow_persisted=True)
         if latest_tool_result is None:
             content = translate_knowledge_text("I couldn't find the latest document payload to reopen.", preferred_language)
             reopened_action = update_pending_action(
@@ -409,7 +437,7 @@ def build_knowledge_pending_action_response(
 
         source_tool_id = str(get_pending_action_metadata(pending_action).get("source_tool_id", "")).strip()
         if source_tool_id == TOOL_KNOWLEDGE_READ_DOCUMENT:
-            tool_result = get_latest_knowledge_result(state)
+            tool_result = get_latest_knowledge_result(state, allow_persisted=True)
             if tool_result is None:
                 content = translate_knowledge_text("I couldn't find the latest document payload to reopen.", preferred_language)
                 reopened_action = update_pending_action(
