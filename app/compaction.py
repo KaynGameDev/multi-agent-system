@@ -17,6 +17,7 @@ from app.rehydration import (
 from app.session_memory import (
     SessionMemoryRecord,
     build_session_memory_compaction_plan,
+    resolve_safe_preserved_tail_start,
 )
 from interfaces.web.conversations import (
     TRANSCRIPT_TYPE_COMPACT_BOUNDARY,
@@ -117,16 +118,21 @@ def compact_conversation(
         preserved_tail_messages = [deepcopy(message) for message in session_memory_plan.preserved_tail_messages]
         resolved_preserved_tail_count = len(preserved_tail_messages)
     else:
+        preserved_tail_start = resolve_safe_preserved_tail_start(
+            active_slice,
+            preserved_tail_count=resolved_preserved_tail_count,
+        )
         compacted_source_messages = (
-            active_slice[:-resolved_preserved_tail_count]
-            if resolved_preserved_tail_count > 0
+            active_slice[:preserved_tail_start]
+            if preserved_tail_start < len(active_slice)
             else active_slice
         )
         preserved_tail_messages = (
-            [deepcopy(message) for message in active_slice[-resolved_preserved_tail_count:]]
-            if resolved_preserved_tail_count > 0
+            [deepcopy(message) for message in active_slice[preserved_tail_start:]]
+            if preserved_tail_start < len(active_slice)
             else []
         )
+        resolved_preserved_tail_count = len(preserved_tail_messages)
 
     if not compacted_source_messages:
         raise ValueError("Manual compaction must summarize at least one message.")
@@ -384,6 +390,8 @@ def _normalize_transcript_message_payload(message: dict[str, Any] | Any) -> dict
             "created_at": str(message.get("created_at", "")).strip() or utc_now_iso(),
             "usage": deepcopy(message.get("usage")) if isinstance(message.get("usage"), dict) else None,
             "metadata": deepcopy(message.get("metadata")) if isinstance(message.get("metadata"), dict) else None,
+            "tool_calls": deepcopy(message.get("tool_calls")) if isinstance(message.get("tool_calls"), list) else [],
+            "tool_call_id": str(message.get("tool_call_id", "") or "").strip(),
         }
 
     role = str(getattr(message, "type", "")).strip().lower()
@@ -411,6 +419,8 @@ def _normalize_transcript_message_payload(message: dict[str, Any] | Any) -> dict
         "created_at": utc_now_iso(),
         "usage": usage,
         "metadata": metadata,
+        "tool_calls": deepcopy(getattr(message, "tool_calls", [])) if isinstance(getattr(message, "tool_calls", []), list) else [],
+        "tool_call_id": str(getattr(message, "tool_call_id", "") or "").strip(),
     }
 
 

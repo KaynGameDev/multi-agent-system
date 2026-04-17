@@ -5,7 +5,7 @@ import unittest
 from pathlib import Path
 
 from fastapi.testclient import TestClient
-from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langchain_core.messages import AIMessage, HumanMessage, SystemMessage, ToolMessage
 
 from app.compaction import (
     ContinuationSummaryDraft,
@@ -330,6 +330,78 @@ class CompactionTests(unittest.TestCase):
         self.assertFalse(bundle.used_session_memory)
         self.assertEqual(bundle.summary_message["metadata"]["compaction"]["source"], "fresh_summary")
         self.assertIn("## Continuation Summary", bundle.summary_message["markdown"])
+
+    def test_compact_conversation_preserves_whole_tool_exchange_in_tail(self) -> None:
+        messages = [
+            HumanMessage(content="Find the architecture guide", id="u1"),
+            AIMessage(
+                content="",
+                id="a_tool",
+                tool_calls=[{"id": "call_old", "name": "read_knowledge_document", "args": {"document": "Guide"}}],
+            ),
+            ToolMessage(
+                content='{"ok": true, "document": {"title": "Architecture Guide"}, "content": "short"}',
+                tool_call_id="call_old",
+                id="t_old",
+            ),
+            HumanMessage(content="What about the release checklist?", id="u2"),
+        ]
+
+        bundle = compact_conversation(
+            messages,
+            llm=StructuredSummaryLLM(),
+            preserved_tail_count=2,
+        )
+
+        self.assertEqual(bundle.compacted_source_count, 1)
+        self.assertEqual(
+            [message["id"] for message in bundle.preserved_tail_messages],
+            ["a_tool", "t_old", "u2"],
+        )
+        self.assertEqual(
+            bundle.boundary_message["metadata"]["preservedTail"]["messageIds"],
+            ["a_tool", "t_old", "u2"],
+        )
+
+    def test_compact_conversation_uses_session_memory_when_recent_tail_expands_to_tool_pair(self) -> None:
+        messages = [
+            HumanMessage(content="Open the architecture guide", id="u1"),
+            AIMessage(content="I opened the guide.", id="a1"),
+            AIMessage(
+                content="",
+                id="a_tool",
+                tool_calls=[{"id": "call_read", "name": "read_knowledge_document", "args": {"document": "Checklist"}}],
+            ),
+            ToolMessage(
+                content='{"ok": true, "document": {"title": "Checklist"}, "content": "short"}',
+                tool_call_id="call_read",
+                id="t_read",
+            ),
+        ]
+        session_memory = SessionMemoryRecord(
+            thread_id="web:test",
+            updated_at="2026-04-16T00:00:01+00:00",
+            last_message_id="a1",
+            last_message_created_at="2026-04-16T00:00:01+00:00",
+            covered_message_count=2,
+            covered_tokens=320,
+            summary_markdown="## Continuation Summary\nThe user is working on the architecture guide.",
+            source="update",
+        )
+
+        bundle = compact_conversation(
+            messages,
+            llm=ExplodingSummaryLLM(),
+            preserved_tail_count=1,
+            session_memory=session_memory,
+        )
+
+        self.assertTrue(bundle.used_session_memory)
+        self.assertEqual(bundle.summary_message["markdown"], session_memory.summary_markdown)
+        self.assertEqual(
+            [message["id"] for message in bundle.preserved_tail_messages],
+            ["a_tool", "t_read"],
+        )
 
     def test_compact_conversation_replaces_only_active_slice_after_existing_boundary(self) -> None:
         messages = [

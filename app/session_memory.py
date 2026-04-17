@@ -236,9 +236,12 @@ def is_safe_session_memory_extraction_point(messages: list[dict[str, Any]] | lis
     for message in reversed(active_slice):
         if message["type"] != TRANSCRIPT_TYPE_MESSAGE:
             continue
-        if message["role"] not in {"user", "assistant"}:
-            continue
-        return message["role"] == "assistant"
+        if message["role"] == "tool":
+            return False
+        if message["role"] == "assistant":
+            return not _has_tool_calls(message)
+        if message["role"] == "user":
+            return False
     return False
 
 
@@ -430,15 +433,45 @@ def build_session_memory_compaction_plan(
     if last_message_index < 0:
         return None
 
-    preserved_tail_messages = [deepcopy(message) for message in active_slice[last_message_index + 1 :]]
-    if len(preserved_tail_messages) > max(int(preserved_tail_count or 0), 0):
+    delta_start_index = last_message_index + 1
+    preserved_tail_start = resolve_safe_preserved_tail_start(
+        active_slice,
+        preserved_tail_count=preserved_tail_count,
+    )
+    if preserved_tail_start > delta_start_index:
         return None
+    if (
+        delta_start_index < len(active_slice)
+        and _expand_preserved_tail_start_for_tool_pairs(active_slice, delta_start_index) < delta_start_index
+    ):
+        return None
+    preserved_tail_messages = [deepcopy(message) for message in active_slice[delta_start_index:]]
 
     return SessionMemoryCompactionPlan(
         record=existing_record,
         compacted_source_count=last_message_index + 1,
         preserved_tail_messages=preserved_tail_messages,
     )
+
+
+def resolve_safe_preserved_tail_start(
+    messages: list[dict[str, Any]] | list[Any] | None,
+    *,
+    preserved_tail_count: int,
+) -> int:
+    active_slice = _project_active_slice(messages)
+    if not active_slice:
+        return 0
+
+    requested_count = min(
+        max(int(preserved_tail_count or 0), 0),
+        len(active_slice),
+    )
+    if requested_count <= 0:
+        return len(active_slice)
+
+    start_index = len(active_slice) - requested_count
+    return _expand_preserved_tail_start_for_tool_pairs(active_slice, start_index)
 
 
 def _project_active_slice(messages: list[dict[str, Any]] | list[Any] | None) -> list[dict[str, Any]]:
@@ -455,6 +488,8 @@ def _normalize_transcript_message(message: dict[str, Any] | Any) -> dict[str, An
             "markdown": str(message.get("markdown", message.get("content", "")) or ""),
             "created_at": str(message.get("created_at", "") or "").strip(),
             "metadata": deepcopy(message.get("metadata")) if isinstance(message.get("metadata"), dict) else None,
+            "tool_calls": deepcopy(message.get("tool_calls")) if isinstance(message.get("tool_calls"), list) else [],
+            "tool_call_id": str(message.get("tool_call_id", "") or "").strip(),
         }
 
     role = str(getattr(message, "type", "") or "").strip().lower()
@@ -473,6 +508,8 @@ def _normalize_transcript_message(message: dict[str, Any] | Any) -> dict[str, An
         "markdown": str(getattr(message, "content", "") or ""),
         "created_at": "",
         "metadata": None,
+        "tool_calls": deepcopy(getattr(message, "tool_calls", [])) if isinstance(getattr(message, "tool_calls", []), list) else [],
+        "tool_call_id": str(getattr(message, "tool_call_id", "") or "").strip(),
     }
 
 
@@ -484,6 +521,56 @@ def _find_message_index(messages: list[dict[str, Any]], message_id: str) -> int:
         if message["id"] == normalized_message_id:
             return index
     return -1
+
+
+def _expand_preserved_tail_start_for_tool_pairs(
+    messages: list[dict[str, Any]],
+    start_index: int,
+) -> int:
+    safe_start_index = min(max(int(start_index or 0), 0), len(messages))
+    while safe_start_index < len(messages):
+        current_message = messages[safe_start_index]
+        if not _is_tool_result_message(current_message):
+            break
+        matching_invocation_index = _find_matching_tool_invocation_index(messages, safe_start_index)
+        if matching_invocation_index is None or matching_invocation_index >= safe_start_index:
+            break
+        safe_start_index = matching_invocation_index
+    return safe_start_index
+
+
+def _find_matching_tool_invocation_index(
+    messages: list[dict[str, Any]],
+    tool_result_index: int,
+) -> int | None:
+    if tool_result_index <= 0 or tool_result_index >= len(messages):
+        return None
+
+    tool_result_message = messages[tool_result_index]
+    tool_call_id = str(tool_result_message.get("tool_call_id", "") or "").strip()
+    fallback_index: int | None = None
+    for index in range(tool_result_index - 1, -1, -1):
+        message = messages[index]
+        if not _has_tool_calls(message):
+            continue
+        tool_calls = message.get("tool_calls") or []
+        if tool_call_id:
+            for tool_call in tool_calls:
+                if not isinstance(tool_call, dict):
+                    continue
+                if str(tool_call.get("id", "") or "").strip() == tool_call_id:
+                    return index
+        if fallback_index is None:
+            fallback_index = index
+    return fallback_index
+
+
+def _is_tool_result_message(message: dict[str, Any]) -> bool:
+    return str(message.get("role", "") or "").strip() == "tool"
+
+
+def _has_tool_calls(message: dict[str, Any]) -> bool:
+    return str(message.get("role", "") or "").strip() == "assistant" and bool(message.get("tool_calls") or [])
 
 
 def _extract_tool_activity_count(message: dict[str, Any]) -> int:

@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 
 from app.memory.session_files import get_session_memory_file
+from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
+
 from app.session_memory import (
     DEFAULT_SESSION_MEMORY_BACKGROUND_MIN_TURNS,
     SessionMemoryRefreshActivity,
@@ -12,6 +14,7 @@ from app.session_memory import (
     SessionMemoryStore,
     build_session_memory_compaction_plan,
     count_session_memory_refresh_activity,
+    is_safe_session_memory_extraction_point,
     should_schedule_background_session_memory_refresh,
     should_initialize_session_memory,
     should_update_session_memory,
@@ -62,6 +65,18 @@ class SessionMemoryTests(unittest.TestCase):
                 initialize_threshold_tokens=1,
             )
         )
+
+    def test_safe_extraction_point_rejects_pending_tool_call_turn(self) -> None:
+        messages = [
+            HumanMessage(content="Open the architecture guide", id="u1"),
+            AIMessage(
+                content="",
+                id="a_tool",
+                tool_calls=[{"id": "call_read", "name": "read_knowledge_document", "args": {"document": "Guide"}}],
+            ),
+        ]
+
+        self.assertFalse(is_safe_session_memory_extraction_point(messages))
 
     def test_should_update_after_enough_growth_from_last_memory_point(self) -> None:
         messages = [
@@ -278,6 +293,40 @@ class SessionMemoryTests(unittest.TestCase):
             preserved_tail_count=0,
         )
         self.assertIsNone(stale_plan)
+
+    def test_compaction_plan_preserves_whole_tool_pair_in_tail(self) -> None:
+        messages = [
+            HumanMessage(content="Open the architecture guide", id="u1"),
+            AIMessage(content="I opened the guide.", id="a1"),
+            AIMessage(
+                content="",
+                id="a_tool",
+                tool_calls=[{"id": "call_read", "name": "read_knowledge_document", "args": {"document": "Checklist"}}],
+            ),
+            ToolMessage(
+                content='{"ok": true, "document": {"title": "Checklist"}, "content": "short"}',
+                tool_call_id="call_read",
+                id="t_read",
+            ),
+        ]
+        existing_record = SessionMemoryRecord(
+            thread_id="web:test",
+            updated_at="2026-04-16T00:00:01+00:00",
+            last_message_id="a1",
+            last_message_created_at="2026-04-16T00:00:01+00:00",
+            covered_message_count=2,
+            covered_tokens=200,
+            summary_markdown="## Continuation Summary\nInitial memory",
+        )
+
+        fitting_plan = build_session_memory_compaction_plan(
+            messages,
+            existing_record,
+            preserved_tail_count=1,
+        )
+
+        self.assertIsNotNone(fitting_plan)
+        self.assertEqual([message["id"] for message in fitting_plan.preserved_tail_messages], ["a_tool", "t_read"])
 
 
 if __name__ == "__main__":
