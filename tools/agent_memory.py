@@ -7,7 +7,8 @@ from langgraph.prebuilt import InjectedState
 
 from app.config import Settings
 from app.memory.agent_scope import resolve_agent_memory_context
-from app.memory.long_term import FileLongTermMemoryStore
+from app.memory.long_term import PathScopedLongTermMemoryStore
+from app.memory.paths import resolve_long_term_memory_dir
 from app.memory.types import AgentMemoryScope
 
 
@@ -22,6 +23,14 @@ def build_agent_memory_tools(
     if not normalized_agent_name or normalized_memory_scope not in {"user", "project", "local"}:
         return ()
 
+    base_dir = resolve_long_term_memory_dir(settings) / "agents" / normalized_agent_name
+    if normalized_memory_scope == "user":
+        allowed_root_dir = (base_dir / "users").resolve()
+    elif normalized_memory_scope == "project":
+        allowed_root_dir = (base_dir / "projects").resolve()
+    else:
+        allowed_root_dir = (base_dir / "local").resolve()
+
     def build_context(state: dict[str, Any] | None) -> dict[str, object]:
         resolved = resolve_agent_memory_context(
             settings,
@@ -34,12 +43,19 @@ def build_agent_memory_tools(
             "memory_scope": normalized_memory_scope,
             "memory_scope_key": resolved.scope_key,
             "memory_root": str(resolved.root_dir),
+            "allowed_memory_root": str(allowed_root_dir),
             "path_scoped": True,
         }
 
-    def build_store(state: dict[str, Any] | None) -> tuple[FileLongTermMemoryStore, dict[str, object]]:
+    def build_store(state: dict[str, Any] | None) -> tuple[PathScopedLongTermMemoryStore, dict[str, object]]:
         context = build_context(state)
-        return FileLongTermMemoryStore(str(context["memory_root"])), context
+        return (
+            PathScopedLongTermMemoryStore(
+                str(context["memory_root"]),
+                allowed_root_dir=allowed_root_dir,
+            ),
+            context,
+        )
 
     @tool
     def list_agent_memories(

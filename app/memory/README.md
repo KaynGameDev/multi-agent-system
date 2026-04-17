@@ -64,6 +64,8 @@ Supported update choices are real file operations:
 - `merge`: upsert snapshot memories into personal memory and merge overlapping topic content
 - `replace`: delete existing personal topic memories and copy the snapshot in as the new personal baseline
 
+Those flows are implemented as separate first-class actions in code, with dedicated tests for each path rather than only sharing a single branched apply function.
+
 ### Durable extraction
 
 Durable extraction is the post-turn promotion step that looks at a completed conversation turn and writes only a few stable facts into long-term memory. It is intentionally more conservative than session memory or compaction.
@@ -250,6 +252,8 @@ Agent definitions can opt into a memory scope:
 - `local`: resolves under `long_term/agents/<agent>/local/`
 
 Scoped agent memory is exposed through dedicated memory tools rather than raw path input. The tool layer resolves the scope-specific directory from runtime state and only reads or writes inside that directory.
+
+That scope is also enforced in the tool backend itself with a path-scoped store wrapper, so a tool call cannot escape its allowed `users/`, `projects/`, or `local/` subtree even if a context-resolution bug slips in elsewhere.
 
 When retrieval is enabled, scoped agents can also inject a compact `Relevant Memories` block into their prompt. That block is built from the agent's own scoped memory root only, so retrieval stays aligned with the same path-scoped permission boundary as read and write operations.
 

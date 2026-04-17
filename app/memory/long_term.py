@@ -40,6 +40,10 @@ class LongTermMemoryFormatError(ValueError):
     """Raised when long-term memory files are missing or invalid."""
 
 
+class PathScopedLongTermMemoryPermissionError(PermissionError):
+    """Raised when a scoped memory backend points outside its allowed root."""
+
+
 class FileLongTermMemoryStore:
     def __init__(self, root_dir: str | Path) -> None:
         self.root_dir = Path(root_dir).expanduser().resolve()
@@ -58,6 +62,36 @@ class FileLongTermMemoryStore:
 
     def delete(self, memory_id: str) -> bool:
         return delete_long_term_memory(self.root_dir, memory_id)
+
+
+class PathScopedLongTermMemoryStore:
+    def __init__(self, root_dir: str | Path, *, allowed_root_dir: str | Path) -> None:
+        self.root_dir = Path(root_dir).expanduser().resolve()
+        self.allowed_root_dir = Path(allowed_root_dir).expanduser().resolve()
+        _validate_path_scoped_root(self.root_dir, allowed_root_dir=self.allowed_root_dir)
+
+    def load_catalog(self) -> LongTermMemoryCatalog:
+        self._validate_scope()
+        return load_long_term_memory_catalog(self.root_dir)
+
+    def list(self) -> list[LongTermMemoryIndexEntry]:
+        self._validate_scope()
+        return list_long_term_memories(self.root_dir)
+
+    def get(self, memory_id: str) -> LongTermMemoryFile | None:
+        self._validate_scope()
+        return get_long_term_memory(self.root_dir, memory_id)
+
+    def upsert(self, memory: LongTermMemoryWrite | dict[str, Any]) -> LongTermMemoryFile:
+        self._validate_scope()
+        return upsert_long_term_memory(self.root_dir, memory)
+
+    def delete(self, memory_id: str) -> bool:
+        self._validate_scope()
+        return delete_long_term_memory(self.root_dir, memory_id)
+
+    def _validate_scope(self) -> None:
+        _validate_path_scoped_root(self.root_dir, allowed_root_dir=self.allowed_root_dir)
 
 
 def load_long_term_memory_catalog(root_dir: str | Path) -> LongTermMemoryCatalog:
@@ -584,3 +618,12 @@ def _prune_empty_parent_directories(start_dir: Path, *, stop_at: Path) -> None:
 
 def _is_missing_index_error(exc: LongTermMemoryFormatError) -> bool:
     return "must contain a MEMORY index file" in str(exc)
+
+
+def _validate_path_scoped_root(root_dir: Path, *, allowed_root_dir: Path) -> None:
+    try:
+        root_dir.relative_to(allowed_root_dir)
+    except ValueError as exc:
+        raise PathScopedLongTermMemoryPermissionError(
+            f"Scoped long-term memory root {root_dir} must stay under allowed root {allowed_root_dir}"
+        ) from exc

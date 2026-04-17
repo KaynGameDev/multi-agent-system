@@ -8,9 +8,13 @@ from app.memory.long_term import get_long_term_memory, list_long_term_memories, 
 from app.memory.snapshots import (
     apply_long_term_memory_snapshot,
     get_pending_long_term_memory_snapshot,
+    keep_long_term_memory_snapshot,
     load_long_term_memory_snapshot_sync_state,
+    merge_long_term_memory_snapshot,
+    replace_long_term_memory_snapshot,
     resolve_long_term_memory_snapshot_dir,
     select_long_term_memory_snapshot,
+    LongTermMemorySnapshotError,
 )
 
 
@@ -23,7 +27,7 @@ class MemorySnapshotsTests(unittest.TestCase):
     def tearDown(self) -> None:
         self.tempdir.cleanup()
 
-    def test_select_snapshot_prefers_default_and_keep_records_sync_state(self) -> None:
+    def test_keep_long_term_memory_snapshot_records_sync_state_without_mutating_personal_memory(self) -> None:
         self._write_snapshot_memory(
             "default",
             memory_id="project/overview",
@@ -43,7 +47,7 @@ class MemorySnapshotsTests(unittest.TestCase):
 
         selected = select_long_term_memory_snapshot(self.project_root)
         pending_before = get_pending_long_term_memory_snapshot(self.project_root, self.user_root)
-        summary = apply_long_term_memory_snapshot(self.user_root, self.project_root, action="keep")
+        summary = keep_long_term_memory_snapshot(self.user_root, self.project_root)
         sync_state = load_long_term_memory_snapshot_sync_state(self.user_root)
         pending_after = get_pending_long_term_memory_snapshot(self.project_root, self.user_root)
 
@@ -68,7 +72,7 @@ class MemorySnapshotsTests(unittest.TestCase):
         self.assertIsNotNone(pending_after_update)
         self.assertNotEqual(pending_after_update.fingerprint, sync_state.fingerprint)
 
-    def test_merge_applies_snapshot_without_overwriting_existing_memory(self) -> None:
+    def test_merge_long_term_memory_snapshot_combines_snapshot_with_existing_memory(self) -> None:
         self._write_snapshot_memory(
             "default",
             memory_id="project/roadmap",
@@ -88,7 +92,7 @@ class MemorySnapshotsTests(unittest.TestCase):
             },
         )
 
-        summary = apply_long_term_memory_snapshot(self.user_root, self.project_root, action="merge")
+        summary = merge_long_term_memory_snapshot(self.user_root, self.project_root)
         merged_memory = get_long_term_memory(self.user_root, "project/roadmap")
         sync_state = load_long_term_memory_snapshot_sync_state(self.user_root)
 
@@ -103,7 +107,7 @@ class MemorySnapshotsTests(unittest.TestCase):
         self.assertIsNotNone(sync_state)
         self.assertEqual(sync_state.action, "merge")
 
-    def test_replace_rewrites_personal_memory_from_snapshot(self) -> None:
+    def test_replace_long_term_memory_snapshot_rewrites_personal_memory_from_snapshot(self) -> None:
         self._write_snapshot_memory(
             "default",
             memory_id="project/overview",
@@ -133,7 +137,7 @@ class MemorySnapshotsTests(unittest.TestCase):
             },
         )
 
-        summary = apply_long_term_memory_snapshot(self.user_root, self.project_root, action="replace")
+        summary = replace_long_term_memory_snapshot(self.user_root, self.project_root)
         remaining_ids = [entry.memory_id for entry in list_long_term_memories(self.user_root)]
         sync_state = load_long_term_memory_snapshot_sync_state(self.user_root)
 
@@ -143,6 +147,36 @@ class MemorySnapshotsTests(unittest.TestCase):
         self.assertEqual(remaining_ids, ["project/overview"])
         self.assertIsNotNone(sync_state)
         self.assertEqual(sync_state.action, "replace")
+
+    def test_apply_long_term_memory_snapshot_dispatches_to_first_class_actions(self) -> None:
+        self._write_snapshot_memory(
+            "default",
+            memory_id="project/overview",
+            name="Project Overview",
+            description="Shared roadmap context.",
+            memory_type="project",
+            content="Snapshot overview.",
+        )
+
+        keep_summary = apply_long_term_memory_snapshot(self.user_root, self.project_root, action="keep")
+        merge_summary = apply_long_term_memory_snapshot(self.user_root, self.project_root, action="merge")
+        replace_summary = apply_long_term_memory_snapshot(self.user_root, self.project_root, action="replace")
+
+        self.assertEqual(keep_summary.action, "keep")
+        self.assertEqual(merge_summary.action, "merge")
+        self.assertEqual(replace_summary.action, "replace")
+
+    def test_keep_long_term_memory_snapshot_requires_available_snapshot(self) -> None:
+        with self.assertRaisesRegex(LongTermMemorySnapshotError, "No project-provided memory snapshot is available"):
+            keep_long_term_memory_snapshot(self.user_root, self.project_root)
+
+    def test_merge_long_term_memory_snapshot_requires_available_snapshot(self) -> None:
+        with self.assertRaisesRegex(LongTermMemorySnapshotError, "No project-provided memory snapshot is available"):
+            merge_long_term_memory_snapshot(self.user_root, self.project_root)
+
+    def test_replace_long_term_memory_snapshot_requires_available_snapshot(self) -> None:
+        with self.assertRaisesRegex(LongTermMemorySnapshotError, "No project-provided memory snapshot is available"):
+            replace_long_term_memory_snapshot(self.user_root, self.project_root)
 
     def _write_snapshot_memory(
         self,

@@ -3,10 +3,11 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 from agents.project_task.agent import build_project_task_prompt
 from app.graph import build_default_agent_registrations
-from app.memory.agent_scope import resolve_agent_memory_context
+from app.memory.agent_scope import ResolvedAgentMemoryContext, resolve_agent_memory_context
 from tests.common import make_settings
 
 
@@ -205,6 +206,39 @@ class AgentMemoryTests(unittest.TestCase):
 
         self.assertFalse(payload["ok"])
         self.assertIn("Invalid long-term memory id", payload["error"])
+
+    def test_project_task_agent_memory_tools_reject_roots_outside_allowed_scope_prefix(self) -> None:
+        registrations = build_default_agent_registrations(settings=self.settings)
+        project_task_registration = next(
+            registration for registration in registrations if registration.name == "project_task_agent"
+        )
+        tool_map = {
+            tool.name: tool
+            for tool in project_task_registration.tools
+            if tool.name == "list_agent_memories"
+        }
+
+        with patch(
+            "tools.agent_memory.resolve_agent_memory_context",
+            return_value=ResolvedAgentMemoryContext(
+                agent_name="project_task_agent",
+                scope="user",
+                scope_key="user-123",
+                root_dir=(self.runtime_root / "memory" / "long_term" / "escape-root").resolve(),
+            ),
+        ):
+            payload = invoke_memory_tool(
+                tool_map,
+                state={
+                    "user_id": "user-123",
+                    "thread_id": "web:thread-1",
+                },
+                name="list_agent_memories",
+            )
+
+        self.assertFalse(payload["ok"])
+        self.assertTrue(payload["path_scoped"])
+        self.assertIn("must stay under allowed root", payload["error"])
 
 
 if __name__ == "__main__":

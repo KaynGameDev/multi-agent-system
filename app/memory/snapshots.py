@@ -201,91 +201,196 @@ def apply_long_term_memory_snapshot(
     action: LongTermMemorySnapshotChoice,
     snapshot_id: str = "",
 ) -> LongTermMemorySnapshotApplySummary:
-    resolved_user_root_dir = Path(user_root_dir).expanduser().resolve()
-    resolved_project_root_dir = Path(project_root_dir).expanduser().resolve()
-    created_memory_ids: list[str] = []
-    updated_memory_ids: list[str] = []
-    deleted_memory_ids: list[str] = []
-    normalized_action = str(action or "").strip().lower()
+    normalized_action = normalize_long_term_memory_snapshot_choice(action)
+    action_map = {
+        "keep": keep_long_term_memory_snapshot,
+        "merge": merge_long_term_memory_snapshot,
+        "replace": replace_long_term_memory_snapshot,
+    }
+    return action_map[normalized_action](
+        user_root_dir,
+        project_root_dir,
+        snapshot_id=snapshot_id,
+    )
+
+
+def keep_long_term_memory_snapshot(
+    user_root_dir: str | Path,
+    project_root_dir: str | Path,
+    *,
+    snapshot_id: str = "",
+) -> LongTermMemorySnapshotApplySummary:
     try:
-        normalized_action = normalize_long_term_memory_snapshot_choice(action)
-        snapshot = select_long_term_memory_snapshot(project_root_dir, snapshot_id=snapshot_id)
-        if snapshot is None:
-            raise LongTermMemorySnapshotError("No project-provided memory snapshot is available.")
-
-        resolved_user_root_dir.mkdir(parents=True, exist_ok=True)
-
-        if normalized_action == "keep":
-            write_long_term_memory_snapshot_sync_state(
-                resolved_user_root_dir,
-                snapshot=snapshot,
-                action=normalized_action,
-            )
-            summary = LongTermMemorySnapshotApplySummary(
-                snapshot_id=snapshot.snapshot_id,
-                fingerprint=snapshot.fingerprint,
-                action=normalized_action,
-                user_root_dir=str(resolved_user_root_dir),
-                project_root_dir=str(resolved_project_root_dir),
-            )
-        else:
-            store = FileLongTermMemoryStore(resolved_user_root_dir)
-            existing_entries = {entry.memory_id: entry for entry in list_long_term_memories(resolved_user_root_dir)}
-
-            if normalized_action == "replace":
-                for memory_id in sorted(existing_entries):
-                    if delete_long_term_memory(resolved_user_root_dir, memory_id):
-                        deleted_memory_ids.append(memory_id)
-
-            for snapshot_memory in snapshot.memories:
-                existing_memory = None if normalized_action == "replace" else get_long_term_memory(
-                    resolved_user_root_dir,
-                    snapshot_memory.memory_id,
-                )
-                if existing_memory is None:
-                    store.upsert(_build_snapshot_memory_write(snapshot_memory))
-                    created_memory_ids.append(snapshot_memory.memory_id)
-                    continue
-
-                merged_payload = _build_merged_snapshot_memory(existing_memory, snapshot_memory)
-                if (
-                    existing_memory.name == merged_payload["name"]
-                    and existing_memory.description == merged_payload["description"]
-                    and existing_memory.memory_type == merged_payload["memory_type"]
-                    and existing_memory.content_markdown == merged_payload["content_markdown"]
-                ):
-                    continue
-                store.upsert(merged_payload)
-                updated_memory_ids.append(snapshot_memory.memory_id)
-
-            write_long_term_memory_snapshot_sync_state(
-                resolved_user_root_dir,
-                snapshot=snapshot,
-                action=normalized_action,
-            )
-            summary = LongTermMemorySnapshotApplySummary(
-                snapshot_id=snapshot.snapshot_id,
-                fingerprint=snapshot.fingerprint,
-                action=normalized_action,
-                user_root_dir=str(resolved_user_root_dir),
-                project_root_dir=str(resolved_project_root_dir),
-                created_memory_ids=created_memory_ids,
-                updated_memory_ids=updated_memory_ids,
-                deleted_memory_ids=deleted_memory_ids,
-            )
+        resolved_user_root_dir, resolved_project_root_dir, snapshot = _resolve_snapshot_apply_inputs(
+            user_root_dir,
+            project_root_dir,
+            snapshot_id=snapshot_id,
+        )
+        write_long_term_memory_snapshot_sync_state(
+            resolved_user_root_dir,
+            snapshot=snapshot,
+            action="keep",
+        )
+        summary = LongTermMemorySnapshotApplySummary(
+            snapshot_id=snapshot.snapshot_id,
+            fingerprint=snapshot.fingerprint,
+            action="keep",
+            user_root_dir=str(resolved_user_root_dir),
+            project_root_dir=str(resolved_project_root_dir),
+        )
     except Exception as exc:
-        emit_memory_telemetry(
-            logger,
-            "snapshots.apply",
-            status="error",
-            action=normalized_action,
-            user_root_dir=resolved_user_root_dir,
-            project_root_dir=resolved_project_root_dir,
+        _emit_snapshot_apply_error(
+            action="keep",
+            user_root_dir=Path(user_root_dir).expanduser().resolve(),
+            project_root_dir=Path(project_root_dir).expanduser().resolve(),
             snapshot_id=str(snapshot_id or "").strip(),
-            error=str(exc),
+            error=exc,
         )
         raise
 
+    _emit_snapshot_apply_success(summary)
+    return summary
+
+
+def merge_long_term_memory_snapshot(
+    user_root_dir: str | Path,
+    project_root_dir: str | Path,
+    *,
+    snapshot_id: str = "",
+) -> LongTermMemorySnapshotApplySummary:
+    created_memory_ids: list[str] = []
+    updated_memory_ids: list[str] = []
+    try:
+        resolved_user_root_dir, resolved_project_root_dir, snapshot = _resolve_snapshot_apply_inputs(
+            user_root_dir,
+            project_root_dir,
+            snapshot_id=snapshot_id,
+        )
+        store = FileLongTermMemoryStore(resolved_user_root_dir)
+        for snapshot_memory in snapshot.memories:
+            existing_memory = get_long_term_memory(
+                resolved_user_root_dir,
+                snapshot_memory.memory_id,
+            )
+            if existing_memory is None:
+                store.upsert(_build_snapshot_memory_write(snapshot_memory))
+                created_memory_ids.append(snapshot_memory.memory_id)
+                continue
+
+            merged_payload = _build_merged_snapshot_memory(existing_memory, snapshot_memory)
+            if (
+                existing_memory.name == merged_payload["name"]
+                and existing_memory.description == merged_payload["description"]
+                and existing_memory.memory_type == merged_payload["memory_type"]
+                and existing_memory.content_markdown == merged_payload["content_markdown"]
+            ):
+                continue
+            store.upsert(merged_payload)
+            updated_memory_ids.append(snapshot_memory.memory_id)
+
+        write_long_term_memory_snapshot_sync_state(
+            resolved_user_root_dir,
+            snapshot=snapshot,
+            action="merge",
+        )
+        summary = LongTermMemorySnapshotApplySummary(
+            snapshot_id=snapshot.snapshot_id,
+            fingerprint=snapshot.fingerprint,
+            action="merge",
+            user_root_dir=str(resolved_user_root_dir),
+            project_root_dir=str(resolved_project_root_dir),
+            created_memory_ids=created_memory_ids,
+            updated_memory_ids=updated_memory_ids,
+        )
+    except Exception as exc:
+        _emit_snapshot_apply_error(
+            action="merge",
+            user_root_dir=Path(user_root_dir).expanduser().resolve(),
+            project_root_dir=Path(project_root_dir).expanduser().resolve(),
+            snapshot_id=str(snapshot_id or "").strip(),
+            error=exc,
+        )
+        raise
+
+    _emit_snapshot_apply_success(summary)
+    return summary
+
+
+def replace_long_term_memory_snapshot(
+    user_root_dir: str | Path,
+    project_root_dir: str | Path,
+    *,
+    snapshot_id: str = "",
+) -> LongTermMemorySnapshotApplySummary:
+    created_memory_ids: list[str] = []
+    deleted_memory_ids: list[str] = []
+    try:
+        resolved_user_root_dir, resolved_project_root_dir, snapshot = _resolve_snapshot_apply_inputs(
+            user_root_dir,
+            project_root_dir,
+            snapshot_id=snapshot_id,
+        )
+        store = FileLongTermMemoryStore(resolved_user_root_dir)
+        existing_entries = {entry.memory_id: entry for entry in list_long_term_memories(resolved_user_root_dir)}
+        for memory_id in sorted(existing_entries):
+            if delete_long_term_memory(resolved_user_root_dir, memory_id):
+                deleted_memory_ids.append(memory_id)
+
+        for snapshot_memory in snapshot.memories:
+            store.upsert(_build_snapshot_memory_write(snapshot_memory))
+            created_memory_ids.append(snapshot_memory.memory_id)
+
+        write_long_term_memory_snapshot_sync_state(
+            resolved_user_root_dir,
+            snapshot=snapshot,
+            action="replace",
+        )
+        summary = LongTermMemorySnapshotApplySummary(
+            snapshot_id=snapshot.snapshot_id,
+            fingerprint=snapshot.fingerprint,
+            action="replace",
+            user_root_dir=str(resolved_user_root_dir),
+            project_root_dir=str(resolved_project_root_dir),
+            created_memory_ids=created_memory_ids,
+            deleted_memory_ids=deleted_memory_ids,
+        )
+    except Exception as exc:
+        _emit_snapshot_apply_error(
+            action="replace",
+            user_root_dir=Path(user_root_dir).expanduser().resolve(),
+            project_root_dir=Path(project_root_dir).expanduser().resolve(),
+            snapshot_id=str(snapshot_id or "").strip(),
+            error=exc,
+        )
+        raise
+
+    _emit_snapshot_apply_success(summary)
+    return summary
+
+
+def normalize_long_term_memory_snapshot_choice(value: LongTermMemorySnapshotChoice | str) -> LongTermMemorySnapshotChoice:
+    normalized = str(value or "").strip().lower()
+    if normalized not in {"keep", "merge", "replace"}:
+        raise LongTermMemorySnapshotError(f"Unsupported snapshot update choice: {value}")
+    return normalized  # type: ignore[return-value]
+
+
+def _resolve_snapshot_apply_inputs(
+    user_root_dir: str | Path,
+    project_root_dir: str | Path,
+    *,
+    snapshot_id: str = "",
+) -> tuple[Path, Path, LongTermMemorySnapshot]:
+    resolved_user_root_dir = Path(user_root_dir).expanduser().resolve()
+    resolved_project_root_dir = Path(project_root_dir).expanduser().resolve()
+    snapshot = select_long_term_memory_snapshot(project_root_dir, snapshot_id=snapshot_id)
+    if snapshot is None:
+        raise LongTermMemorySnapshotError("No project-provided memory snapshot is available.")
+    resolved_user_root_dir.mkdir(parents=True, exist_ok=True)
+    return resolved_user_root_dir, resolved_project_root_dir, snapshot
+
+
+def _emit_snapshot_apply_success(summary: LongTermMemorySnapshotApplySummary) -> None:
     emit_memory_telemetry(
         logger,
         "snapshots.apply",
@@ -297,14 +402,26 @@ def apply_long_term_memory_snapshot(
         updated_count=len(summary.updated_memory_ids),
         deleted_count=len(summary.deleted_memory_ids),
     )
-    return summary
 
 
-def normalize_long_term_memory_snapshot_choice(value: LongTermMemorySnapshotChoice | str) -> LongTermMemorySnapshotChoice:
-    normalized = str(value or "").strip().lower()
-    if normalized not in {"keep", "merge", "replace"}:
-        raise LongTermMemorySnapshotError(f"Unsupported snapshot update choice: {value}")
-    return normalized  # type: ignore[return-value]
+def _emit_snapshot_apply_error(
+    *,
+    action: str,
+    user_root_dir: Path,
+    project_root_dir: Path,
+    snapshot_id: str,
+    error: Exception,
+) -> None:
+    emit_memory_telemetry(
+        logger,
+        "snapshots.apply",
+        status="error",
+        action=action,
+        user_root_dir=user_root_dir,
+        project_root_dir=project_root_dir,
+        snapshot_id=snapshot_id,
+        error=str(error),
+    )
 
 
 def build_long_term_memory_snapshot_fingerprint(memories: list[LongTermMemoryFile]) -> str:
