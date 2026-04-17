@@ -7,6 +7,7 @@ This folder is scaffolding for Jade's future memory subsystem. It adds names, pa
 - `paths.py`: resolves the future memory work directory and the default paths for session memory, long-term memory, retrieval artifacts, and compaction artifacts.
 - `types.py`: shared contracts for session memory snapshots, long-term memory records, retrieval queries/results, and compaction requests/summaries.
 - `interfaces.py`: backend protocols for the future session-memory store, long-term-memory store, retrieval layer, and compactor.
+- `long_term.py`: reads and validates file-based long-term memory from disk.
 - `__init__.py`: convenience exports for the package surface.
 
 ## Runtime Concepts
@@ -35,9 +36,43 @@ By default, `MEMORY_WORK_DIR` resolves to `runtime/memory/` and future memory as
 runtime/memory/
   session_memory.json
   long_term/
+    MEMORY.md
+    topics/
+      project_overview.md
   retrieval/
   compaction/
 ```
+
+## Long-Term Memory File Format
+
+The long-term memory loader expects a required root index file plus Markdown topic files:
+
+- `long_term/MEMORY.md`: required index file
+- `long_term/**/*.md`: topic files, excluding the index file itself
+
+Each file must start with frontmatter containing:
+
+```yaml
+---
+name: Project Overview
+description: Durable context for the current roadmap and release work.
+type: project
+---
+```
+
+Supported `type` values:
+
+- `user`
+- `feedback`
+- `project`
+- `reference`
+
+The loader validates that:
+
+- a `MEMORY` index file exists at the root of the long-term memory directory
+- each memory file has frontmatter
+- `name`, `description`, and `type` are present and non-empty
+- `type` is one of the supported values above
 
 ## Current Repo Mapping
 

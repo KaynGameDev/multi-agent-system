@@ -11,6 +11,7 @@ from app import config as config_module
 from app.config import load_settings
 from app.memory.paths import (
     build_memory_subsystem_paths,
+    resolve_long_term_memory_index_path,
     resolve_memory_work_dir,
 )
 from app.memory.types import (
@@ -66,8 +67,10 @@ class MemoryScaffoldingTests(unittest.TestCase):
         self.assertEqual(paths.work_dir, expected_root)
         self.assertEqual(paths.session_memory_store_path, expected_root / "session_memory.json")
         self.assertEqual(paths.long_term_memory_dir, expected_root / "long_term")
+        self.assertEqual(paths.long_term_memory_index_path, expected_root / "long_term" / "MEMORY.md")
         self.assertEqual(paths.retrieval_dir, expected_root / "retrieval")
         self.assertEqual(paths.compaction_dir, expected_root / "compaction")
+        self.assertEqual(resolve_long_term_memory_index_path(settings), expected_root / "long_term" / "MEMORY.md")
 
     def test_memory_contract_models_cover_session_long_term_retrieval_and_compaction(self) -> None:
         session_snapshot = SessionMemorySnapshot(

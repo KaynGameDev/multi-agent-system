@@ -6,6 +6,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from typing_extensions import Literal
 
 MemoryScope = Literal["thread", "user", "workspace", "global"]
+LongTermMemoryType = Literal["user", "feedback", "project", "reference"]
 
 
 class MemoryReference(BaseModel):
@@ -68,6 +69,63 @@ class LongTermMemoryRecord(BaseModel):
     @classmethod
     def validate_optional_record_text_fields(cls, value: str) -> str:
         return str(value or "").strip()
+
+
+class LongTermMemoryFrontmatter(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    name: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    memory_type: LongTermMemoryType = Field(alias="type")
+
+    @field_validator("name", "description")
+    @classmethod
+    def validate_required_frontmatter_text(cls, value: str) -> str:
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            raise ValueError("Value must not be empty.")
+        return cleaned
+
+
+class LongTermMemoryFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    memory_id: str = Field(min_length=1)
+    relative_path: str = Field(min_length=1)
+    source_path: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    memory_type: LongTermMemoryType
+    content_markdown: str = ""
+
+    @field_validator("memory_id", "relative_path", "source_path", "name", "description")
+    @classmethod
+    def validate_required_file_text(cls, value: str) -> str:
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            raise ValueError("Value must not be empty.")
+        return cleaned
+
+    @field_validator("content_markdown")
+    @classmethod
+    def validate_optional_file_content(cls, value: str) -> str:
+        return str(value or "").strip()
+
+
+class LongTermMemoryCatalog(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    root_dir: str = Field(min_length=1)
+    index_file: LongTermMemoryFile
+    topic_files: list[LongTermMemoryFile] = Field(default_factory=list)
+
+    @field_validator("root_dir")
+    @classmethod
+    def validate_required_catalog_text(cls, value: str) -> str:
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            raise ValueError("Value must not be empty.")
+        return cleaned
 
 
 class MemoryRetrievalQuery(BaseModel):
