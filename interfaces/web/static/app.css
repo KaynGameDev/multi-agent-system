@@ -468,6 +468,91 @@ button {
   width: min(100%, 48rem);
 }
 
+.chat-mode-toggle {
+  display: flex;
+  width: min(100%, 48rem);
+  align-items: center;
+  justify-content: space-between;
+  gap: 1rem;
+  margin-bottom: 1rem;
+  border: 1px solid rgba(15, 118, 110, 0.18);
+  border-radius: 1.15rem;
+  padding: 0.85rem 1rem;
+  background: rgba(255, 255, 255, 0.82);
+  box-shadow: 0 10px 30px rgba(15, 23, 42, 0.05);
+}
+
+.chat-mode-toggle[hidden] {
+  display: none !important;
+}
+
+.chat-mode-toggle__copy {
+  display: flex;
+  min-width: 0;
+  flex-direction: column;
+  gap: 0.2rem;
+}
+
+.chat-mode-toggle__label {
+  font-size: 0.78rem;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--accent-strong);
+}
+
+.chat-mode-toggle__text {
+  font-size: 0.88rem;
+  line-height: 1.45;
+  color: var(--text-muted);
+}
+
+.chat-mode-toggle__switch {
+  display: inline-flex;
+  flex-shrink: 0;
+  align-items: center;
+  gap: 0.7rem;
+  border: 1px solid rgba(15, 118, 110, 0.22);
+  border-radius: 999px;
+  padding: 0.45rem 0.55rem;
+  color: var(--accent-strong);
+  background: rgba(15, 118, 110, 0.08);
+  transition: transform 140ms ease, background 140ms ease, border-color 140ms ease;
+}
+
+.chat-mode-toggle__switch:hover,
+.chat-mode-toggle__switch:focus-visible {
+  transform: translateY(-1px);
+  border-color: rgba(15, 118, 110, 0.3);
+  background: rgba(15, 118, 110, 0.12);
+}
+
+.chat-mode-toggle__switch-track {
+  position: relative;
+  display: inline-flex;
+  width: 2.6rem;
+  height: 1.45rem;
+  align-items: center;
+  border-radius: 999px;
+  background: linear-gradient(135deg, var(--accent) 0%, var(--accent-strong) 100%);
+  box-shadow: inset 0 1px 1px rgba(255, 255, 255, 0.18);
+}
+
+.chat-mode-toggle__switch-knob {
+  position: absolute;
+  right: 0.16rem;
+  width: 1.1rem;
+  height: 1.1rem;
+  border-radius: 50%;
+  background: #ffffff;
+  box-shadow: 0 3px 8px rgba(15, 23, 42, 0.18);
+}
+
+.chat-mode-toggle__switch-text {
+  font-size: 0.9rem;
+  font-weight: 700;
+}
+
 .empty-state {
   display: grid;
   gap: 1rem;
@@ -890,6 +975,16 @@ button {
 
   .composer {
     grid-template-columns: 1fr;
+  }
+
+  .chat-mode-toggle {
+    flex-direction: column;
+    align-items: stretch;
+  }
+
+  .chat-mode-toggle__switch {
+    width: 100%;
+    justify-content: center;
   }
 
   .composer button {

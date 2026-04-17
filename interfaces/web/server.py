@@ -20,6 +20,7 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.checkpoints import GraphCheckpointStore
 from app.config import Settings
+from app.conversation_mode import conversation_mode_for_requested_agent
 from app.context_window import (
     ContextWindowThresholdOverrides,
     USAGE_BASELINE_STAGE_BEFORE_MESSAGE,
@@ -266,13 +267,14 @@ class WebServer:
         def create_conversation(request: Request, payload: ConversationCreateRequest | None = None) -> dict:
             self._require_api_auth(request)
             title = (payload.title if payload is not None else "New chat").strip() or "New chat"
-            return self.conversation_store.create_conversation(title=title)
+            conversation = self.conversation_store.create_conversation(title=title)
+            return {**conversation, "mode": ""}
 
         @app.get("/api/conversations/{conversation_id}")
         def get_conversation(request: Request, conversation_id: str) -> dict:
             self._require_api_auth(request)
             try:
-                return self.conversation_store.get_conversation(conversation_id)
+                return self._build_public_conversation_payload(conversation_id)
             except ConversationNotFoundError as exc:
                 raise HTTPException(status_code=404, detail="Conversation not found.") from exc
 
@@ -319,7 +321,7 @@ class WebServer:
         def send_message(request: Request, conversation_id: str, payload: WebMessageRequest) -> dict:
             self._require_api_auth(request)
             try:
-                self.conversation_store.get_conversation(conversation_id)
+                self._build_public_conversation_payload(conversation_id)
             except ConversationNotFoundError as exc:
                 raise HTTPException(status_code=404, detail="Conversation not found.") from exc
 
@@ -434,7 +436,7 @@ class WebServer:
                     thread_id=thread_id,
                     conversation=self.conversation_store.get_full_conversation(conversation_id),
                 )
-            conversation = self.conversation_store.get_conversation(conversation_id)
+            conversation = self._build_public_conversation_payload(conversation_id)
             return {
                 **conversation,
                 "assistant_message": conversation["messages"][-1],
@@ -484,6 +486,9 @@ class WebServer:
             "conversion_session_id": active_session.session_id if active_session is not None else "",
             **user_context,
         }
+        requested_agent = self._resolve_requested_agent_from_transcript(conversation)
+        if requested_agent:
+            initial_state["requested_agent"] = requested_agent
         return self._apply_transcript_rehydration(
             initial_state,
             conversation=conversation,
@@ -744,7 +749,7 @@ class WebServer:
         context_compaction: dict[str, Any],
         limit_recovery: dict[str, Any] | None = None,
     ) -> JSONResponse:
-        conversation = self.conversation_store.get_conversation(conversation_id)
+        conversation = self._build_public_conversation_payload(conversation_id)
         payload = {
             **conversation,
             "assistant_message": None,
@@ -935,7 +940,30 @@ class WebServer:
             sorted(runtime_rehydration_state.keys()),
             runtime_rehydration_state.get("recent_file_reads", []),
         )
+        requested_agent = self._resolve_requested_agent_from_transcript(conversation)
+        merged_state["requested_agent"] = requested_agent
         return merged_state
+
+    def _build_public_conversation_payload(self, conversation_id: str) -> dict[str, Any]:
+        public_conversation = self.conversation_store.get_conversation(conversation_id)
+        full_conversation = self.conversation_store.get_full_conversation(conversation_id)
+        return {
+            **public_conversation,
+            "mode": conversation_mode_for_requested_agent(
+                self._resolve_requested_agent_from_transcript(full_conversation)
+            ),
+        }
+
+    def _resolve_requested_agent_from_transcript(self, conversation: dict[str, Any]) -> str:
+        transcript_messages = conversation.get("messages", [])
+        if not isinstance(transcript_messages, list):
+            return ""
+
+        runtime_rehydration_state = extract_runtime_rehydration_state_from_transcript(
+            transcript_messages,
+            require_compact_boundary=False,
+        )
+        return str(runtime_rehydration_state.get("requested_agent", "") or "").strip()
 
     def _augment_transcript_metadata_with_runtime_state(
         self,
