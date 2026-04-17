@@ -1,12 +1,13 @@
 # Memory Subsystem
 
-This folder contains the shared memory subsystem surface for Jade, including the file-based long-term memory format and persistent store helpers.
+This folder contains the shared memory subsystem surface for Jade, including file-based session memory, file-based long-term memory, and persistent store helpers.
 
 ## Folder Layout
 
 - `paths.py`: resolves the future memory work directory and the default paths for session memory, long-term memory, retrieval artifacts, and compaction artifacts.
 - `types.py`: shared contracts for session memory snapshots, long-term memory records, retrieval queries/results, and compaction requests/summaries.
 - `interfaces.py`: backend protocols for the future session-memory store, long-term-memory store, retrieval layer, and compactor.
+- `session_files.py`: creates, reads, and updates per-conversation Markdown session files with a fixed template.
 - `long_term.py`: reads, validates, and mutates file-based long-term memory on disk.
 - `retrieval.py`: header-first retrieval helpers that rank index entries before opening a few topic files.
 - `__init__.py`: convenience exports for the package surface.
@@ -16,6 +17,16 @@ This folder contains the shared memory subsystem surface for Jade, including the
 ### Session memory
 
 Session memory is short-lived conversation memory keyed to a thread. In Jade, it represents durable continuation context that helps after transcript compaction, but it is still scoped to the current conversation rather than being a permanent knowledge store.
+
+The current file-backed session template lives under `sessions/` and gives each conversation a dedicated Markdown summary file with these fixed sections:
+
+- current state
+- task spec
+- key files
+- workflow
+- errors/corrections
+- learnings
+- worklog
 
 ### Long-term memory
 
@@ -43,6 +54,9 @@ By default, `MEMORY_WORK_DIR` resolves to `runtime/memory/` and future memory as
 ```text
 runtime/memory/
   session_memory.json
+  sessions/
+    web/
+      conversation-id.md
   long_term/
     MEMORY.md
     topics/
@@ -50,6 +64,50 @@ runtime/memory/
   retrieval/
   compaction/
 ```
+
+`session_memory.json` remains the compact machine-oriented store used by the live runtime today. The per-session files under `sessions/` are the human-readable companion files for each conversation.
+
+## Session Memory File Format
+
+Each session file is a Markdown document with frontmatter plus a fixed section template. The frontmatter declares the conversation id and template metadata:
+
+```yaml
+---
+thread_id: web:test-thread
+kind: session_memory
+template_version: 1
+---
+```
+
+The body uses this fixed heading layout:
+
+```md
+# Session Memory
+
+## Current State
+
+## Task Spec
+
+## Key Files
+
+## Workflow
+
+## Errors/Corrections
+
+## Learnings
+
+## Worklog
+```
+
+`session_files.py` validates that:
+
+- the file declares `thread_id` in frontmatter
+- `kind`, when present, is `session_memory`
+- `template_version` matches the current template version
+- all required sections are present
+- `Key Files` uses markdown bullet items
+
+The helpers can create a blank template, read a session file from disk, and update only selected sections while preserving the rest of the document.
 
 ## Long-Term Memory File Format
 

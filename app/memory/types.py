@@ -8,6 +8,15 @@ from typing_extensions import Literal
 MemoryScope = Literal["thread", "user", "workspace", "global"]
 LongTermMemoryType = Literal["user", "feedback", "project", "reference"]
 AgentMemoryScope = Literal["user", "project", "local"]
+SessionMemorySectionName = Literal[
+    "current_state",
+    "task_spec",
+    "key_files",
+    "workflow",
+    "errors_corrections",
+    "learnings",
+    "worklog",
+]
 
 
 class MemoryReference(BaseModel):
@@ -46,6 +55,117 @@ class SessionMemorySnapshot(BaseModel):
     @classmethod
     def validate_optional_text_fields(cls, value: str) -> str:
         return str(value or "").strip()
+
+
+class SessionMemoryFile(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    thread_id: str = Field(min_length=1)
+    source_path: str = ""
+    current_state: str = ""
+    task_spec: str = ""
+    key_files: list[str] = Field(default_factory=list)
+    workflow: str = ""
+    errors_corrections: str = ""
+    learnings: str = ""
+    worklog: str = ""
+
+    @field_validator("thread_id")
+    @classmethod
+    def validate_required_thread_id(cls, value: str) -> str:
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            raise ValueError("Value must not be empty.")
+        return cleaned
+
+    @field_validator(
+        "source_path",
+        "current_state",
+        "task_spec",
+        "workflow",
+        "errors_corrections",
+        "learnings",
+        "worklog",
+    )
+    @classmethod
+    def validate_optional_session_memory_text(cls, value: str) -> str:
+        return str(value or "").strip()
+
+    @field_validator("key_files", mode="before")
+    @classmethod
+    def normalize_key_files(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("key_files must be a list of strings.")
+        return [str(item) for item in value]
+
+    @field_validator("key_files")
+    @classmethod
+    def validate_key_files(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            cleaned = str(item or "").strip()
+            if not cleaned or cleaned in seen:
+                continue
+            seen.add(cleaned)
+            normalized.append(cleaned)
+        return normalized
+
+
+class SessionMemoryFileUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    current_state: str | None = None
+    task_spec: str | None = None
+    key_files: list[str] | None = None
+    workflow: str | None = None
+    errors_corrections: str | None = None
+    learnings: str | None = None
+    worklog: str | None = None
+
+    @field_validator(
+        "current_state",
+        "task_spec",
+        "workflow",
+        "errors_corrections",
+        "learnings",
+        "worklog",
+    )
+    @classmethod
+    def validate_optional_session_memory_update_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        return str(value).strip()
+
+    @field_validator("key_files", mode="before")
+    @classmethod
+    def normalize_update_key_files(cls, value: Any) -> list[str] | None:
+        if value is None:
+            return None
+        if isinstance(value, str):
+            return [value]
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("key_files must be a list of strings.")
+        return [str(item) for item in value]
+
+    @field_validator("key_files")
+    @classmethod
+    def validate_update_key_files(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            cleaned = str(item or "").strip()
+            if not cleaned or cleaned in seen:
+                continue
+            seen.add(cleaned)
+            normalized.append(cleaned)
+        return normalized
 
 
 class LongTermMemoryRecord(BaseModel):

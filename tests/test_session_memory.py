@@ -4,6 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from app.memory.session_files import get_session_memory_file
 from app.session_memory import (
     SessionMemoryRecord,
     SessionMemoryStore,
@@ -134,6 +135,32 @@ class SessionMemoryTests(unittest.TestCase):
 
         reloaded_store = SessionMemoryStore(storage_path)
         self.assertEqual(reloaded_store.get("web:test"), record)
+        synced_file = get_session_memory_file(storage_path.parent / "sessions", "web:test")
+        self.assertIsNotNone(synced_file)
+        self.assertEqual(synced_file.current_state, record.summary_markdown)
+
+    def test_session_memory_store_delete_removes_session_file(self) -> None:
+        temp_dir = tempfile.TemporaryDirectory()
+        self.addCleanup(temp_dir.cleanup)
+        storage_path = Path(temp_dir.name) / "session_memory.json"
+        store = SessionMemoryStore(storage_path)
+
+        store.upsert(
+            SessionMemoryRecord(
+                thread_id="web:test",
+                updated_at="2026-04-16T00:00:03+00:00",
+                last_message_id="a2",
+                last_message_created_at="2026-04-16T00:00:03+00:00",
+                covered_message_count=4,
+                covered_tokens=512,
+                summary_markdown="## Continuation Summary\nRemember the architecture checklist comparison.",
+                source="update",
+            )
+        )
+
+        self.assertIsNotNone(get_session_memory_file(storage_path.parent / "sessions", "web:test"))
+        store.delete("web:test")
+        self.assertIsNone(get_session_memory_file(storage_path.parent / "sessions", "web:test"))
 
     def test_compaction_plan_requires_delta_to_fit_preserved_tail(self) -> None:
         messages = [

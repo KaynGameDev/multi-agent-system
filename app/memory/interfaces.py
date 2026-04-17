@@ -10,6 +10,8 @@ from app.memory.types import (
     LongTermMemoryWrite,
     MemoryRetrievalQuery,
     MemoryRetrievalResult,
+    SessionMemoryFile,
+    SessionMemoryFileUpdate,
     SessionMemorySnapshot,
 )
 
@@ -22,6 +24,20 @@ class SessionMemoryBackend(Protocol):
         ...
 
     def delete(self, thread_id: str) -> None:
+        ...
+
+
+class SessionMemoryFileBackend(Protocol):
+    def ensure(self, thread_id: str) -> SessionMemoryFile:
+        ...
+
+    def get(self, thread_id: str) -> SessionMemoryFile | None:
+        ...
+
+    def update(self, thread_id: str, patch: SessionMemoryFileUpdate) -> SessionMemoryFile:
+        ...
+
+    def delete(self, thread_id: str) -> bool:
         ...
 
 

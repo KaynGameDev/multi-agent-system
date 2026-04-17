@@ -11,6 +11,7 @@ from threading import RLock
 from typing import Any
 
 from app.context_window import token_count_with_estimation
+from app.memory.session_files import delete_session_memory_file, update_session_memory_file
 
 logger = logging.getLogger(__name__)
 
@@ -44,6 +45,7 @@ class SessionMemoryCompactionPlan:
 class SessionMemoryStore:
     def __init__(self, storage_path: str | Path) -> None:
         self._storage_path = Path(storage_path).expanduser().resolve()
+        self._session_files_root_dir = self._storage_path.parent / "sessions"
         self._records: dict[str, SessionMemoryRecord] = {}
         self._lock = RLock()
         self._load()
@@ -63,6 +65,7 @@ class SessionMemoryStore:
         with self._lock:
             self._records[normalized_record.thread_id] = normalized_record
             self._persist_locked()
+            self._sync_session_file_locked(normalized_record)
             return deepcopy(normalized_record)
 
     def delete(self, thread_id: str) -> None:
@@ -74,6 +77,7 @@ class SessionMemoryStore:
                 return
             self._records.pop(normalized_thread_id, None)
             self._persist_locked()
+            self._delete_session_file_locked(normalized_thread_id)
 
     def _load(self) -> None:
         with self._lock:
@@ -116,6 +120,32 @@ class SessionMemoryStore:
             temp_file.write("\n")
             temp_path = Path(temp_file.name)
         temp_path.replace(self._storage_path)
+
+    def _sync_session_file_locked(self, record: SessionMemoryRecord) -> None:
+        try:
+            update_session_memory_file(
+                self._session_files_root_dir,
+                record.thread_id,
+                {"current_state": record.summary_markdown},
+            )
+        except Exception:
+            logger.warning(
+                "Failed to sync session memory file for thread %s under %s",
+                record.thread_id,
+                self._session_files_root_dir,
+                exc_info=True,
+            )
+
+    def _delete_session_file_locked(self, thread_id: str) -> None:
+        try:
+            delete_session_memory_file(self._session_files_root_dir, thread_id)
+        except Exception:
+            logger.warning(
+                "Failed to delete session memory file for thread %s under %s",
+                thread_id,
+                self._session_files_root_dir,
+                exc_info=True,
+            )
 
 
 def normalize_session_memory_record(value: SessionMemoryRecord | dict[str, Any] | None) -> SessionMemoryRecord | None:

@@ -14,6 +14,7 @@ from app.memory.paths import (
     resolve_long_term_memory_index_path,
     resolve_long_term_memory_topics_dir,
     resolve_memory_work_dir,
+    resolve_session_memory_dir,
 )
 from app.memory.types import (
     ConversationCompactionRequest,
@@ -23,6 +24,8 @@ from app.memory.types import (
     MemoryReference,
     MemoryRetrievalQuery,
     MemoryRetrievalResult,
+    SessionMemoryFile,
+    SessionMemoryFileUpdate,
     SessionMemorySnapshot,
 )
 from app.paths import PROJECT_ROOT
@@ -69,11 +72,13 @@ class MemoryScaffoldingTests(unittest.TestCase):
         self.assertEqual(resolve_memory_work_dir(settings), expected_root)
         self.assertEqual(paths.work_dir, expected_root)
         self.assertEqual(paths.session_memory_store_path, expected_root / "session_memory.json")
+        self.assertEqual(paths.session_memory_dir, expected_root / "sessions")
         self.assertEqual(paths.long_term_memory_dir, expected_root / "long_term")
         self.assertEqual(paths.long_term_memory_index_path, expected_root / "long_term" / "MEMORY.md")
         self.assertEqual(paths.long_term_memory_topics_dir, expected_root / "long_term" / "topics")
         self.assertEqual(paths.retrieval_dir, expected_root / "retrieval")
         self.assertEqual(paths.compaction_dir, expected_root / "compaction")
+        self.assertEqual(resolve_session_memory_dir(settings), expected_root / "sessions")
         self.assertEqual(resolve_long_term_memory_index_path(settings), expected_root / "long_term" / "MEMORY.md")
         self.assertEqual(resolve_long_term_memory_topics_dir(settings), expected_root / "long_term" / "topics")
 
@@ -86,6 +91,28 @@ class MemoryScaffoldingTests(unittest.TestCase):
             covered_tokens=512,
         )
         self.assertEqual(session_snapshot.thread_id, "web:test-thread")
+
+        session_file = SessionMemoryFile(
+            thread_id="web:test-thread",
+            source_path="/tmp/runtime/memory/sessions/web/test-thread.md",
+            current_state="Implementing session memory files.",
+            task_spec="Create one file per conversation.",
+            key_files=["app/memory/session_files.py"],
+            workflow="Inspect, implement, test.",
+            errors_corrections="Adjusted the path layout to use sessions/.",
+            learnings="Separate the file layer from the JSON store.",
+            worklog="- Added the scaffold.",
+        )
+        self.assertEqual(session_file.key_files, ["app/memory/session_files.py"])
+
+        session_update = SessionMemoryFileUpdate(
+            current_state="Updated current state.",
+            key_files=["app/session_memory.py", "app/memory/session_files.py"],
+        )
+        self.assertEqual(
+            session_update.key_files,
+            ["app/session_memory.py", "app/memory/session_files.py"],
+        )
 
         record = LongTermMemoryRecord(
             memory_id="mem-001",
