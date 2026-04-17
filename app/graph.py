@@ -6,6 +6,7 @@ from collections.abc import Iterable, Sequence
 from langgraph.graph import END, START, StateGraph
 from langgraph.prebuilt import ToolNode, tools_condition
 
+from agents.conversation_mode.agent import ConversationModeAgentNode
 from agents.document_conversion.agent import DocumentConversionAgentNode
 from agents.general_chat.agent import GeneralChatAgentNode
 from agents.knowledge.agent import KnowledgeAgentNode
@@ -138,6 +139,13 @@ def build_default_agent_registrations(
             selection_order=10,
             skill_namespace="document_conversion",
         ),
+        AgentRegistration(
+            name="conversation_mode_agent",
+            description="Internal session-control agent for explicit conversation mode commands.",
+            build_node=lambda _llm=None, skill_registry=None, pending_action_router=None: ConversationModeAgentNode(),
+            selection_order=999,
+            skill_namespace="",
+        ),
     )
 
 
@@ -152,6 +160,7 @@ def build_web_agent_registrations(
         "knowledge_base_builder_agent",
         "project_task_agent",
         "document_conversion_agent",
+        "conversation_mode_agent",
     }
     return tuple(
         registration

@@ -6,14 +6,18 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+from agents.conversation_mode.agent import ConversationModeAgentNode
+from app.contracts import build_assistant_response
+from app.graph import build_graph
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
+from langgraph.checkpoint.memory import InMemorySaver
 
 from app.rehydration import RUNTIME_REHYDRATION_METADATA_KEY
 from app.config import WebAuthCredential
 from interfaces.web.conversations import TRANSCRIPT_TYPE_COMPACT_BOUNDARY
 from interfaces.web.server import WebServer
-from tests.common import make_settings
+from tests.common import build_registration, make_settings
 
 
 class DummyGraph:
@@ -50,6 +54,17 @@ class RecordingGraph:
             "agent_selection_diagnostics": [],
             "selection_warnings": [],
             "messages": [AIMessage(content=self.reply_text)],
+        }
+
+
+class StaticReplyNode:
+    def __init__(self, reply_text: str) -> None:
+        self.reply_text = reply_text
+
+    def __call__(self, _state):
+        return {
+            "messages": [AIMessage(content=self.reply_text)],
+            "assistant_response": build_assistant_response(kind="text", content=self.reply_text),
         }
 
 
@@ -845,6 +860,83 @@ class WebServerApiTests(unittest.TestCase):
         self.assertTrue(second_payload["context_window"]["decision"]["auto_compact_breaker_open"])
         self.assertIn("paused after repeated failures", second_payload["detail"])
         self.assertEqual(graph.invoke_count, 0)
+
+    def test_kb_command_toggles_sticky_knowledge_build_mode(self) -> None:
+        registrations = (
+            build_registration(
+                "general_chat_agent",
+                namespace="general_chat",
+                is_general_assistant=True,
+                selection_order=30,
+                build_node=lambda _llm=None, skill_registry=None: StaticReplyNode("General reply."),
+            ),
+            build_registration(
+                "knowledge_base_builder_agent",
+                namespace="knowledge_base_builder",
+                selection_order=20,
+                build_node=lambda _llm=None, skill_registry=None: StaticReplyNode("Builder reply."),
+            ),
+            build_registration(
+                "conversation_mode_agent",
+                selection_order=999,
+                build_node=lambda _llm=None, skill_registry=None: ConversationModeAgentNode(),
+            ),
+        )
+        graph = build_graph(
+            None,
+            checkpointer=InMemorySaver(),
+            agent_registrations=registrations,
+            default_route="general_chat_agent",
+        )
+        server = WebServer(agent_graph=graph, settings=self.settings)
+        client = TestClient(server.app)
+
+        conversation = client.post("/api/conversations", json={"title": "Knowledge mode"}).json()
+        conversation_id = conversation["conversation_id"]
+
+        enabled = client.post(
+            f"/api/conversations/{conversation_id}/messages",
+            json={"message": "/kb", "display_name": "Tester", "email": "tester@example.com"},
+        )
+        self.assertEqual(enabled.status_code, 200)
+        enabled_payload = enabled.json()
+        self.assertEqual(enabled_payload["mode"], "knowledge_build")
+        self.assertEqual(enabled_payload["route"], "conversation_mode_agent")
+        self.assertIn("Knowledge Build Mode is on.", enabled_payload["assistant_message"]["markdown"])
+
+        routed_to_builder = client.post(
+            f"/api/conversations/{conversation_id}/messages",
+            json={"message": "Please outline the next document.", "display_name": "Tester", "email": "tester@example.com"},
+        )
+        self.assertEqual(routed_to_builder.status_code, 200)
+        builder_payload = routed_to_builder.json()
+        self.assertEqual(builder_payload["mode"], "knowledge_build")
+        self.assertEqual(builder_payload["route"], "knowledge_base_builder_agent")
+        self.assertEqual(builder_payload["assistant_message"]["markdown"], "Builder reply.")
+
+        loaded = client.get(f"/api/conversations/{conversation_id}")
+        self.assertEqual(loaded.status_code, 200)
+        self.assertEqual(loaded.json()["mode"], "knowledge_build")
+
+        disabled = client.post(
+            f"/api/conversations/{conversation_id}/messages",
+            json={"message": "/kb off", "display_name": "Tester", "email": "tester@example.com"},
+        )
+        self.assertEqual(disabled.status_code, 200)
+        disabled_payload = disabled.json()
+        self.assertEqual(disabled_payload["mode"], "")
+        self.assertEqual(disabled_payload["route"], "conversation_mode_agent")
+        self.assertIn("Knowledge Build Mode is off.", disabled_payload["assistant_message"]["markdown"])
+
+        back_to_normal = client.post(
+            f"/api/conversations/{conversation_id}/messages",
+            json={"message": "hello again", "display_name": "Tester", "email": "tester@example.com"},
+        )
+        self.assertEqual(back_to_normal.status_code, 200)
+        normal_payload = back_to_normal.json()
+        self.assertEqual(normal_payload["mode"], "")
+        self.assertEqual(normal_payload["route"], "general_chat_agent")
+        self.assertEqual(normal_payload["assistant_message"]["markdown"], "General reply.")
 
 
 if __name__ == "__main__":

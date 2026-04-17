@@ -94,6 +94,26 @@
             </div>
           </div>
 
+          <div class="chat-mode-toggle" id="chatModeToggle" hidden>
+            <div class="chat-mode-toggle__copy">
+              <div class="chat-mode-toggle__label">Knowledge Build Mode</div>
+              <div class="chat-mode-toggle__text">On for this chat. Turn it off here to return to normal routing.</div>
+            </div>
+            <button
+              class="chat-mode-toggle__switch"
+              id="chatModeToggleButton"
+              type="button"
+              aria-pressed="true"
+              aria-label="Turn off Knowledge Build Mode"
+              title="Turn off Knowledge Build Mode"
+            >
+              <span class="chat-mode-toggle__switch-track">
+                <span class="chat-mode-toggle__switch-knob"></span>
+              </span>
+              <span class="chat-mode-toggle__switch-text">On</span>
+            </button>
+          </div>
+
           <div class="messages" id="messages"></div>
         </section>
 
@@ -111,7 +131,7 @@
               </svg>
             </button>
           </form>
-          <p class="composer-shell__hint">Google Docs and Sheets links can be converted here. Raw file uploads still happen in Slack for now.</p>
+          <p class="composer-shell__hint">Use `/kb` to enter Knowledge Build Mode. Google Docs and Sheets links can be converted here. Raw file uploads still happen in Slack for now.</p>
         </footer>
       </main>
     </div>

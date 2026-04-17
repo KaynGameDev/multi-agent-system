@@ -6,6 +6,11 @@ from typing import Any
 
 from langchain_core.messages import AIMessage
 
+from app.conversation_mode import (
+    CONVERSATION_MODE_COMMAND_AGENT,
+    ConversationModeCommand,
+    parse_conversation_mode_command,
+)
 from app.contracts import (
     AgentRouteDecision,
     ExecutionContract,
@@ -41,6 +46,7 @@ ROUTE_POLICY_FORKED_SKILL_FALLBACK = "forked_skill_fallback"
 ROUTE_POLICY_INLINE_SKILL_COMPATIBILITY = "inline_skill_compatibility"
 ROUTE_POLICY_PENDING_ACTION_OWNER = "pending_action_owner"
 ROUTE_POLICY_PENDING_ACTION_OWNER_FALLBACK = "pending_action_owner_fallback"
+ROUTE_POLICY_CONVERSATION_MODE_COMMAND = "conversation_mode_command"
 
 
 @dataclass(frozen=True)
@@ -105,6 +111,11 @@ class GatewayNode:
             state,
             general_assistant_name=self.general_assistant_name,
         )
+        conversation_mode_command = resolve_conversation_mode_command(
+            latest_user_text=request_context.latest_user_text,
+            current_requested_agent=request_context.requested_agent,
+            registrations_by_name=self.registrations_by_name,
+        )
         routing_state = dict(state)
 
         pa_ctx = self._resolve_pending_action_context(routing_state)
@@ -118,6 +129,7 @@ class GatewayNode:
             pending_action_turn=pa_ctx.pending_action_turn,
             latest_user_text=request_context.latest_user_text,
             requested_agent=request_context.requested_agent,
+            conversation_mode_command=conversation_mode_command,
             explicit_skill_definitions=explicit_skill_definitions,
             state=routing_state,
             agent_router=self.agent_router,
@@ -142,6 +154,11 @@ class GatewayNode:
             skill_diagnostics=skill_diagnostics,
         )
 
+        effective_requested_agent = (
+            conversation_mode_command.requested_agent
+            if conversation_mode_command is not None
+            else request_context.requested_agent
+        )
         routing_decision = build_routing_decision(
             selected_agent,
             reason=route_selection.route_reason,
@@ -149,7 +166,7 @@ class GatewayNode:
             warnings=skill_result.warnings,
             diagnostics=agent_diagnostics,
             selected_agent=selected_agent,
-            requested_agent=request_context.requested_agent,
+            requested_agent=effective_requested_agent,
             requested_skill_ids=list(request_context.requested_skill_ids),
             resolved_skill_ids=list(skill_result.resolved_skill_ids),
             skill_invocation_contracts=list(skill_result.skill_invocation_contracts),
@@ -158,7 +175,7 @@ class GatewayNode:
             "Gateway selected route=%s policy_step=%s requested_agent=%s requested_skills=%s resolved_skills=%s warnings=%s",
             selected_agent,
             policy_step,
-            request_context.requested_agent,
+            effective_requested_agent,
             request_context.requested_skill_ids,
             skill_result.resolved_skill_ids,
             skill_result.warnings,
@@ -187,6 +204,8 @@ class GatewayNode:
             "skill_execution_diagnostics": skill_result.skill_runtime_state["skill_execution_diagnostics"],
             "routing_decision": routing_decision,
         }
+        if conversation_mode_command is not None:
+            state_update["requested_agent"] = conversation_mode_command.requested_agent
         if expired_pending_action is not None:
             state_update["pending_action"] = expired_pending_action
         if expiry_messages:
@@ -349,6 +368,7 @@ def resolve_gateway_route_selection(
     pending_action_turn: PendingActionTurnResult | None,
     latest_user_text: str,
     requested_agent: str,
+    conversation_mode_command: ConversationModeCommand | None,
     explicit_skill_definitions: tuple[Any, ...],
     state: AgentState,
     agent_router: AgentRouter,
@@ -359,6 +379,12 @@ def resolve_gateway_route_selection(
     warnings: list[str],
 ) -> GatewayRouteSelection:
     resolved_warnings = list(warnings)
+    if conversation_mode_command is not None:
+        return resolve_conversation_mode_route_selection(
+            conversation_mode_command,
+            warnings=resolved_warnings,
+        )
+
     if pending_action_turn is not None and not pending_action_turn.allow_fresh_routing:
         return resolve_pending_action_route_selection(
             pending_action_turn,
@@ -480,6 +506,64 @@ def resolve_pending_action_route_selection(
                 "policy_step": ROUTE_POLICY_PENDING_ACTION_OWNER_FALLBACK,
                 "pending_action_id": pending_action_id,
                 "decision": pending_action_turn.pending_action_decision.decision,
+            },
+        ),
+    )
+
+
+def resolve_conversation_mode_command(
+    *,
+    latest_user_text: str,
+    current_requested_agent: str,
+    registrations_by_name: dict[str, Any],
+) -> ConversationModeCommand | None:
+    command = parse_conversation_mode_command(
+        latest_user_text,
+        current_requested_agent=current_requested_agent,
+    )
+    if command is None:
+        return None
+    if CONVERSATION_MODE_COMMAND_AGENT not in registrations_by_name:
+        return None
+    if command.requested_agent and command.requested_agent not in registrations_by_name:
+        return None
+    return command
+
+
+def resolve_conversation_mode_route_selection(
+    command: ConversationModeCommand,
+    *,
+    warnings: list[str],
+) -> GatewayRouteSelection:
+    mode_state = "enabled" if command.requested_agent else "disabled"
+    reason = f"Conversation mode command {mode_state} `{command.mode}`."
+    diagnostics = (
+        build_gateway_route_diagnostic(
+            kind="conversation_mode_command",
+            policy_step=ROUTE_POLICY_CONVERSATION_MODE_COMMAND,
+            selected_agent=CONVERSATION_MODE_COMMAND_AGENT,
+            reason=reason,
+            mode=command.mode,
+            action=command.action,
+            requested_agent=command.requested_agent,
+        ),
+    )
+    return GatewayRouteSelection(
+        selected_agent=CONVERSATION_MODE_COMMAND_AGENT,
+        policy_step=ROUTE_POLICY_CONVERSATION_MODE_COMMAND,
+        route_reason=reason,
+        diagnostics=diagnostics,
+        warnings=tuple(warnings),
+        agent_route_decision=build_gateway_agent_route_decision(
+            selected_agent=CONVERSATION_MODE_COMMAND_AGENT,
+            reason=reason,
+            fallback_used=False,
+            diagnostics={
+                "kind": "conversation_mode_command",
+                "policy_step": ROUTE_POLICY_CONVERSATION_MODE_COMMAND,
+                "mode": command.mode,
+                "action": command.action,
+                "requested_agent": command.requested_agent,
             },
         ),
     )
