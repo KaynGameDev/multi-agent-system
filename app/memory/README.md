@@ -8,6 +8,7 @@ This folder contains the shared memory subsystem surface for Jade, including the
 - `types.py`: shared contracts for session memory snapshots, long-term memory records, retrieval queries/results, and compaction requests/summaries.
 - `interfaces.py`: backend protocols for the future session-memory store, long-term-memory store, retrieval layer, and compactor.
 - `long_term.py`: reads, validates, and mutates file-based long-term memory on disk.
+- `retrieval.py`: header-first retrieval helpers that rank index entries before opening a few topic files.
 - `__init__.py`: convenience exports for the package surface.
 
 ## Runtime Concepts
@@ -23,6 +24,13 @@ Long-term memory is durable memory that survives beyond a single thread, checkpo
 ### Retrieval
 
 Retrieval is the lookup layer that searches long-term memory and returns the small set of records relevant to the current turn. Retrieval is separate from storage so the runtime can change backing stores later without changing the turn-time contract.
+
+The current file-based retrieval pass is intentionally header-first:
+
+- it scans `MEMORY.md` entries first
+- ranks candidates from `name`, `description`, `type`, id, and path metadata
+- skips memories already present in `context_paths` or `recent_file_reads`
+- opens only the top few topic files after ranking
 
 ### Compaction
 
@@ -104,6 +112,8 @@ Agent definitions can opt into a memory scope:
 - `local`: resolves under `long_term/agents/<agent>/local/`
 
 Scoped agent memory is exposed through dedicated memory tools rather than raw path input. The tool layer resolves the scope-specific directory from runtime state and only reads or writes inside that directory.
+
+When retrieval is enabled, scoped agents can also inject a compact `Relevant Memories` block into their prompt. That block is built from the agent's own scoped memory root only, so retrieval stays aligned with the same path-scoped permission boundary as read and write operations.
 
 ## Current Repo Mapping
 

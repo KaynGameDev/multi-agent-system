@@ -108,6 +108,7 @@ def build_project_task_prompt(
     ).strip()
     interface_name = str(state.get("interface_name", "")).strip().lower()
     today = date.today().isoformat()
+    latest_user_text = extract_latest_human_text(state)
     sections = load_prompt_sections(
         PROMPT_PATH,
         required_sections=(
@@ -143,6 +144,7 @@ def build_project_task_prompt(
                 agent_name=agent_name,
                 memory_scope=memory_scope,
                 state=state,
+                query_text=latest_user_text,
             )
         )
     if interface_name == "slack":

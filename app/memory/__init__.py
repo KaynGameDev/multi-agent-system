@@ -14,6 +14,7 @@ from app.memory.agent_scope import (
     build_agent_memory_prompt,
     normalize_agent_memory_scope_path,
     normalize_agent_memory_scope_segment,
+    retrieve_relevant_agent_memories,
     resolve_agent_memory_context,
     resolve_agent_memory_scope_key,
 )
@@ -48,7 +49,13 @@ from app.memory.paths import (
     resolve_retrieval_dir,
     resolve_session_memory_store_path,
 )
+from app.memory.retrieval import (
+    format_retrieved_memories_prompt,
+    normalize_loaded_memory_refs,
+    retrieve_relevant_long_term_memories,
+)
 from app.memory.types import (
+    AgentMemoryRetrievalResult,
     ConversationCompactionRequest,
     ConversationCompactionSummary,
     LongTermMemoryCatalog,
@@ -69,6 +76,7 @@ __all__ = [
     "ConversationCompactionRequest",
     "ConversationCompactionSummary",
     "ConversationCompactor",
+    "AgentMemoryRetrievalResult",
     "DEFAULT_LOCAL_MEMORY_KEY",
     "DEFAULT_LONG_TERM_MEMORY_INDEX_DESCRIPTION",
     "DEFAULT_LONG_TERM_MEMORY_INDEX_NAME",
@@ -100,10 +108,12 @@ __all__ = [
     "build_memory_subsystem_paths",
     "delete_long_term_memory",
     "format_long_term_memory_index",
+    "format_retrieved_memories_prompt",
     "get_long_term_memory",
     "list_long_term_memories",
     "load_long_term_memory_catalog",
     "load_long_term_memory_file",
+    "normalize_loaded_memory_refs",
     "normalize_agent_memory_scope_path",
     "normalize_agent_memory_scope_segment",
     "normalize_long_term_memory_id",
@@ -119,5 +129,7 @@ __all__ = [
     "resolve_memory_work_dir",
     "resolve_retrieval_dir",
     "resolve_session_memory_store_path",
+    "retrieve_relevant_agent_memories",
+    "retrieve_relevant_long_term_memories",
     "upsert_long_term_memory",
 ]

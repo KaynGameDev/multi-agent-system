@@ -7,7 +7,8 @@ from typing import Any
 
 from app.config import Settings
 from app.memory.paths import resolve_long_term_memory_dir
-from app.memory.types import AgentMemoryScope
+from app.memory.retrieval import format_retrieved_memories_prompt, retrieve_relevant_long_term_memories
+from app.memory.types import AgentMemoryRetrievalResult, AgentMemoryScope
 
 DEFAULT_USER_MEMORY_KEY = "anonymous"
 DEFAULT_PROJECT_MEMORY_KEY = "default-project"
@@ -118,6 +119,7 @@ def build_agent_memory_prompt(
     agent_name: str,
     memory_scope: AgentMemoryScope | str,
     state: dict[str, Any] | None = None,
+    query_text: str = "",
 ) -> str:
     normalized_scope = str(memory_scope or "").strip().lower()
     if normalized_scope not in {"user", "project", "local"}:
@@ -144,7 +146,59 @@ def build_agent_memory_prompt(
         "- Do not claim access to other agents' memory or any path outside the allowed memory root.",
         "- Treat the memory root as strictly path-scoped runtime state, not as a general filesystem capability.",
     ]
+    if settings.memory_retrieval_enabled:
+        retrieved_memories = retrieve_relevant_agent_memories(
+            settings,
+            agent_name=agent_name,
+            memory_scope=normalized_scope,
+            state=state,
+            query_text=query_text,
+            top_k=min(settings.memory_retrieval_default_limit, 3),
+        )
+        relevant_memories_prompt = format_retrieved_memories_prompt(retrieved_memories)
+        if relevant_memories_prompt:
+            lines.append(relevant_memories_prompt)
     return "\n".join(lines).strip()
+
+
+def retrieve_relevant_agent_memories(
+    settings: Settings,
+    *,
+    agent_name: str,
+    memory_scope: AgentMemoryScope | str,
+    state: dict[str, Any] | None = None,
+    query_text: str = "",
+    top_k: int | None = None,
+) -> list[AgentMemoryRetrievalResult]:
+    normalized_scope = str(memory_scope or "").strip().lower()
+    if normalized_scope not in {"user", "project", "local"}:
+        return []
+
+    effective_query = str(query_text or "").strip()
+    if not effective_query:
+        return []
+
+    context = resolve_agent_memory_context(
+        settings,
+        agent_name=agent_name,
+        memory_scope=normalized_scope,  # type: ignore[arg-type]
+        state=state,
+    )
+    state_dict = state if isinstance(state, dict) else {}
+    loaded_path_values: list[str] = []
+    for key in ("context_paths", "recent_file_reads"):
+        raw_paths = state_dict.get(key) or []
+        if isinstance(raw_paths, (list, tuple)):
+            loaded_path_values.extend(str(item).strip() for item in raw_paths if str(item).strip())
+    limit = int(top_k) if top_k is not None else int(settings.memory_retrieval_default_limit or 0)
+    return retrieve_relevant_long_term_memories(
+        context.root_dir,
+        query_text=effective_query,
+        memory_scope=context.scope,
+        scope_key=context.scope_key,
+        top_k=limit,
+        loaded_paths=loaded_path_values,
+    )
 
 
 def normalize_agent_memory_scope_path(value: Any) -> str:
