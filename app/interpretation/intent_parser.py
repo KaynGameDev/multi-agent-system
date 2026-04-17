@@ -4,10 +4,9 @@ import ast
 from collections.abc import Sequence
 import json
 import logging
-import re
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 
 from app.contracts import (
     AssistantRequest,
@@ -18,6 +17,8 @@ from app.contracts import (
     validate_assistant_request,
     validate_pending_action_decision,
 )
+from app.contracts.assistant_request import AssistantRequestDomain
+from app.contracts.pending_action_decision import PendingActionDecisionKind
 from app.messages import stringify_message_content
 from app.pending_actions import get_pending_action_selection_options
 from app.prompt_loader import load_prompt_text
@@ -39,23 +40,53 @@ DEFAULT_INTENT_PARSER_MALFORMED_REASON = "The lightweight intent parser returned
 class AssistantRequestCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    type: str = "assistant_request"
-    user_goal: str = ""
-    likely_domain: str = ""
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    user_goal: str
+    likely_domain: AssistantRequestDomain
+    confidence: float = Field(ge=0.0, le=1.0)
     notes: str | None = None
+
+    @field_validator("user_goal")
+    @classmethod
+    def validate_user_goal(cls, value: str) -> str:
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            raise ValueError("user_goal must not be empty.")
+        return cleaned
+
+    @field_validator("notes")
+    @classmethod
+    def validate_notes(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        return cleaned or None
 
 
 class PendingActionDecisionCandidate(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    type: str = "pending_action_decision"
-    pending_action_id: str = ""
-    decision: str = "unclear"
+    decision: PendingActionDecisionKind
     notes: str | None = None
     selected_item_id: str | None = None
-    constraints: list[str] = Field(default_factory=list)
-    confidence: float = Field(default=0.0, ge=0.0, le=1.0)
+    constraints: list[str]
+    confidence: float = Field(ge=0.0, le=1.0)
+
+    @field_validator("notes", "selected_item_id")
+    @classmethod
+    def validate_optional_text(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        cleaned = str(value).strip()
+        return cleaned or None
+
+    @field_validator("constraints", mode="before")
+    @classmethod
+    def validate_constraints(cls, value: Any) -> list[str]:
+        if value is None:
+            raise ValueError("constraints must be provided.")
+        if not isinstance(value, list):
+            raise ValueError("constraints must be a list.")
+        return [str(item).strip() for item in value if str(item).strip()]
 
 
 class IntentParser:
@@ -63,12 +94,22 @@ class IntentParser:
         self,
         llm: Any | None,
         *,
+        backup_llm: Any | None = None,
         config: IntentParserModelConfig | None = None,
     ) -> None:
         self.llm = llm
+        self.backup_llm = None if backup_llm is llm else backup_llm
         self.config = config or IntentParserModelConfig()
         self._assistant_request_parser = build_structured_output_parser(llm, AssistantRequestCandidate)
         self._pending_action_parser = build_structured_output_parser(llm, PendingActionDecisionCandidate)
+        self._assistant_request_backup_parser = build_structured_output_parser(
+            self.backup_llm,
+            AssistantRequestCandidate,
+        )
+        self._pending_action_backup_parser = build_structured_output_parser(
+            self.backup_llm,
+            PendingActionDecisionCandidate,
+        )
 
     def parse_assistant_request(
         self,
@@ -84,57 +125,44 @@ class IntentParser:
             routing_context=routing_context,
             prompt_path=self.config.assistant_request_prompt_path,
         )
-        parsed, failure_reason = self._invoke_parser(self._assistant_request_parser, prompt)
-        if parsed is None:
+        failure_reason = DEFAULT_INTENT_PARSER_UNAVAILABLE_REASON
+        assistant_request: AssistantRequest | None = None
+        for parser_role, parser, llm in self._iter_parser_attempts(
+            self._assistant_request_parser,
+            self._assistant_request_backup_parser,
+        ):
+            parsed, failure_reason = self._invoke_parser_once(
+                parser,
+                prompt,
+                llm=llm,
+                parser_role=parser_role,
+            )
+            if parsed is None:
+                if parser_role == "primary" and self.backup_llm is not None:
+                    logger.warning(
+                        "AssistantRequest parser primary LLM failed; retrying with backup LLM. reason=%s",
+                        failure_reason,
+                    )
+                continue
+            assistant_request = self._build_assistant_request_from_parsed(
+                parsed,
+            )
+            if assistant_request is not None:
+                break
+            failure_reason = DEFAULT_INTENT_PARSER_MALFORMED_REASON
+            if parser_role == "primary" and self.backup_llm is not None:
+                logger.warning(
+                    "AssistantRequest parser primary LLM returned malformed output; retrying with backup LLM."
+                )
+                continue
+            break
+
+        if assistant_request is None:
             logger.warning(
                 "AssistantRequest parser failed; using general fallback. reason=%s",
                 failure_reason,
             )
             return build_fallback_assistant_request(normalized_user_message, notes=failure_reason)
-
-        try:
-            candidate = AssistantRequestCandidate.model_validate(parsed)
-        except ValidationError:
-            logger.warning(
-                "AssistantRequest parser returned malformed output; using general fallback."
-            )
-            return build_fallback_assistant_request(
-                normalized_user_message,
-                notes=DEFAULT_INTENT_PARSER_MALFORMED_REASON,
-            )
-
-        candidate_type = normalize_contract_type_name(
-            candidate.type,
-            expected_type="assistant_request",
-        )
-        if candidate_type != "assistant_request":
-            logger.warning(
-                "AssistantRequest parser returned wrong contract type; using general fallback. type=%s",
-                candidate.type,
-            )
-            return build_fallback_assistant_request(
-                normalized_user_message,
-                notes=DEFAULT_INTENT_PARSER_MALFORMED_REASON,
-            )
-
-        try:
-            assistant_request = validate_assistant_request(
-                {
-                    "type": "assistant_request",
-                    "user_goal": candidate.user_goal or normalized_user_message or "Clarify the user's request.",
-                    "likely_domain": str(candidate.likely_domain or "").strip().lower() or "general",
-                    "confidence": candidate.confidence,
-                    "notes": candidate.notes,
-                }
-            )
-        except ValidationError:
-            logger.warning(
-                "AssistantRequest parser failed schema validation after normalization; using general fallback."
-            )
-            return build_fallback_assistant_request(
-                normalized_user_message,
-                notes=DEFAULT_INTENT_PARSER_MALFORMED_REASON,
-            )
 
         if assistant_request.confidence < self.config.confidence_threshold:
             logger.info(
@@ -160,26 +188,101 @@ class IntentParser:
             selection_items=render_selection_items(pending_action),
             user_message=normalized_user_message or "(empty)",
         )
-        parsed, failure_reason = self._invoke_parser(self._pending_action_parser, prompt)
-        if parsed is None:
-            logger.warning(
-                "PendingActionDecision parser failed; using unclear decision. pending_action_id=%s reason=%s",
-                pending_action_id,
-                failure_reason,
+        failure_reason = DEFAULT_INTENT_PARSER_UNAVAILABLE_REASON
+        pending_action_decision: PendingActionDecision | None = None
+        for parser_role, parser, llm in self._iter_parser_attempts(
+            self._pending_action_parser,
+            self._pending_action_backup_parser,
+        ):
+            parsed, failure_reason = self._invoke_parser_once(
+                parser,
+                prompt,
+                llm=llm,
+                parser_role=parser_role,
             )
-            return build_unclear_pending_action_decision(pending_action_id, notes=failure_reason)
+            if parsed is None:
+                if parser_role == "primary" and self.backup_llm is not None:
+                    logger.warning(
+                        "PendingActionDecision parser primary LLM failed; retrying with backup LLM. pending_action_id=%s reason=%s",
+                        pending_action_id,
+                        failure_reason,
+                    )
+                continue
+            pending_action_decision = self._build_pending_action_decision_from_parsed(
+                parsed,
+                pending_action_id,
+            )
+            if pending_action_decision is not None:
+                return pending_action_decision
+            failure_reason = DEFAULT_INTENT_PARSER_MALFORMED_REASON
+            if parser_role == "primary" and self.backup_llm is not None:
+                logger.warning(
+                    "PendingActionDecision parser primary LLM returned malformed output; retrying with backup LLM. pending_action_id=%s",
+                    pending_action_id,
+                )
+                continue
+            break
 
+        logger.warning(
+            "PendingActionDecision parser failed; using unclear decision. pending_action_id=%s reason=%s",
+            pending_action_id,
+            failure_reason,
+        )
+        return build_unclear_pending_action_decision(pending_action_id, notes=failure_reason)
+
+    def _iter_parser_attempts(
+        self,
+        primary_parser: Any,
+        backup_parser: Any | None,
+    ) -> tuple[tuple[str, Any, Any | None], ...]:
+        attempts: list[tuple[str, Any, Any | None]] = [
+            ("primary", primary_parser, self.llm),
+        ]
+        if self.backup_llm is not None:
+            attempts.append(("backup", backup_parser, self.backup_llm))
+        return tuple(attempts)
+
+    def _build_assistant_request_from_parsed(
+        self,
+        parsed: Any,
+    ) -> AssistantRequest | None:
+        try:
+            candidate = AssistantRequestCandidate.model_validate(parsed)
+        except ValidationError:
+            logger.warning(
+                "AssistantRequest parser returned malformed output during candidate validation."
+            )
+            return None
+
+        try:
+            return validate_assistant_request(
+                {
+                    "type": "assistant_request",
+                    "user_goal": candidate.user_goal,
+                    "likely_domain": candidate.likely_domain,
+                    "confidence": candidate.confidence,
+                    "notes": candidate.notes,
+                }
+            )
+        except ValidationError:
+            logger.warning(
+                "AssistantRequest parser failed schema validation after normalization."
+            )
+            return None
+
+    def _build_pending_action_decision_from_parsed(
+        self,
+        parsed: Any,
+        pending_action_id: str,
+    ) -> PendingActionDecision | None:
         try:
             candidate = PendingActionDecisionCandidate.model_validate(parsed)
         except ValidationError:
             logger.warning(
-                "PendingActionDecision parser returned malformed output; using unclear decision. pending_action_id=%s",
+                "PendingActionDecision parser returned malformed output during candidate validation. pending_action_id=%s",
                 pending_action_id,
             )
-            return build_unclear_pending_action_decision(
-                pending_action_id,
-                notes=DEFAULT_INTENT_PARSER_MALFORMED_REASON,
-            )
+            return None
 
         if candidate.confidence < self.config.confidence_threshold:
             logger.info(
@@ -193,26 +296,11 @@ class IntentParser:
                 notes=candidate.notes or DEFAULT_PENDING_ACTION_LOW_CONFIDENCE_REASON,
             )
 
-        candidate_type = normalize_contract_type_name(
-            candidate.type,
-            expected_type="pending_action_decision",
-        )
-        if candidate_type != "pending_action_decision":
-            logger.warning(
-                "PendingActionDecision parser returned wrong contract type; using unclear decision. pending_action_id=%s type=%s",
-                pending_action_id,
-                candidate.type,
-            )
-            return build_unclear_pending_action_decision(
-                pending_action_id,
-                notes=DEFAULT_INTENT_PARSER_MALFORMED_REASON,
-            )
-
         try:
             return validate_pending_action_decision(
                 {
-                    "type": candidate_type,
-                    "pending_action_id": candidate.pending_action_id or pending_action_id,
+                    "type": "pending_action_decision",
+                    "pending_action_id": pending_action_id,
                     "decision": candidate.decision,
                     "notes": candidate.notes,
                     "selected_item_id": candidate.selected_item_id,
@@ -221,18 +309,25 @@ class IntentParser:
             )
         except ValidationError:
             logger.warning(
-                "PendingActionDecision parser failed schema validation; using unclear decision. pending_action_id=%s",
+                "PendingActionDecision parser failed schema validation. pending_action_id=%s",
                 pending_action_id,
             )
-            return build_unclear_pending_action_decision(
-                pending_action_id,
-                notes=DEFAULT_INTENT_PARSER_MALFORMED_REASON,
-            )
+            return None
 
-    def _invoke_parser(self, parser: Any, prompt: str) -> tuple[Any | None, str]:
+    def _invoke_parser_once(
+        self,
+        parser: Any,
+        prompt: str,
+        *,
+        llm: Any | None,
+        parser_role: str,
+    ) -> tuple[Any | None, str]:
         if parser is None:
-            logger.warning("Intent parser was unavailable because no structured parser was configured.")
-            raw_recovered = self._recover_from_raw_llm(prompt)
+            logger.warning(
+                "Intent parser was unavailable because no structured parser was configured. parser_role=%s",
+                parser_role,
+            )
+            raw_recovered = self._recover_from_raw_llm(prompt, llm=llm)
             if raw_recovered is not None:
                 return raw_recovered, ""
             return None, DEFAULT_INTENT_PARSER_UNAVAILABLE_REASON
@@ -248,7 +343,8 @@ class IntentParser:
             except ValidationError as exc:
                 latest_failure_reason = DEFAULT_INTENT_PARSER_MALFORMED_REASON
                 logger.warning(
-                    "Intent parser structured output validation failed. attempt=%s max_attempts=%s error=%s",
+                    "Intent parser structured output validation failed. parser_role=%s attempt=%s max_attempts=%s error=%s",
+                    parser_role,
                     attempt,
                     self.config.max_parse_attempts,
                     exc,
@@ -256,21 +352,22 @@ class IntentParser:
             except Exception as exc:
                 latest_failure_reason = DEFAULT_INTENT_PARSER_UNAVAILABLE_REASON
                 logger.warning(
-                    "Intent parser invocation failed. attempt=%s max_attempts=%s error=%s",
+                    "Intent parser invocation failed. parser_role=%s attempt=%s max_attempts=%s error=%s",
+                    parser_role,
                     attempt,
                     self.config.max_parse_attempts,
                     exc,
                 )
-            raw_recovered = self._recover_from_raw_llm(prompt)
+            raw_recovered = self._recover_from_raw_llm(prompt, llm=llm)
             if raw_recovered is not None:
                 return raw_recovered, ""
         return None, latest_failure_reason
 
-    def _recover_from_raw_llm(self, prompt: str) -> Any | None:
-        if self.llm is None:
+    def _recover_from_raw_llm(self, prompt: str, *, llm: Any | None) -> Any | None:
+        if llm is None:
             return None
 
-        raw_invoke = getattr(self.llm, "invoke", None)
+        raw_invoke = getattr(llm, "invoke", None)
         if not callable(raw_invoke):
             return None
 
@@ -407,18 +504,6 @@ def parse_json_like_payload(text: str) -> dict[str, Any] | None:
     if isinstance(parsed, dict):
         return parsed
     return None
-
-
-def normalize_contract_type_name(value: str | None, *, expected_type: str) -> str:
-    cleaned = str(value or "").strip()
-    if not cleaned:
-        return ""
-
-    normalized = re.sub(r"[^a-z0-9]+", "", cleaned.lower())
-    expected_normalized = re.sub(r"[^a-z0-9]+", "", str(expected_type).strip().lower())
-    if normalized == expected_normalized:
-        return expected_type
-    return cleaned
 
 
 def normalize_user_message(user_message: str) -> str:

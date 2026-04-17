@@ -16,6 +16,7 @@ from agents.project_task.agent import ProjectTaskAgentNode
 from app.checkpoints import build_checkpoint_store
 from app.graph import build_graph
 from app.main import bootstrap_system
+from app.llm_factory import RuntimeLLMs
 from app.routing.agent_router import AgentRouter
 from app.routing.pending_action_router import PendingActionRouter
 from interfaces.web.server import WebServer
@@ -187,7 +188,7 @@ class DurableResumeTests(unittest.TestCase):
         captured_agent_routers = []
         captured_pending_action_routers = []
         primary_llm = object()
-        parser_llm = object()
+        routing_llm = object()
 
         def fake_build_agent_graph(_llm, **kwargs):
             captured_checkpointers.append(kwargs["checkpointer"])
@@ -196,7 +197,10 @@ class DurableResumeTests(unittest.TestCase):
             return object()
 
         with patch.dict(os.environ, env, clear=False):
-            with patch("app.main.build_runtime_llms", return_value=(primary_llm, parser_llm)):
+            with patch(
+                "app.main.build_runtime_llms",
+                return_value=RuntimeLLMs(agent_llm=primary_llm, routing_llm=routing_llm),
+            ):
                 with patch("app.main.build_agent_graph", side_effect=fake_build_agent_graph):
                     with patch("app.main.build_web_agent_registrations", return_value=()):
                         with patch("app.main.WebServer", side_effect=lambda *args, **kwargs: DummyListener()):
@@ -209,11 +213,13 @@ class DurableResumeTests(unittest.TestCase):
         self.assertEqual(len(captured_agent_routers), 2)
         self.assertTrue(all(isinstance(router, AgentRouter) for router in captured_agent_routers))
         self.assertIs(captured_agent_routers[0], captured_agent_routers[1])
-        self.assertIs(captured_agent_routers[0].parser.llm, parser_llm)
+        self.assertIs(captured_agent_routers[0].parser.llm, routing_llm)
+        self.assertIs(captured_agent_routers[0].parser.backup_llm, primary_llm)
         self.assertEqual(len(captured_pending_action_routers), 2)
         self.assertTrue(all(isinstance(router, PendingActionRouter) for router in captured_pending_action_routers))
         self.assertIs(captured_pending_action_routers[0], captured_pending_action_routers[1])
-        self.assertIs(captured_pending_action_routers[0].parser.llm, parser_llm)
+        self.assertIs(captured_pending_action_routers[0].parser.llm, routing_llm)
+        self.assertIs(captured_pending_action_routers[0].parser.backup_llm, primary_llm)
         self.assertEqual(captured_agent_routers[0].parser.config.confidence_threshold, 0.60)
         self.assertEqual(captured_pending_action_routers[0].parser.config.confidence_threshold, 0.75)
 

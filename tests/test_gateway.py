@@ -68,7 +68,6 @@ class FakeStructuredLLM:
             if not likely_domain:
                 likely_domain = domain_for_selected_agent(str(decision.get("selected_agent", "")).strip())
             return {
-                "type": "assistant_request",
                 "user_goal": str(decision.get("user_goal") or decision.get("reason") or "Handle the request.").strip(),
                 "likely_domain": likely_domain or "general",
                 "confidence": float(decision.get("confidence", 0.95)),
@@ -1276,7 +1275,7 @@ The user wants to write the discussed company knowledge into the knowledge base.
 </think>
 
 ```json
-{"type":"assistant_request","user_goal":"Write the discussed company knowledge into the knowledge base.","likely_domain":"knowledge_base_builder","confidence":0.96,"notes":"Explicit KB write request."}
+{"user_goal":"Write the discussed company knowledge into the knowledge base.","likely_domain":"knowledge_base_builder","confidence":0.96,"notes":"Explicit KB write request."}
 ```"""
             )
         )

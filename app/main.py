@@ -68,16 +68,24 @@ def bootstrap_system() -> list[object]:
     settings = load_settings(force_reload=True)
     validate_bootstrap_settings(settings)
     logger.debug(
-        "Configuring LLM provider=%s model=%s temperature=%s trust_env=%s",
+        "Configuring LLMs agent_provider=%s agent_model=%s agent_temperature=%s "
+        "routing_provider=%s routing_model=%s routing_temperature=%s",
         settings.llm_provider,
         settings.llm_model,
         settings.llm_temperature,
-        settings.llm_http_trust_env,
+        settings.routing_llm_provider,
+        settings.routing_llm_model,
+        settings.routing_llm_temperature,
     )
 
     listeners: list[object] = []
     if is_agent_runtime_enabled(settings):
-        llm, parser_llm = build_runtime_llms(settings)
+        runtime_llms = build_runtime_llms(settings)
+        routing_backup_llm = (
+            None
+            if runtime_llms.routing_llm is runtime_llms.agent_llm
+            else runtime_llms.agent_llm
+        )
         assistant_request_parser_config = IntentParserModelConfig(
             confidence_threshold=settings.assistant_request_parser_confidence_threshold,
         )
@@ -85,11 +93,13 @@ def bootstrap_system() -> list[object]:
             confidence_threshold=settings.pending_action_parser_confidence_threshold,
         )
         assistant_request_parser = IntentParser(
-            parser_llm,
+            runtime_llms.routing_llm,
+            backup_llm=routing_backup_llm,
             config=assistant_request_parser_config,
         )
         pending_action_parser = IntentParser(
-            parser_llm,
+            runtime_llms.routing_llm,
+            backup_llm=routing_backup_llm,
             config=pending_action_parser_config,
         )
         pending_action_router = PendingActionRouter(pending_action_parser)
@@ -97,14 +107,14 @@ def bootstrap_system() -> list[object]:
         checkpoint_store = build_checkpoint_store(settings)
         try:
             agent_graph = build_agent_graph(
-                llm,
+                runtime_llms.agent_llm,
                 checkpointer=checkpoint_store.saver,
                 settings=settings,
                 pending_action_router=pending_action_router,
                 agent_router=agent_router,
             )
             web_graph = build_agent_graph(
-                llm,
+                runtime_llms.agent_llm,
                 checkpointer=checkpoint_store.saver,
                 settings=settings,
                 agent_registrations=build_web_agent_registrations(

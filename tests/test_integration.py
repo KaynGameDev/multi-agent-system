@@ -97,7 +97,6 @@ class FakeStructuredLLM:
         if schema_name in {"AssistantRequest", "AssistantRequestCandidate"}:
             likely_domain = domain_for_selected_agent(str(decision.get("selected_agent", "")).strip())
             return {
-                "type": "assistant_request",
                 "user_goal": str(decision.get("reason", "") or "Handle the request.").strip() or "Handle the request.",
                 "likely_domain": likely_domain,
                 "confidence": 0.95,
