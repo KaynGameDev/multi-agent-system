@@ -95,6 +95,16 @@ The loader/store validates that:
 
 The index stays compact, while full memory content lives only in the topic files.
 
+## Agent-Scoped Memory
+
+Agent definitions can opt into a memory scope:
+
+- `user`: resolves under `long_term/agents/<agent>/users/<user-key>/`
+- `project`: resolves under `long_term/agents/<agent>/projects/<project-key>/`
+- `local`: resolves under `long_term/agents/<agent>/local/`
+
+Scoped agent memory is exposed through dedicated memory tools rather than raw path input. The tool layer resolves the scope-specific directory from runtime state and only reads or writes inside that directory.
+
 ## Current Repo Mapping
 
 The live runtime still uses the existing modules:

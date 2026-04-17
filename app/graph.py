@@ -28,7 +28,8 @@ from tools.knowledge_base import (
     write_knowledge_markdown_document,
 )
 from tools.project_tracker_google_sheets import get_project_sheet_overview, read_project_tasks
-from app.tool_registry import KNOWLEDGE_BUILDER_TOOL_IDS, KNOWLEDGE_TOOL_IDS, PROJECT_TOOL_IDS
+from tools.agent_memory import build_agent_memory_tools
+from app.tool_registry import KNOWLEDGE_BUILDER_TOOL_IDS, KNOWLEDGE_TOOL_IDS, MEMORY_TOOL_IDS, PROJECT_TOOL_IDS
 
 
 def build_default_agent_registrations(
@@ -52,6 +53,14 @@ def build_default_agent_registrations(
     knowledge_builder_tool_ids = KNOWLEDGE_BUILDER_TOOL_IDS
     project_tools = (read_project_tasks, get_project_sheet_overview)
     project_tool_ids = PROJECT_TOOL_IDS
+    project_task_memory_scope = "user"
+    project_task_memory_tools = build_agent_memory_tools(
+        resolved_settings,
+        agent_name="project_task_agent",
+        memory_scope=project_task_memory_scope,
+    )
+    project_task_tools = (*project_tools, *project_task_memory_tools)
+    project_task_tool_ids = (*project_tool_ids, *MEMORY_TOOL_IDS)
 
     return (
         AgentRegistration(
@@ -110,18 +119,21 @@ def build_default_agent_registrations(
                 "Use for project tracker questions, assignees, deadlines, schedules, priorities, iterations, "
                 "project status, or anything that likely requires Google Sheets data."
             ),
-            build_node=lambda llm, tools=project_tools, skill_registry=None, pending_action_router=pending_action_router: ProjectTaskAgentNode(
+            build_node=lambda llm, tools=project_task_tools, settings=resolved_settings, skill_registry=None, pending_action_router=pending_action_router: ProjectTaskAgentNode(
                 llm,
                 list(tools),
+                settings=settings,
                 skill_registry=skill_registry,
                 pending_action_router=pending_action_router,
                 agent_name="project_task_agent",
-                tool_ids=project_tool_ids,
+                tool_ids=project_task_tool_ids,
+                memory_scope=project_task_memory_scope,
             ),
-            tools=project_tools,
-            tool_ids=project_tool_ids,
+            tools=project_task_tools,
+            tool_ids=project_task_tool_ids,
             selection_order=20,
             skill_namespace="project_task",
+            memory_scope=project_task_memory_scope,
         ),
         AgentRegistration(
             name="document_conversion_agent",

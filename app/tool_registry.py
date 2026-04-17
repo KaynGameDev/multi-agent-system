@@ -30,6 +30,10 @@ TOOL_CONVERSION_INGEST_SOURCES = "conversion.ingest_sources"
 TOOL_CONVERSION_EXTRACT_DRAFT = "conversion.extract_draft"
 TOOL_CONVERSION_STAGE_PACKAGE = "conversion.stage_package"
 TOOL_CONVERSION_PUBLISH_PACKAGE = "conversion.publish_package"
+TOOL_MEMORY_LIST = "memory.list"
+TOOL_MEMORY_READ = "memory.read"
+TOOL_MEMORY_WRITE = "memory.write"
+TOOL_MEMORY_DELETE = "memory.delete"
 
 KNOWLEDGE_TOOL_IDS = (
     TOOL_KNOWLEDGE_LIST_DOCUMENTS,
@@ -45,6 +49,12 @@ KNOWLEDGE_BUILDER_TOOL_IDS = (
 PROJECT_TOOL_IDS = (
     TOOL_PROJECT_READ_TASKS,
     TOOL_PROJECT_SHEET_OVERVIEW,
+)
+MEMORY_TOOL_IDS = (
+    TOOL_MEMORY_LIST,
+    TOOL_MEMORY_READ,
+    TOOL_MEMORY_WRITE,
+    TOOL_MEMORY_DELETE,
 )
 
 _TOOL_REGISTRY = (
@@ -277,6 +287,38 @@ _TOOL_REGISTRY = (
             "show me the tracker overview",
             "give me a quick project sheet preview",
         ),
+    ),
+    ToolMetadata(
+        tool_id=TOOL_MEMORY_LIST,
+        runtime_tool_name="list_agent_memories",
+        display_name="List Scoped Memories",
+        description="List the short MEMORY index entries available inside this agent's scoped memory directory.",
+        tool_family="agent_memory",
+        follow_up_hint="selection",
+    ),
+    ToolMetadata(
+        tool_id=TOOL_MEMORY_READ,
+        runtime_tool_name="read_agent_memory",
+        display_name="Read Scoped Memory",
+        description="Read one memory topic by id from this agent's scoped memory directory.",
+        tool_family="agent_memory",
+        follow_up_hint="answer",
+    ),
+    ToolMetadata(
+        tool_id=TOOL_MEMORY_WRITE,
+        runtime_tool_name="write_agent_memory",
+        display_name="Write Scoped Memory",
+        description="Create or update a memory topic inside this agent's scoped memory directory.",
+        tool_family="agent_memory",
+        follow_up_hint="status",
+    ),
+    ToolMetadata(
+        tool_id=TOOL_MEMORY_DELETE,
+        runtime_tool_name="delete_agent_memory",
+        display_name="Delete Scoped Memory",
+        description="Delete a memory topic from this agent's scoped memory directory.",
+        tool_family="agent_memory",
+        follow_up_hint="status",
     ),
     ToolMetadata(
         tool_id=TOOL_CONVERSION_INGEST_SOURCES,

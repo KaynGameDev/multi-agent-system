@@ -5,6 +5,7 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from langchain_core.tools import BaseTool
+from app.memory.types import AgentMemoryScope
 
 
 AgentNodeFactory = Callable[[Any], Any]
@@ -22,3 +23,4 @@ class AgentRegistration:
     is_general_assistant: bool = False
     skill_namespace: str = ""
     matcher: AgentMatcher | None = None
+    memory_scope: AgentMemoryScope | None = None

@@ -7,6 +7,7 @@ from typing_extensions import Literal
 
 MemoryScope = Literal["thread", "user", "workspace", "global"]
 LongTermMemoryType = Literal["user", "feedback", "project", "reference"]
+AgentMemoryScope = Literal["user", "project", "local"]
 
 
 class MemoryReference(BaseModel):

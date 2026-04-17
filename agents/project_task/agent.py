@@ -7,6 +7,7 @@ from langchain_core.messages import AIMessage
 from app.contracts import build_assistant_response
 from app.language import detect_response_language
 from app.messages import extract_latest_human_text, stringify_message_content
+from app.memory.agent_scope import build_agent_memory_prompt
 from app.model_request import build_model_request_messages
 from app.pending_actions import (
     PendingActionSelectionOption,
@@ -37,16 +38,20 @@ class ProjectTaskAgentNode:
         llm,
         tools: list,
         *,
+        settings=None,
         skill_registry: SkillRegistry | None = None,
         pending_action_router: PendingActionRouter | None = None,
         agent_name: str = "",
         tool_ids: tuple[str, ...] = (),
+        memory_scope: str = "",
     ) -> None:
         self.llm = llm.bind_tools(tools)
+        self.settings = settings
         self.skill_registry = skill_registry
         self.pending_action_router = pending_action_router
         self.agent_name = agent_name
         self.tool_ids = tuple(tool_ids)
+        self.memory_scope = str(memory_scope or "").strip().lower()
 
     def __call__(self, state: AgentState) -> dict:
         rendered_response = build_project_task_response(
@@ -60,9 +65,11 @@ class ProjectTaskAgentNode:
         messages = build_model_request_messages(
             system_prompt=build_project_task_prompt(
                 state,
+                settings=self.settings,
                 skill_registry=self.skill_registry,
                 agent_name=self.agent_name,
                 tool_ids=self.tool_ids,
+                memory_scope=self.memory_scope,
             ),
             transcript_messages=state["messages"],
         )
@@ -89,9 +96,11 @@ class ProjectTaskAgentNode:
 def build_project_task_prompt(
     state: AgentState,
     *,
+    settings=None,
     skill_registry: SkillRegistry | None = None,
     agent_name: str = "",
     tool_ids: tuple[str, ...] = (),
+    memory_scope: str = "",
 ) -> str:
     user_sheet_name = str(state.get("user_sheet_name", "")).strip()
     user_mapped_slack_name = str(
@@ -127,6 +136,15 @@ def build_project_task_prompt(
         build_agent_tool_prompt(tool_ids),
         sections["boundaries"],
     ]
+    if settings is not None and agent_name and memory_scope:
+        lines.append(
+            build_agent_memory_prompt(
+                settings,
+                agent_name=agent_name,
+                memory_scope=memory_scope,
+                state=state,
+            )
+        )
     if interface_name == "slack":
         lines.append(sections["slack_output"])
     elif interface_name == "web":

@@ -13,6 +13,7 @@ def build_registration(
     namespace: str = "",
     selection_order: int = 100,
     is_general_assistant: bool = False,
+    memory_scope=None,
     matcher=None,
     build_node=None,
     tools=(),
@@ -29,6 +30,7 @@ def build_registration(
         is_general_assistant=is_general_assistant,
         skill_namespace=namespace,
         matcher=matcher,
+        memory_scope=memory_scope,
     )
 
 
@@ -90,6 +92,7 @@ def make_settings(runtime_dir: Path) -> Settings:
         knowledge_google_sheets_cache_ttl_seconds=120,
         conversion_work_dir=str(runtime_dir),
         langgraph_checkpoint_db_path="",
+        memory_work_dir=str(runtime_dir / "memory"),
     )
 
 
