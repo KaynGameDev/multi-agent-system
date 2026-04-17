@@ -11,7 +11,11 @@ from threading import RLock
 from typing import Any
 
 from app.context_window import token_count_with_estimation
-from app.memory.session_files import delete_session_memory_file, update_session_memory_file
+from app.memory.session_files import (
+    delete_session_memory_file,
+    resolve_session_memory_file_path,
+    update_session_memory_file,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -19,6 +23,7 @@ SESSION_MEMORY_SCHEMA_VERSION = 1
 DEFAULT_SESSION_MEMORY_ENABLED = True
 DEFAULT_SESSION_MEMORY_INITIALIZE_THRESHOLD_TOKENS = 2_048
 DEFAULT_SESSION_MEMORY_UPDATE_GROWTH_THRESHOLD_TOKENS = 768
+DEFAULT_SESSION_MEMORY_BACKGROUND_MIN_TURNS = 4
 TRANSCRIPT_TYPE_MESSAGE = "message"
 TRANSCRIPT_TYPE_COMPACT_BOUNDARY = "compact_boundary"
 
@@ -42,6 +47,12 @@ class SessionMemoryCompactionPlan:
     preserved_tail_messages: list[dict[str, Any]]
 
 
+@dataclass(frozen=True)
+class SessionMemoryRefreshActivity:
+    turn_count: int = 0
+    tool_activity_count: int = 0
+
+
 class SessionMemoryStore:
     def __init__(self, storage_path: str | Path) -> None:
         self._storage_path = Path(storage_path).expanduser().resolve()
@@ -63,9 +74,31 @@ class SessionMemoryStore:
         if normalized_record is None:
             raise ValueError("Session memory record must include a thread_id and summary_markdown.")
         with self._lock:
-            self._records[normalized_record.thread_id] = normalized_record
-            self._persist_locked()
-            self._sync_session_file_locked(normalized_record)
+            self._upsert_locked(normalized_record)
+            return deepcopy(normalized_record)
+
+    def upsert_scoped(
+        self,
+        record: SessionMemoryRecord | dict[str, Any],
+        *,
+        allowed_thread_id: str,
+        allowed_session_file_path: str | Path,
+    ) -> SessionMemoryRecord:
+        normalized_record = normalize_session_memory_record(record)
+        if normalized_record is None:
+            raise ValueError("Session memory record must include a thread_id and summary_markdown.")
+
+        normalized_allowed_thread_id = str(allowed_thread_id or "").strip()
+        if not normalized_allowed_thread_id or normalized_record.thread_id != normalized_allowed_thread_id:
+            raise ValueError("Scoped session memory update must stay on the allowed thread.")
+
+        resolved_allowed_path = Path(allowed_session_file_path).expanduser().resolve()
+        expected_session_file_path = self.resolve_session_file_path(normalized_allowed_thread_id)
+        if resolved_allowed_path != expected_session_file_path:
+            raise ValueError("Scoped session memory update must stay on the allowed session file path.")
+
+        with self._lock:
+            self._upsert_locked(normalized_record, session_file_path=resolved_allowed_path)
             return deepcopy(normalized_record)
 
     def delete(self, thread_id: str) -> None:
@@ -78,6 +111,9 @@ class SessionMemoryStore:
             self._records.pop(normalized_thread_id, None)
             self._persist_locked()
             self._delete_session_file_locked(normalized_thread_id)
+
+    def resolve_session_file_path(self, thread_id: str) -> Path:
+        return resolve_session_memory_file_path(self._session_files_root_dir, thread_id)
 
     def _load(self) -> None:
         with self._lock:
@@ -121,8 +157,29 @@ class SessionMemoryStore:
             temp_path = Path(temp_file.name)
         temp_path.replace(self._storage_path)
 
-    def _sync_session_file_locked(self, record: SessionMemoryRecord) -> None:
+    def _upsert_locked(
+        self,
+        record: SessionMemoryRecord,
+        *,
+        session_file_path: Path | None = None,
+    ) -> None:
+        self._records[record.thread_id] = record
+        self._persist_locked()
+        self._sync_session_file_locked(record, session_file_path=session_file_path)
+
+    def _sync_session_file_locked(
+        self,
+        record: SessionMemoryRecord,
+        *,
+        session_file_path: Path | None = None,
+    ) -> None:
         try:
+            if session_file_path is not None:
+                expected_session_file_path = self.resolve_session_file_path(record.thread_id)
+                if session_file_path.resolve() != expected_session_file_path:
+                    raise ValueError(
+                        f"Scoped session memory file path mismatch for thread {record.thread_id}: {session_file_path}"
+                    )
             update_session_memory_file(
                 self._session_files_root_dir,
                 record.thread_id,
@@ -220,6 +277,67 @@ def should_update_session_memory(
     return growth_tokens >= max(int(update_growth_threshold_tokens or 0), 0)
 
 
+def count_session_memory_refresh_activity(
+    messages: list[dict[str, Any]] | list[Any] | None,
+    session_memory: SessionMemoryRecord | dict[str, Any] | None = None,
+) -> SessionMemoryRefreshActivity:
+    active_slice = _project_active_slice(messages)
+    if not active_slice:
+        return SessionMemoryRefreshActivity()
+
+    existing_record = normalize_session_memory_record(session_memory)
+    growth_start_index = 0
+    if existing_record is not None:
+        last_message_index = _find_message_index(active_slice, existing_record.last_message_id)
+        growth_start_index = last_message_index + 1 if last_message_index >= 0 else 0
+
+    growth_messages = active_slice[growth_start_index:]
+    if not growth_messages:
+        return SessionMemoryRefreshActivity()
+
+    turn_count = sum(
+        1
+        for message in growth_messages
+        if message["type"] == TRANSCRIPT_TYPE_MESSAGE and message["role"] in {"user", "assistant"}
+    )
+    tool_activity_count = sum(_extract_tool_activity_count(message) for message in growth_messages)
+    return SessionMemoryRefreshActivity(
+        turn_count=turn_count,
+        tool_activity_count=tool_activity_count,
+    )
+
+
+def should_schedule_background_session_memory_refresh(
+    messages: list[dict[str, Any]] | list[Any] | None,
+    session_memory: SessionMemoryRecord | dict[str, Any] | None,
+    *,
+    initialize_threshold_tokens: int = DEFAULT_SESSION_MEMORY_INITIALIZE_THRESHOLD_TOKENS,
+    update_growth_threshold_tokens: int = DEFAULT_SESSION_MEMORY_UPDATE_GROWTH_THRESHOLD_TOKENS,
+    min_turns: int = DEFAULT_SESSION_MEMORY_BACKGROUND_MIN_TURNS,
+) -> bool:
+    active_slice = _project_active_slice(messages)
+    if not active_slice or not is_safe_session_memory_extraction_point(active_slice):
+        return False
+
+    if should_initialize_session_memory(
+        active_slice,
+        initialize_threshold_tokens=initialize_threshold_tokens,
+    ):
+        return True
+    if should_update_session_memory(
+        active_slice,
+        session_memory,
+        update_growth_threshold_tokens=update_growth_threshold_tokens,
+    ):
+        return True
+
+    activity = count_session_memory_refresh_activity(active_slice, session_memory)
+    return (
+        activity.turn_count >= max(int(min_turns or 0), 0)
+        or activity.tool_activity_count > 0
+    )
+
+
 def build_session_memory_record(
     thread_id: str,
     messages: list[dict[str, Any]] | list[Any] | None,
@@ -227,6 +345,7 @@ def build_session_memory_record(
     session_memory: SessionMemoryRecord | dict[str, Any] | None = None,
     initialize_threshold_tokens: int = DEFAULT_SESSION_MEMORY_INITIALIZE_THRESHOLD_TOKENS,
     update_growth_threshold_tokens: int = DEFAULT_SESSION_MEMORY_UPDATE_GROWTH_THRESHOLD_TOKENS,
+    force_refresh: bool = False,
     llm: Any | None = None,
 ) -> SessionMemoryRecord | None:
     normalized_thread_id = str(thread_id or "").strip()
@@ -240,7 +359,7 @@ def build_session_memory_record(
     existing_record = normalize_session_memory_record(session_memory)
     source = "initialize"
     if existing_record is None:
-        if not should_initialize_session_memory(
+        if not force_refresh and not should_initialize_session_memory(
             active_slice,
             initialize_threshold_tokens=initialize_threshold_tokens,
         ):
@@ -248,7 +367,10 @@ def build_session_memory_record(
     else:
         last_message_index = _find_message_index(active_slice, existing_record.last_message_id)
         if last_message_index >= 0:
-            if not should_update_session_memory(
+            growth_messages = active_slice[last_message_index + 1 :]
+            if not growth_messages:
+                return None
+            if not force_refresh and not should_update_session_memory(
                 active_slice,
                 existing_record,
                 update_growth_threshold_tokens=update_growth_threshold_tokens,
@@ -256,7 +378,7 @@ def build_session_memory_record(
                 return None
             source = "update"
         else:
-            if not should_initialize_session_memory(
+            if not force_refresh and not should_initialize_session_memory(
                 active_slice,
                 initialize_threshold_tokens=initialize_threshold_tokens,
             ):
@@ -362,6 +484,24 @@ def _find_message_index(messages: list[dict[str, Any]], message_id: str) -> int:
         if message["id"] == normalized_message_id:
             return index
     return -1
+
+
+def _extract_tool_activity_count(message: dict[str, Any]) -> int:
+    metadata = message.get("metadata")
+    if not isinstance(metadata, dict):
+        return 0
+    runtime_state = metadata.get("runtime_rehydration_state")
+    if not isinstance(runtime_state, dict):
+        return 0
+
+    activity_count = 0
+    tool_result = runtime_state.get("tool_result")
+    if isinstance(tool_result, dict):
+        activity_count += 1
+    tool_execution_trace = runtime_state.get("tool_execution_trace")
+    if isinstance(tool_execution_trace, list):
+        activity_count += len(tool_execution_trace)
+    return activity_count
 
 
 def _get_messages_after_compact_boundary(messages: list[dict[str, Any]] | list[Any] | None) -> list[Any]:

@@ -44,9 +44,13 @@ from app.rehydration import (
     merge_runtime_rehydration_state,
 )
 from app.session_memory import (
+    DEFAULT_SESSION_MEMORY_BACKGROUND_MIN_TURNS,
     SessionMemoryStore,
     build_session_memory_record,
+    count_session_memory_refresh_activity,
+    should_schedule_background_session_memory_refresh,
 )
+from app.session_memory_background import BackgroundSessionMemoryUpdater, SessionMemoryRefreshTarget
 from interfaces.web.conversations import (
     ConversationNotFoundError,
     TRANSCRIPT_TYPE_MESSAGE,
@@ -98,6 +102,7 @@ class WebServer:
         conversation_store: WebConversationStore | None = None,
         conversion_store: ConversionSessionStore | None = None,
         checkpoint_store: GraphCheckpointStore | None = None,
+        session_memory_updater: BackgroundSessionMemoryUpdater | None = None,
     ) -> None:
         self.agent_graph = agent_graph
         self.settings = settings
@@ -106,6 +111,9 @@ class WebServer:
         )
         self.session_memory_store = SessionMemoryStore(
             self._resolve_path(settings.conversion_work_dir) / "session_memory.json"
+        )
+        self.session_memory_updater = session_memory_updater or BackgroundSessionMemoryUpdater(
+            self._refresh_session_memory_in_background,
         )
         self.conversion_store = conversion_store or ConversionSessionStore(self._resolve_path(settings.conversion_work_dir))
         self.checkpoint_store = checkpoint_store
@@ -130,6 +138,7 @@ class WebServer:
         self._server.run()
 
     def stop(self) -> None:
+        self.session_memory_updater.close()
         if self._server is not None:
             self._server.should_exit = True
 
@@ -432,7 +441,8 @@ class WebServer:
                 metadata=assistant_metadata,
             )
             if invoke_succeeded:
-                self._refresh_session_memory(
+                self._schedule_session_memory_refresh(
+                    conversation_id=conversation_id,
                     thread_id=thread_id,
                     conversation=self.conversation_store.get_full_conversation(conversation_id),
                 )
@@ -978,9 +988,10 @@ class WebServer:
         merged_metadata[RUNTIME_REHYDRATION_METADATA_KEY] = runtime_rehydration_state
         return merged_metadata
 
-    def _refresh_session_memory(
+    def _schedule_session_memory_refresh(
         self,
         *,
+        conversation_id: str,
         thread_id: str,
         conversation: dict[str, Any],
     ) -> None:
@@ -992,19 +1003,68 @@ class WebServer:
             return
 
         existing_record = self.session_memory_store.get(thread_id)
+        if not should_schedule_background_session_memory_refresh(
+            transcript_messages,
+            existing_record,
+            initialize_threshold_tokens=self.settings.session_memory_initialize_threshold_tokens,
+            update_growth_threshold_tokens=self.settings.session_memory_update_growth_threshold_tokens,
+            min_turns=DEFAULT_SESSION_MEMORY_BACKGROUND_MIN_TURNS,
+        ):
+            return
+
+        self.session_memory_updater.schedule(
+            SessionMemoryRefreshTarget(
+                conversation_id=conversation_id,
+                thread_id=thread_id,
+                allowed_session_file_path=str(self.session_memory_store.resolve_session_file_path(thread_id)),
+            )
+        )
+
+    def _refresh_session_memory_in_background(
+        self,
+        target: SessionMemoryRefreshTarget,
+    ) -> None:
+        if not self.settings.session_memory_enabled:
+            return
+
+        try:
+            conversation = self.conversation_store.get_full_conversation(target.conversation_id)
+        except ConversationNotFoundError:
+            logger.info(
+                "Skipped background session memory refresh for deleted conversation=%s thread=%s",
+                target.conversation_id,
+                target.thread_id,
+            )
+            return
+
+        transcript_messages = conversation.get("messages", [])
+        if not isinstance(transcript_messages, list):
+            return
+
+        thread_id = target.thread_id
+        existing_record = self.session_memory_store.get(thread_id)
+        activity = count_session_memory_refresh_activity(transcript_messages, existing_record)
         updated_record = build_session_memory_record(
             thread_id,
             transcript_messages,
             session_memory=existing_record,
             initialize_threshold_tokens=self.settings.session_memory_initialize_threshold_tokens,
             update_growth_threshold_tokens=self.settings.session_memory_update_growth_threshold_tokens,
+            force_refresh=(
+                activity.turn_count >= DEFAULT_SESSION_MEMORY_BACKGROUND_MIN_TURNS
+                or activity.tool_activity_count > 0
+            ),
         )
         if updated_record is None:
             return
 
-        self.session_memory_store.upsert(updated_record)
+        self.session_memory_store.upsert_scoped(
+            updated_record,
+            allowed_thread_id=thread_id,
+            allowed_session_file_path=target.allowed_session_file_path,
+        )
         logger.info(
-            "Updated session memory thread=%s source=%s covered_messages=%s covered_tokens=%s",
+            "Updated session memory in background thread=%s source=%s covered_messages=%s covered_tokens=%s",
             thread_id,
             updated_record.source,
             updated_record.covered_message_count,
@@ -1012,6 +1072,7 @@ class WebServer:
         )
 
     def _clear_session_memory(self, thread_id: str) -> None:
+        self.session_memory_updater.cancel(thread_id)
         try:
             self.session_memory_store.delete(thread_id)
         except Exception:

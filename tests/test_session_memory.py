@@ -6,9 +6,13 @@ from pathlib import Path
 
 from app.memory.session_files import get_session_memory_file
 from app.session_memory import (
+    DEFAULT_SESSION_MEMORY_BACKGROUND_MIN_TURNS,
+    SessionMemoryRefreshActivity,
     SessionMemoryRecord,
     SessionMemoryStore,
     build_session_memory_compaction_plan,
+    count_session_memory_refresh_activity,
+    should_schedule_background_session_memory_refresh,
     should_initialize_session_memory,
     should_update_session_memory,
 )
@@ -112,6 +116,70 @@ class SessionMemoryTests(unittest.TestCase):
                 messages,
                 existing_record,
                 update_growth_threshold_tokens=1_000_000,
+            )
+        )
+
+    def test_background_refresh_counts_turns_and_tool_activity(self) -> None:
+        messages = [
+            {
+                "id": "u1",
+                "role": "user",
+                "type": "message",
+                "markdown": "Open the architecture plan",
+                "created_at": "2026-04-16T00:00:00+00:00",
+            },
+            {
+                "id": "a1",
+                "role": "assistant",
+                "type": "message",
+                "markdown": "I opened the architecture plan.",
+                "created_at": "2026-04-16T00:00:01+00:00",
+                "metadata": {
+                    "runtime_rehydration_state": {
+                        "tool_result": {"tool_name": "read_knowledge_document"},
+                        "tool_execution_trace": [{"result": {"tool_name": "read_knowledge_document"}}],
+                    }
+                },
+            },
+        ]
+
+        activity = count_session_memory_refresh_activity(messages)
+
+        self.assertEqual(
+            activity,
+            SessionMemoryRefreshActivity(turn_count=2, tool_activity_count=2),
+        )
+
+    def test_background_refresh_schedules_after_turns_or_tool_activity(self) -> None:
+        messages = [
+            {
+                "id": "u1",
+                "role": "user",
+                "type": "message",
+                "markdown": "Open the architecture plan",
+                "created_at": "2026-04-16T00:00:00+00:00",
+            },
+            {
+                "id": "a1",
+                "role": "assistant",
+                "type": "message",
+                "markdown": "I opened the architecture plan.",
+                "created_at": "2026-04-16T00:00:01+00:00",
+                "metadata": {
+                    "runtime_rehydration_state": {
+                        "tool_result": {"tool_name": "read_knowledge_document"},
+                    }
+                },
+            },
+        ]
+
+        self.assertTrue(
+            should_schedule_background_session_memory_refresh(
+                messages,
+                None,
+                initialize_threshold_tokens=1_000_000,
+                update_growth_threshold_tokens=1_000_000,
+                min_turns=DEFAULT_SESSION_MEMORY_BACKGROUND_MIN_TURNS,
             )
         )
 

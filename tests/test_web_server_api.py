@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import tempfile
+import time
 import unittest
 from dataclasses import replace
 from pathlib import Path
@@ -654,6 +655,7 @@ class WebServerApiTests(unittest.TestCase):
             json={"message": "Start a long session", "display_name": "Tester", "email": "tester@example.com"},
         )
         self.assertEqual(first_response.status_code, 200)
+        server.session_memory_updater.flush(f"web:{conversation_id}")
         self.assertIsNotNone(server.session_memory_store.get(f"web:{conversation_id}"))
 
         second_response = client.post(
@@ -672,6 +674,43 @@ class WebServerApiTests(unittest.TestCase):
         self.assertTrue(isinstance(rebuilt_messages[2], HumanMessage))
         self.assertIn("## Continuation Summary", rebuilt_messages[1].content)
         self.assertEqual(rebuilt_messages[2].content, "What should we do next?")
+
+    def test_session_memory_refresh_runs_in_background_without_blocking_response(self) -> None:
+        settings = replace(
+            self.settings,
+            session_memory_enabled=True,
+            session_memory_initialize_threshold_tokens=1,
+            session_memory_update_growth_threshold_tokens=1,
+        )
+        graph = SessionMemoryAutoCompactGraph()
+        server = WebServer(agent_graph=graph, settings=settings)
+        client = TestClient(server.app)
+        conversation = client.post("/api/conversations", json={"title": "Async session memory"}).json()
+        conversation_id = conversation["conversation_id"]
+
+        from interfaces.web import server as server_module
+
+        real_build_session_memory_record = server_module.build_session_memory_record
+
+        def slow_build_session_memory_record(*args, **kwargs):
+            time.sleep(0.2)
+            return real_build_session_memory_record(*args, **kwargs)
+
+        with patch(
+            "interfaces.web.server.build_session_memory_record",
+            side_effect=slow_build_session_memory_record,
+        ):
+            started_at = time.perf_counter()
+            response = client.post(
+                f"/api/conversations/{conversation_id}/messages",
+                json={"message": "Start a long session", "display_name": "Tester", "email": "tester@example.com"},
+            )
+            elapsed = time.perf_counter() - started_at
+            self.assertTrue(server.session_memory_updater.wait_for_idle(f"web:{conversation_id}", timeout=2.0))
+
+        self.assertEqual(response.status_code, 200)
+        self.assertLess(elapsed, 0.2)
+        self.assertIsNotNone(server.session_memory_store.get(f"web:{conversation_id}"))
 
     def test_auto_compact_rewrites_transcript_before_model_invoke(self) -> None:
         settings = replace(
