@@ -117,8 +117,15 @@ Optional:
 - `MINIMAX_BASE_URL` (default: `https://api.minimaxi.com/v1`; use `https://api.minimax.io/v1` outside China if needed)
 - `OPENAI_API_KEY` (required only when `LLM_PROVIDER=openai`)
 - `OPENAI_BASE_URL` (default: `https://api.openai.com/v1`)
-- `PENDING_ACTION_PARSER_MODEL` (default: `LLM_MODEL`)
-- `PENDING_ACTION_PARSER_TEMPERATURE` (default: `0.0` for `google`/`openai`, `0.01` for `minimax`)
+- `ROUTING_LLM_PROVIDER` (optional; defaults to `LLM_PROVIDER` when omitted)
+- `ROUTING_LLM_MODEL` (optional; defaults to `LLM_MODEL` when omitted, or the routing provider default when switching providers)
+- `ROUTING_LLM_TEMPERATURE` (optional; defaults to `LLM_TEMPERATURE`)
+- `ROUTING_LLM_HTTP_TRUST_ENV` (optional; defaults to `LLM_HTTP_TRUST_ENV`)
+- `ROUTING_GOOGLE_API_KEY` (optional; falls back to `GOOGLE_API_KEY`)
+- `ROUTING_MINIMAX_API_KEY` (optional; falls back to `MINIMAX_API_KEY`)
+- `ROUTING_MINIMAX_BASE_URL` (optional; falls back to `MINIMAX_BASE_URL`)
+- `ROUTING_OPENAI_API_KEY` (optional; falls back to `OPENAI_API_KEY`)
+- `ROUTING_OPENAI_BASE_URL` (optional; falls back to `OPENAI_BASE_URL`)
 - `ASSISTANT_REQUEST_PARSER_CONFIDENCE_THRESHOLD` (default: `0.60`)
 - `PENDING_ACTION_PARSER_CONFIDENCE_THRESHOLD` (default: `0.75`)
 - `LLM_HTTP_TRUST_ENV` (default: `false`; currently applied to the Google provider path)
@@ -157,6 +164,19 @@ MINIMAX_BASE_URL=https://api.minimaxi.com/v1
 LLM_PROVIDER=openai
 LLM_MODEL=gpt-5-mini
 OPENAI_API_KEY=...
+```
+
+Split routing example:
+
+```bash
+LLM_PROVIDER=openai
+LLM_MODEL=gpt-5.4
+OPENAI_API_KEY=...
+
+ROUTING_LLM_PROVIDER=minimax
+ROUTING_LLM_MODEL=MiniMax-M2.7-highspeed
+ROUTING_MINIMAX_API_KEY=...
+ROUTING_MINIMAX_BASE_URL=https://api.minimaxi.com/v1
 ```
 
 `GOOGLE_APPLICATION_CREDENTIALS` and `JADE_PROJECT_SHEET_ID` remain required for the Google Sheets/Docs integrations regardless of which LLM provider is selected.

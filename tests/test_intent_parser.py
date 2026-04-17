@@ -61,13 +61,25 @@ class StructuredValidationErrorThenRawLLM:
         return self.raw_output
 
 
+class FailingLLM:
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error or RuntimeError("parser boom")
+        self.calls = 0
+
+    def with_structured_output(self, _schema, **_kwargs):
+        return self
+
+    def invoke(self, _prompt):
+        self.calls += 1
+        raise self.error
+
+
 class IntentParserTests(unittest.TestCase):
     def test_parse_assistant_request_returns_valid_contract(self) -> None:
         parser = IntentParser(
             StructuredOutputLLM(
                 [
                     {
-                        "type": "assistant_request",
                         "user_goal": "Summarize the active sprint blockers.",
                         "likely_domain": "project_task",
                         "confidence": 0.94,
@@ -89,7 +101,6 @@ class IntentParserTests(unittest.TestCase):
             StructuredOutputLLM(
                 [
                     {
-                        "type": "assistant_request",
                         "user_goal": "  Summarize repository docs.  ",
                         "likely_domain": "knowledge",
                         "confidence": 0.91,
@@ -104,7 +115,7 @@ class IntentParserTests(unittest.TestCase):
         self.assertEqual(result.user_goal, "Summarize repository docs.")
         self.assertEqual(result.notes, "Documentation request.")
 
-    def test_parse_assistant_request_accepts_pascal_case_contract_type(self) -> None:
+    def test_parse_assistant_request_rejects_extra_type_field_as_malformed(self) -> None:
         parser = IntentParser(
             StructuredOutputLLM(
                 [
@@ -121,16 +132,15 @@ class IntentParserTests(unittest.TestCase):
 
         result = parser.parse_assistant_request("我想记录新知识")
 
-        self.assertEqual(result.likely_domain, "knowledge_base_builder")
-        self.assertEqual(result.user_goal, "Record new knowledge into the knowledge base.")
-        self.assertEqual(result.notes, "The user wants to sync new company knowledge.")
+        self.assertEqual(result.likely_domain, "general")
+        self.assertEqual(result.user_goal, "我想记录新知识")
+        self.assertEqual(result.notes, DEFAULT_INTENT_PARSER_MALFORMED_REASON)
 
-    def test_parse_assistant_request_recovers_when_model_omits_user_goal(self) -> None:
+    def test_parse_assistant_request_rejects_missing_user_goal_as_malformed(self) -> None:
         parser = IntentParser(
             StructuredOutputLLM(
                 [
                     {
-                        "type": "assistant_request",
                         "likely_domain": "knowledge_base_builder",
                         "confidence": 0.93,
                         "notes": "The user wants to sync company knowledge into the KB flow.",
@@ -141,9 +151,29 @@ class IntentParserTests(unittest.TestCase):
 
         result = parser.parse_assistant_request("我希望跟你同步一下公司知识")
 
-        self.assertEqual(result.likely_domain, "knowledge_base_builder")
+        self.assertEqual(result.likely_domain, "general")
         self.assertEqual(result.user_goal, "我希望跟你同步一下公司知识")
-        self.assertGreaterEqual(result.confidence, 0.93)
+        self.assertEqual(result.notes, DEFAULT_INTENT_PARSER_MALFORMED_REASON)
+
+    def test_parse_assistant_request_rejects_invalid_domain_value(self) -> None:
+        parser = IntentParser(
+            StructuredOutputLLM(
+                [
+                    {
+                        "user_goal": "Summarize the engineering docs.",
+                        "likely_domain": "query",
+                        "confidence": 0.88,
+                        "notes": "Looks like a doc lookup request.",
+                    }
+                ]
+            )
+        )
+
+        result = parser.parse_assistant_request("What engineering docs do we have?")
+
+        self.assertEqual(result.likely_domain, "general")
+        self.assertEqual(result.user_goal, "What engineering docs do we have?")
+        self.assertEqual(result.notes, DEFAULT_INTENT_PARSER_MALFORMED_REASON)
 
     def test_parse_assistant_request_recovers_from_raw_json_content(self) -> None:
         parser = IntentParser(
@@ -152,7 +182,7 @@ class IntentParserTests(unittest.TestCase):
                     {
                         "raw": AIMessage(
                             content="""```json
-{"type":"assistant_request","likely_domain":"knowledge_base_builder","confidence":0.92,"notes":"The user wants to sync company knowledge.","user_goal":"Capture and organize company knowledge."}
+{"likely_domain":"knowledge_base_builder","confidence":0.92,"notes":"The user wants to sync company knowledge.","user_goal":"Capture and organize company knowledge."}
 ```"""
                         ),
                         "parsed": None,
@@ -176,7 +206,7 @@ The user wants to write the discussed content into the knowledge base.
 </think>
 
 ```json
-{"type":"assistant_request","likely_domain":"knowledge_base_builder","confidence":0.96,"notes":"The user explicitly wants KB write behavior.","user_goal":"Write the discussed company knowledge into the knowledge base."}
+{"likely_domain":"knowledge_base_builder","confidence":0.96,"notes":"The user explicitly wants KB write behavior.","user_goal":"Write the discussed company knowledge into the knowledge base."}
 ```"""
             )
         )
@@ -188,6 +218,53 @@ The user wants to write the discussed content into the knowledge base.
         self.assertEqual(result.user_goal, "Write the discussed company knowledge into the knowledge base.")
         self.assertEqual(llm.structured_calls, 1)
         self.assertEqual(llm.raw_calls, 1)
+
+    def test_parse_assistant_request_retries_on_backup_llm_after_primary_failure(self) -> None:
+        primary_llm = FailingLLM()
+        backup_llm = StructuredOutputLLM(
+            [
+                {
+                    "user_goal": "Summarize the active sprint blockers.",
+                    "likely_domain": "project_task",
+                    "confidence": 0.94,
+                    "notes": "Mentions sprint blockers and ownership.",
+                }
+            ]
+        )
+        parser = IntentParser(
+            primary_llm,
+            backup_llm=backup_llm,
+            config=IntentParserModelConfig(max_parse_attempts=1),
+        )
+
+        result = parser.parse_assistant_request("Who owns the current sprint blockers?")
+
+        self.assertEqual(result.likely_domain, "project_task")
+        self.assertEqual(result.user_goal, "Summarize the active sprint blockers.")
+        self.assertGreaterEqual(primary_llm.calls, 1)
+
+    def test_parse_assistant_request_retries_on_backup_llm_after_primary_malformed_output(self) -> None:
+        parser = IntentParser(
+            StructuredOutputLLM([{"unexpected": "payload"}]),
+            backup_llm=StructuredOutputLLM(
+                [
+                    {
+                        "type": "assistant_request",
+                        "user_goal": "Capture and organize company knowledge.",
+                        "likely_domain": "knowledge_base_builder",
+                        "confidence": 0.92,
+                        "notes": "The user wants to sync company knowledge.",
+                    }
+                ]
+            ),
+            config=IntentParserModelConfig(max_parse_attempts=1),
+        )
+
+        result = parser.parse_assistant_request("我希望跟你同步一下公司知识")
+
+        self.assertEqual(result.likely_domain, "general")
+        self.assertEqual(result.user_goal, "我希望跟你同步一下公司知识")
+        self.assertEqual(result.notes, DEFAULT_INTENT_PARSER_MALFORMED_REASON)
 
     def test_parse_pending_action_decision_returns_valid_contract(self) -> None:
         action = build_pending_action(
@@ -210,8 +287,6 @@ The user wants to write the discussed content into the knowledge base.
             StructuredOutputLLM(
                 [
                     {
-                        "type": "pending_action_decision",
-                        "pending_action_id": action["id"],
                         "decision": "select",
                         "notes": "The user selected the setup guide.",
                         "selected_item_id": "doc_setup",
@@ -229,7 +304,7 @@ The user wants to write the discussed content into the knowledge base.
         self.assertEqual(result.decision, "select")
         self.assertEqual(result.selected_item_id, "doc_setup")
 
-    def test_parse_pending_action_decision_accepts_pascal_case_contract_type(self) -> None:
+    def test_parse_pending_action_decision_rejects_extra_parser_owned_fields(self) -> None:
         action = build_pending_action(
             session_id="thread-1",
             action_type="apply_edit",
@@ -254,8 +329,36 @@ The user wants to write the discussed content into the knowledge base.
 
         result = parser.parse_pending_action_decision(action, "继续")
 
-        self.assertEqual(result.decision, "approve")
+        self.assertEqual(result.decision, "unclear")
         self.assertEqual(result.pending_action_id, action["id"])
+        self.assertEqual(result.notes, DEFAULT_INTENT_PARSER_MALFORMED_REASON)
+
+    def test_parse_pending_action_decision_rejects_invalid_decision_value(self) -> None:
+        action = build_pending_action(
+            session_id="thread-1",
+            action_type="apply_edit",
+            requested_by_agent="general_chat_agent",
+            summary="Apply the proposed edits.",
+        )
+        parser = IntentParser(
+            StructuredOutputLLM(
+                [
+                    {
+                        "decision": "confirm",
+                        "notes": "The user approved the pending action.",
+                        "selected_item_id": None,
+                        "constraints": [],
+                        "confidence": 0.98,
+                    }
+                ]
+            )
+        )
+
+        result = parser.parse_pending_action_decision(action, "继续")
+
+        self.assertEqual(result.decision, "unclear")
+        self.assertEqual(result.pending_action_id, action["id"])
+        self.assertEqual(result.notes, DEFAULT_INTENT_PARSER_MALFORMED_REASON)
 
     def test_parse_pending_action_decision_recovers_from_raw_llm_after_structured_validation_error(self) -> None:
         action = build_pending_action(
@@ -271,7 +374,7 @@ The user approved the pending action.
 </think>
 
 ```json
-{{"type":"pending_action_decision","pending_action_id":"{action['id']}","decision":"approve","notes":"The user approved the change.","selected_item_id":null,"constraints":[],"confidence":0.97}}
+{{"decision":"approve","notes":"The user approved the change.","selected_item_id":null,"constraints":[],"confidence":0.97}}
 ```"""
             )
         )
@@ -283,6 +386,62 @@ The user approved the pending action.
         self.assertEqual(result.pending_action_id, action["id"])
         self.assertEqual(llm.structured_calls, 1)
         self.assertEqual(llm.raw_calls, 1)
+
+    def test_parse_pending_action_decision_retries_on_backup_llm_after_primary_failure(self) -> None:
+        action = build_pending_action(
+            session_id="thread-1",
+            action_type="apply_edit",
+            requested_by_agent="general_chat_agent",
+            summary="Apply the proposed edits.",
+        )
+        parser = IntentParser(
+            FailingLLM(),
+            backup_llm=StructuredOutputLLM(
+                [
+                    {
+                        "decision": "approve",
+                        "notes": "The user approved the pending action.",
+                        "selected_item_id": None,
+                        "constraints": [],
+                        "confidence": 0.98,
+                    }
+                ]
+            ),
+            config=IntentParserModelConfig(max_parse_attempts=1),
+        )
+
+        result = parser.parse_pending_action_decision(action, "继续")
+
+        self.assertEqual(result.decision, "approve")
+        self.assertEqual(result.pending_action_id, action["id"])
+
+    def test_parse_pending_action_decision_retries_on_backup_llm_after_primary_malformed_output(self) -> None:
+        action = build_pending_action(
+            session_id="thread-1",
+            action_type="apply_edit",
+            requested_by_agent="general_chat_agent",
+            summary="Apply the proposed edits.",
+        )
+        parser = IntentParser(
+            StructuredOutputLLM([{"unexpected": "payload"}]),
+            backup_llm=StructuredOutputLLM(
+                [
+                    {
+                        "decision": "approve",
+                        "notes": "The user approved the pending action.",
+                        "selected_item_id": None,
+                        "constraints": [],
+                        "confidence": 0.98,
+                    }
+                ]
+            ),
+            config=IntentParserModelConfig(max_parse_attempts=1),
+        )
+
+        result = parser.parse_pending_action_decision(action, "继续")
+
+        self.assertEqual(result.decision, "approve")
+        self.assertEqual(result.pending_action_id, action["id"])
 
     def test_contract_validators_reject_invalid_schema(self) -> None:
         with self.assertRaises(ValidationError):
@@ -313,7 +472,6 @@ The user approved the pending action.
             StructuredOutputLLM(
                 [
                     {
-                        "type": "assistant_request",
                         "user_goal": "Handle the request somehow.",
                         "likely_domain": "knowledge",
                         "confidence": 0.31,
@@ -371,6 +529,8 @@ The user approved the pending action.
         self.assertIn("我希望跟你同步一下公司知识", prompt)
         self.assertIn("请把这些内容录入到知识库", prompt)
         self.assertIn("不是记录到对话中，我要你写入知识库", prompt)
+        self.assertIn("Do not return `type`.", prompt)
+        self.assertIn("AssistantRequestCandidate", prompt)
 
     def test_assistant_request_prompt_mentions_natural_chinese_routing_examples(self) -> None:
         prompt = build_assistant_request_prompt(
@@ -386,6 +546,7 @@ The user approved the pending action.
         self.assertIn("关于我们公司的知识，你能教我些什么", prompt)
         self.assertIn("好的，请问你还需要我同步哪方面的知识呢", prompt)
         self.assertIn("知识库里目前都知道什么，我想补充还没有的部分", prompt)
+        self.assertIn("Return structured output with exactly these fields", prompt)
 
 
 if __name__ == "__main__":

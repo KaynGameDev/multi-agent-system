@@ -14,10 +14,12 @@ from app.config import (
     DEFAULT_OPENAI_BASE_URL,
     DEFAULT_OPENAI_MODEL,
     load_settings,
+    resolve_agent_llm_config,
+    resolve_routing_llm_config,
     validate_core_settings,
     validate_interface_settings,
 )
-from app.llm_factory import build_chat_model, build_runtime_llms
+from app.llm_factory import LoggedLLM, RuntimeLLMs, build_chat_model, build_runtime_llms
 from tests.common import make_settings
 
 
@@ -47,8 +49,11 @@ class LLMConfigTests(unittest.TestCase):
         self.assertEqual(settings.llm_model, "gemini-generic-test")
         self.assertEqual(settings.llm_temperature, 0.4)
         self.assertTrue(settings.llm_http_trust_env)
-        self.assertEqual(settings.pending_action_parser_model, "gemini-generic-test")
-        self.assertEqual(settings.pending_action_parser_temperature, 0.0)
+        self.assertFalse(settings.routing_llm_overrides_present)
+        self.assertEqual(settings.routing_llm_provider, "google")
+        self.assertEqual(settings.routing_llm_model, "gemini-generic-test")
+        self.assertEqual(settings.routing_llm_temperature, 0.4)
+        self.assertTrue(settings.routing_llm_http_trust_env)
         self.assertEqual(settings.assistant_request_parser_confidence_threshold, 0.6)
         self.assertEqual(settings.pending_action_parser_confidence_threshold, 0.75)
 
@@ -70,8 +75,9 @@ class LLMConfigTests(unittest.TestCase):
         self.assertEqual(settings.llm_provider, "minimax")
         self.assertEqual(settings.llm_model, DEFAULT_MINIMAX_MODEL)
         self.assertEqual(settings.minimax_base_url, DEFAULT_MINIMAX_BASE_URL)
-        self.assertEqual(settings.pending_action_parser_model, DEFAULT_MINIMAX_MODEL)
-        self.assertEqual(settings.pending_action_parser_temperature, 0.01)
+        self.assertEqual(settings.routing_llm_provider, "minimax")
+        self.assertEqual(settings.routing_llm_model, DEFAULT_MINIMAX_MODEL)
+        self.assertEqual(settings.routing_llm_temperature, 0.2)
         self.assertFalse(settings.llm_http_trust_env)
 
     def test_openai_provider_uses_expected_defaults(self) -> None:
@@ -92,8 +98,37 @@ class LLMConfigTests(unittest.TestCase):
         self.assertEqual(settings.llm_provider, "openai")
         self.assertEqual(settings.llm_model, DEFAULT_OPENAI_MODEL)
         self.assertEqual(settings.openai_base_url, DEFAULT_OPENAI_BASE_URL)
-        self.assertEqual(settings.pending_action_parser_model, DEFAULT_OPENAI_MODEL)
-        self.assertEqual(settings.pending_action_parser_temperature, 0.0)
+        self.assertEqual(settings.routing_llm_provider, "openai")
+        self.assertEqual(settings.routing_llm_model, DEFAULT_OPENAI_MODEL)
+        self.assertEqual(settings.routing_llm_temperature, 0.2)
+
+    def test_routing_llm_can_resolve_independently_from_main_llm(self) -> None:
+        with patch.dict(
+            os.environ,
+            {
+                "WEB_ENABLED": "true",
+                "SLACK_ENABLED": "false",
+                "LLM_PROVIDER": "google",
+                "LLM_MODEL": "gemini-main",
+                "GOOGLE_API_KEY": "test-google-key",
+                "ROUTING_LLM_PROVIDER": "openai",
+                "ROUTING_LLM_MODEL": "gpt-5.4-mini",
+                "ROUTING_LLM_TEMPERATURE": "0.05",
+                "ROUTING_OPENAI_API_KEY": "routing-openai-key",
+                "ROUTING_OPENAI_BASE_URL": "https://routing.example/v1",
+                "GOOGLE_APPLICATION_CREDENTIALS": "/tmp/credentials.json",
+                "JADE_PROJECT_SHEET_ID": "sheet-id",
+            },
+            clear=True,
+        ):
+            settings = load_settings(force_reload=True)
+
+        self.assertTrue(settings.routing_llm_overrides_present)
+        self.assertEqual(settings.routing_llm_provider, "openai")
+        self.assertEqual(settings.routing_llm_model, "gpt-5.4-mini")
+        self.assertEqual(settings.routing_llm_temperature, 0.05)
+        self.assertEqual(settings.routing_openai_api_key, "routing-openai-key")
+        self.assertEqual(settings.routing_openai_base_url, "https://routing.example/v1")
 
     def test_web_auth_settings_parse_credentials_and_allowed_hosts(self) -> None:
         with patch.dict(
@@ -148,16 +183,31 @@ class LLMConfigTests(unittest.TestCase):
 
         self.assertNotIn("GOOGLE_API_KEY", str(ctx.exception))
 
-    def test_validate_core_settings_rejects_explicit_non_positive_minimax_parser_temperature(self) -> None:
+    def test_validate_core_settings_requires_routing_provider_key_only_when_overridden(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             settings = replace(
                 make_settings(Path(tempdir)),
-                llm_provider="minimax",
-                google_api_key="",
-                pending_action_parser_temperature=0.0,
+                llm_provider="google",
+                routing_llm_provider="openai",
+                routing_openai_api_key="",
+                routing_llm_overrides_present=True,
             )
 
-        with patch.dict(os.environ, {"PENDING_ACTION_PARSER_TEMPERATURE": "0"}, clear=False):
+        with self.assertRaisesRegex(RuntimeError, "ROUTING_OPENAI_API_KEY or OPENAI_API_KEY") as ctx:
+            validate_core_settings(settings)
+
+        self.assertNotIn("ROUTING_GOOGLE_API_KEY", str(ctx.exception))
+
+    def test_validate_core_settings_rejects_explicit_non_positive_minimax_routing_temperature(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            settings = replace(
+                make_settings(Path(tempdir)),
+                routing_llm_provider="minimax",
+                routing_llm_temperature=0.0,
+                routing_llm_overrides_present=True,
+            )
+
+        with patch.dict(os.environ, {"ROUTING_LLM_TEMPERATURE": "0"}, clear=False):
             with self.assertRaisesRegex(RuntimeError, "greater than 0"):
                 validate_core_settings(settings)
 
@@ -173,11 +223,7 @@ class LLMFactoryTests(unittest.TestCase):
     def test_google_factory_builds_chat_google_client(self) -> None:
         built = object()
         with patch("app.llm_factory.ChatGoogleGenerativeAI", return_value=built) as constructor:
-            result = build_chat_model(
-                self.settings,
-                model="gemini-custom",
-                temperature=0.3,
-            )
+            result = build_chat_model(replace(resolve_agent_llm_config(self.settings), model="gemini-custom", temperature=0.3))
 
         self.assertIs(result, built)
         constructor.assert_called_once_with(
@@ -192,9 +238,11 @@ class LLMFactoryTests(unittest.TestCase):
         settings = replace(self.settings, llm_provider="minimax")
         with patch("app.llm_factory.ChatOpenAI", return_value=built) as constructor:
             result = build_chat_model(
-                settings,
-                model="MiniMax-M2.7-highspeed",
-                temperature=0.2,
+                replace(
+                    resolve_agent_llm_config(settings),
+                    model="MiniMax-M2.7-highspeed",
+                    temperature=0.2,
+                )
             )
 
         self.assertIs(result, built)
@@ -210,9 +258,11 @@ class LLMFactoryTests(unittest.TestCase):
         settings = replace(self.settings, llm_provider="openai")
         with patch("app.llm_factory.ChatOpenAI", return_value=built) as constructor:
             result = build_chat_model(
-                settings,
-                model="gpt-5-mini",
-                temperature=0.2,
+                replace(
+                    resolve_agent_llm_config(settings),
+                    model="gpt-5-mini",
+                    temperature=0.2,
+                )
             )
 
         self.assertIs(result, built)
@@ -223,12 +273,57 @@ class LLMFactoryTests(unittest.TestCase):
             base_url="https://api.openai.com/v1",
         )
 
-    def test_runtime_factory_builds_primary_and_parser_models(self) -> None:
+    def test_runtime_factory_reuses_agent_llm_when_routing_matches_main(self) -> None:
         primary = object()
-        parser = object()
-        with patch("app.llm_factory.build_chat_model", side_effect=[primary, parser]) as build_chat_model_mock:
-            built_primary, built_parser = build_runtime_llms(self.settings)
+        with patch("app.llm_factory.build_chat_model", return_value=primary) as build_chat_model_mock:
+            runtime_llms = build_runtime_llms(self.settings)
 
-        self.assertIs(built_primary, primary)
-        self.assertIs(built_parser, parser)
+        self.assertIsInstance(runtime_llms, RuntimeLLMs)
+        self.assertIsInstance(runtime_llms.agent_llm, LoggedLLM)
+        self.assertIs(runtime_llms.agent_llm.delegate, primary)
+        self.assertIs(runtime_llms.routing_llm, runtime_llms.agent_llm)
+        build_chat_model_mock.assert_called_once_with(resolve_agent_llm_config(self.settings))
+
+    def test_runtime_factory_builds_distinct_routing_llm_when_overridden(self) -> None:
+        settings = replace(
+            self.settings,
+            routing_llm_provider="openai",
+            routing_llm_model="gpt-5.4",
+            routing_llm_temperature=0.05,
+            routing_google_api_key="",
+            routing_openai_api_key="routing-key",
+            routing_openai_base_url="https://routing.example/v1",
+            routing_llm_overrides_present=True,
+        )
+        primary = object()
+        routing = object()
+        with patch("app.llm_factory.build_chat_model", side_effect=[primary, routing]) as build_chat_model_mock:
+            runtime_llms = build_runtime_llms(settings)
+
+        self.assertIsInstance(runtime_llms.agent_llm, LoggedLLM)
+        self.assertIsInstance(runtime_llms.routing_llm, LoggedLLM)
+        self.assertIs(runtime_llms.agent_llm.delegate, primary)
+        self.assertIs(runtime_llms.routing_llm.delegate, routing)
         self.assertEqual(build_chat_model_mock.call_count, 2)
+        self.assertEqual(build_chat_model_mock.call_args_list[0].args[0], resolve_agent_llm_config(settings))
+        self.assertEqual(build_chat_model_mock.call_args_list[1].args[0], resolve_routing_llm_config(settings))
+
+    def test_logged_llm_reports_provider_and_model_on_invoke(self) -> None:
+        class DummyLLM:
+            def invoke(self, _input):
+                return "ok"
+
+        logged_llm = LoggedLLM(
+            DummyLLM(),
+            role="routing_llm",
+            provider="openai",
+            model="gpt-5.4",
+        )
+
+        with self.assertLogs("app.llm_factory", level="INFO") as logs:
+            result = logged_llm.invoke("hello")
+
+        self.assertEqual(result, "ok")
+        self.assertIn("role=routing_llm", logs.output[0])
+        self.assertIn("provider=openai", logs.output[0])
+        self.assertIn("model=gpt-5.4", logs.output[0])

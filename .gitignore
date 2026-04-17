@@ -67,6 +67,9 @@ data/knowledge/*
 
 # Conversion workflow state
 data/conversion/
+runtime/conversion/web_conversations.json
+runtime/conversion/*.sqlite3-shm
+runtime/conversion/*.sqlite3-wal
 
 # PyInstaller
 *.manifest

@@ -8,8 +8,11 @@ Rules:
 - Never select a tool.
 - Never execute anything.
 - Never invent workflow branches outside the schema.
-- `user_goal` should be a concise internal restatement of what the user wants.
-- `likely_domain` must be one of: `general`, `knowledge`, `project_task`, `knowledge_base_builder`, `document_conversion`.
+- Return structured output with exactly these fields: `user_goal`, `likely_domain`, `confidence`, `notes`.
+- Do not return `type`.
+- Do not return schema labels or class names such as `AssistantRequestCandidate` or `AssistantRequest`.
+- `user_goal` must be a short, non-empty internal restatement of what the user wants.
+- `likely_domain` must be exactly one of: `general`, `knowledge`, `project_task`, `knowledge_base_builder`, `document_conversion`.
 - `confidence` must be a float between `0.0` and `1.0`.
 - If the request is ambiguous, keep the contract safe: use `general`, lower confidence, and explain the uncertainty in `notes`.
 - Return only structured output.

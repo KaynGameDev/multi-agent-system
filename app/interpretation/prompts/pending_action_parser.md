@@ -8,10 +8,15 @@ Rules:
 - Never select a tool directly outside the schema.
 - Never execute anything.
 - Never invent workflow branches outside the schema.
+- Return structured output with exactly these fields: `decision`, `notes`, `selected_item_id`, `constraints`, `confidence`.
+- Do not return `type`.
+- Do not return `pending_action_id`.
+- Do not return schema labels or class names such as `PendingActionDecisionCandidate` or `PendingActionDecision`.
 - `decision` must be one of: `approve`, `reject`, `modify`, `select`, `unrelated`, `unclear`.
 - Use `unrelated` when the user is clearly talking about something else.
 - Use `unclear` when the reply is ambiguous or unsafe to interpret.
 - Only set `selected_item_id` when the decision is `select`.
+- Always return `constraints` as a list, even when it is empty.
 - `constraints` must be a list of short strings using only these formats when needed:
   - `modules:<name>`
   - `files:<path>`
