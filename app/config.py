@@ -44,6 +44,7 @@ DEFAULT_KNOWLEDGE_FILE_TYPES = (
 DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CATALOG_PATH = "knowledge/AI/Rules/google_sheets_catalog.json"
 DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CACHE_TTL_SECONDS = 120
 DEFAULT_CONVERSION_WORK_DIR = "runtime/conversion"
+DEFAULT_MEMORY_WORK_DIR = "runtime/memory"
 DEFAULT_JADE_PROJECT_SKILLS_DIR = ".jade/skills"
 DEFAULT_WEB_AUTH_SESSION_MAX_AGE_SECONDS = 60 * 60 * 12
 DEFAULT_CONTEXT_WINDOW_AUTO_COMPACT_ENABLED = True
@@ -52,6 +53,9 @@ DEFAULT_CONTEXT_WINDOW_AUTO_COMPACT_FAILURE_LIMIT = 3
 DEFAULT_SESSION_MEMORY_ENABLED = True
 DEFAULT_SESSION_MEMORY_INITIALIZE_THRESHOLD_TOKENS = 2_048
 DEFAULT_SESSION_MEMORY_UPDATE_GROWTH_THRESHOLD_TOKENS = 768
+DEFAULT_LONG_TERM_MEMORY_ENABLED = False
+DEFAULT_MEMORY_RETRIEVAL_ENABLED = False
+DEFAULT_MEMORY_RETRIEVAL_DEFAULT_LIMIT = 8
 
 
 @dataclass(frozen=True)
@@ -131,6 +135,10 @@ class Settings:
     knowledge_google_sheets_cache_ttl_seconds: int = DEFAULT_KNOWLEDGE_GOOGLE_SHEETS_CACHE_TTL_SECONDS
     conversion_work_dir: str = DEFAULT_CONVERSION_WORK_DIR
     langgraph_checkpoint_db_path: str = ""
+    memory_work_dir: str = DEFAULT_MEMORY_WORK_DIR
+    long_term_memory_enabled: bool = DEFAULT_LONG_TERM_MEMORY_ENABLED
+    memory_retrieval_enabled: bool = DEFAULT_MEMORY_RETRIEVAL_ENABLED
+    memory_retrieval_default_limit: int = DEFAULT_MEMORY_RETRIEVAL_DEFAULT_LIMIT
 
 
 _cached_settings: Settings | None = None
@@ -298,6 +306,22 @@ def load_settings(force_reload: bool = False) -> Settings:
             or DEFAULT_CONVERSION_WORK_DIR
         ),
         langgraph_checkpoint_db_path=os.getenv("LANGGRAPH_CHECKPOINT_DB_PATH", "").strip(),
+        memory_work_dir=(
+            os.getenv("MEMORY_WORK_DIR", DEFAULT_MEMORY_WORK_DIR).strip()
+            or DEFAULT_MEMORY_WORK_DIR
+        ),
+        long_term_memory_enabled=parse_bool_env(
+            "LONG_TERM_MEMORY_ENABLED",
+            DEFAULT_LONG_TERM_MEMORY_ENABLED,
+        ),
+        memory_retrieval_enabled=parse_bool_env(
+            "MEMORY_RETRIEVAL_ENABLED",
+            DEFAULT_MEMORY_RETRIEVAL_ENABLED,
+        ),
+        memory_retrieval_default_limit=parse_positive_int_env(
+            "MEMORY_RETRIEVAL_DEFAULT_LIMIT",
+            DEFAULT_MEMORY_RETRIEVAL_DEFAULT_LIMIT,
+        ),
     )
     return _cached_settings
 
