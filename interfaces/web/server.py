@@ -30,6 +30,15 @@ from app.context_window import (
 )
 from app.identity import build_user_identity_context
 from app.messages import extract_final_text
+from app.memory.agent_scope import resolve_agent_memory_context
+from app.memory.consolidation import (
+    consolidate_long_term_memory,
+    should_schedule_long_term_memory_consolidation,
+)
+from app.memory.consolidation_background import (
+    BackgroundMemoryConsolidator,
+    MemoryConsolidationTarget,
+)
 from app.memory.extraction import persist_durable_turn_memories, turn_has_direct_memory_write
 from app.paths import resolve_project_path
 from app.reactive_recovery import (
@@ -104,6 +113,7 @@ class WebServer:
         conversion_store: ConversionSessionStore | None = None,
         checkpoint_store: GraphCheckpointStore | None = None,
         session_memory_updater: BackgroundSessionMemoryUpdater | None = None,
+        memory_consolidator: BackgroundMemoryConsolidator | None = None,
     ) -> None:
         self.agent_graph = agent_graph
         self.settings = settings
@@ -115,6 +125,10 @@ class WebServer:
         )
         self.session_memory_updater = session_memory_updater or BackgroundSessionMemoryUpdater(
             self._refresh_session_memory_in_background,
+        )
+        self.memory_consolidator = memory_consolidator or BackgroundMemoryConsolidator(
+            self._consolidate_memory_in_background,
+            debounce_seconds=self.settings.memory_consolidation_debounce_seconds,
         )
         self.conversion_store = conversion_store or ConversionSessionStore(self._resolve_path(settings.conversion_work_dir))
         self.checkpoint_store = checkpoint_store
@@ -147,6 +161,7 @@ class WebServer:
 
     def stop(self) -> None:
         self.session_memory_updater.close()
+        self.memory_consolidator.close()
         if self._server is not None:
             self._server.should_exit = True
 
@@ -450,14 +465,25 @@ class WebServer:
             )
             if invoke_succeeded:
                 updated_conversation = self.conversation_store.get_full_conversation(conversation_id)
+                memory_state = self._build_web_memory_runtime_state(
+                    conversation_id=conversation_id,
+                    thread_id=thread_id,
+                    payload=payload,
+                    conversation=updated_conversation,
+                    route=route,
+                    active_session=active_session,
+                )
                 self._extract_durable_memories_after_turn(
                     conversation_id=conversation_id,
                     thread_id=thread_id,
                     route=route,
-                    payload=payload,
+                    state=memory_state,
                     conversation=updated_conversation,
                     assistant_metadata=assistant_metadata,
-                    active_session=active_session,
+                )
+                self._schedule_memory_consolidation(
+                    route=route,
+                    state=memory_state,
                 )
                 self._schedule_session_memory_refresh(
                     conversation_id=conversation_id,
@@ -1044,10 +1070,9 @@ class WebServer:
         conversation_id: str,
         thread_id: str,
         route: str,
-        payload: WebMessageRequest,
+        state: dict[str, Any],
         conversation: dict[str, Any],
         assistant_metadata: dict[str, object] | None,
-        active_session: Any | None,
     ) -> None:
         if not self.settings.long_term_memory_enabled:
             return
@@ -1067,14 +1092,7 @@ class WebServer:
                 self.settings,
                 agent_name=str(route or "").strip(),
                 memory_scope=memory_scope,
-                state=self._build_web_memory_runtime_state(
-                    conversation_id=conversation_id,
-                    thread_id=thread_id,
-                    payload=payload,
-                    conversation=conversation,
-                    route=route,
-                    active_session=active_session,
-                ),
+                state=state,
                 transcript_messages=transcript_messages,
             )
         except Exception:
@@ -1096,6 +1114,41 @@ class WebServer:
                 len(persisted),
                 [memory.memory_id for memory in persisted],
             )
+
+    def _schedule_memory_consolidation(
+        self,
+        *,
+        route: str,
+        state: dict[str, Any],
+    ) -> None:
+        if not self.settings.memory_consolidation_enabled:
+            return
+
+        normalized_route = str(route or "").strip()
+        memory_scope = self._agent_memory_scopes.get(normalized_route)
+        if memory_scope is None:
+            return
+
+        context = resolve_agent_memory_context(
+            self.settings,
+            agent_name=normalized_route,
+            memory_scope=memory_scope,
+            state=state,
+        )
+        if not should_schedule_long_term_memory_consolidation(
+            context.root_dir,
+            min_entries=self.settings.memory_consolidation_min_entries,
+        ):
+            return
+
+        self.memory_consolidator.schedule(
+            MemoryConsolidationTarget(
+                root_dir=str(context.root_dir),
+                agent_name=context.agent_name,
+                memory_scope=context.scope,
+                scope_key=context.scope_key,
+            )
+        )
 
     def _build_web_memory_runtime_state(
         self,
@@ -1127,6 +1180,30 @@ class WebServer:
         )
         merged_state["requested_agent"] = str(route or "").strip()
         return merged_state
+
+    def _consolidate_memory_in_background(
+        self,
+        target: MemoryConsolidationTarget,
+    ) -> None:
+        if not self.settings.memory_consolidation_enabled:
+            return
+
+        summary = consolidate_long_term_memory(
+            target.root_dir,
+            min_entries=self.settings.memory_consolidation_min_entries,
+        )
+        if summary.updated_memory_ids or summary.deleted_memory_ids:
+            logger.info(
+                "Consolidated long-term memory root=%s agent=%s scope=%s scope_key=%s updated=%s deleted=%s noisy_groups=%s duplicate_groups=%s",
+                target.root_dir,
+                target.agent_name,
+                target.memory_scope,
+                target.scope_key,
+                summary.updated_memory_ids,
+                summary.deleted_memory_ids,
+                summary.noisy_group_count,
+                summary.duplicate_group_count,
+            )
 
     def _refresh_session_memory_in_background(
         self,

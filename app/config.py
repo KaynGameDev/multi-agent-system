@@ -56,6 +56,9 @@ DEFAULT_SESSION_MEMORY_UPDATE_GROWTH_THRESHOLD_TOKENS = 768
 DEFAULT_LONG_TERM_MEMORY_ENABLED = False
 DEFAULT_MEMORY_RETRIEVAL_ENABLED = False
 DEFAULT_MEMORY_RETRIEVAL_DEFAULT_LIMIT = 8
+DEFAULT_MEMORY_CONSOLIDATION_ENABLED = False
+DEFAULT_MEMORY_CONSOLIDATION_MIN_ENTRIES = 8
+DEFAULT_MEMORY_CONSOLIDATION_DEBOUNCE_SECONDS = 5
 
 
 @dataclass(frozen=True)
@@ -139,6 +142,9 @@ class Settings:
     long_term_memory_enabled: bool = DEFAULT_LONG_TERM_MEMORY_ENABLED
     memory_retrieval_enabled: bool = DEFAULT_MEMORY_RETRIEVAL_ENABLED
     memory_retrieval_default_limit: int = DEFAULT_MEMORY_RETRIEVAL_DEFAULT_LIMIT
+    memory_consolidation_enabled: bool = DEFAULT_MEMORY_CONSOLIDATION_ENABLED
+    memory_consolidation_min_entries: int = DEFAULT_MEMORY_CONSOLIDATION_MIN_ENTRIES
+    memory_consolidation_debounce_seconds: int = DEFAULT_MEMORY_CONSOLIDATION_DEBOUNCE_SECONDS
 
 
 _cached_settings: Settings | None = None
@@ -321,6 +327,18 @@ def load_settings(force_reload: bool = False) -> Settings:
         memory_retrieval_default_limit=parse_positive_int_env(
             "MEMORY_RETRIEVAL_DEFAULT_LIMIT",
             DEFAULT_MEMORY_RETRIEVAL_DEFAULT_LIMIT,
+        ),
+        memory_consolidation_enabled=parse_bool_env(
+            "MEMORY_CONSOLIDATION_ENABLED",
+            DEFAULT_MEMORY_CONSOLIDATION_ENABLED,
+        ),
+        memory_consolidation_min_entries=parse_positive_int_env(
+            "MEMORY_CONSOLIDATION_MIN_ENTRIES",
+            DEFAULT_MEMORY_CONSOLIDATION_MIN_ENTRIES,
+        ),
+        memory_consolidation_debounce_seconds=parse_non_negative_int_env(
+            "MEMORY_CONSOLIDATION_DEBOUNCE_SECONDS",
+            DEFAULT_MEMORY_CONSOLIDATION_DEBOUNCE_SECONDS,
         ),
     )
     return _cached_settings

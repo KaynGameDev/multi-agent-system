@@ -11,6 +11,8 @@ This folder contains the shared memory subsystem surface for Jade, including fil
 - `long_term.py`: reads, validates, and mutates file-based long-term memory on disk.
 - `retrieval.py`: header-first retrieval helpers that rank index entries before opening a few topic files.
 - `extraction.py`: conservative post-turn durable-memory extraction helpers that promote a few stable facts into long-term memory.
+- `consolidation.py`: cleanup helpers that merge noisy daily/session memories into cleaner topic memories and prune duplicates.
+- `consolidation_background.py`: optional debounced background scheduler for consolidation jobs.
 - `__init__.py`: convenience exports for the package surface.
 
 ## Runtime Concepts
@@ -61,6 +63,23 @@ It intentionally skips ordinary ephemeral asks like "what is due today?" and it 
 ### Compaction
 
 Compaction reduces a long active transcript into a continuation summary plus a small preserved tail. Compaction is not long-term memory by itself; it is a context-window management step that may reuse session memory when that summary is still valid.
+
+### Consolidation
+
+Consolidation is the cleanup pass that keeps long-term memory compact over time. It is separate from turn-time extraction and retrieval:
+
+- extraction writes a few durable facts after a turn
+- retrieval reads a few relevant memories before a turn
+- consolidation merges noisy or repeated long-term entries after enough memory activity has accumulated
+
+The current consolidation pass is intentionally conservative:
+
+- it treats `daily/`, `session/`, and `turn/` memory ids as noisy sources
+- it promotes those noisy entries into cleaner topic memories, reusing an existing canonical topic when one already exists
+- it removes exact duplicate memories after consolidation
+- it treats superseded noisy source entries and duplicate copies as stale and prunes them
+
+The background consolidator is optional and off by default. When enabled, the web runtime debounces consolidation by memory root so the main request path stays non-blocking.
 
 ## Default Path Layout
 
@@ -189,6 +208,8 @@ Scoped agent memory is exposed through dedicated memory tools rather than raw pa
 When retrieval is enabled, scoped agents can also inject a compact `Relevant Memories` block into their prompt. That block is built from the agent's own scoped memory root only, so retrieval stays aligned with the same path-scoped permission boundary as read and write operations.
 
 Scoped agents can also opt into automatic durable-memory promotion after a successful turn. That promotion writes into the same scope-resolved long-term memory root, so the automatic path follows the same directory boundary as explicit memory tool use.
+
+If consolidation is enabled, the same scoped memory root can also receive a background cleanup pass. That cleanup still stays inside the same scope-resolved directory.
 
 ## Current Repo Mapping
 

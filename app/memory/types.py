@@ -361,6 +361,49 @@ class MemoryRetrievalResult(BaseModel):
         return cleaned
 
 
+class LongTermMemoryConsolidationSummary(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    root_dir: str = Field(min_length=1)
+    examined_count: int = Field(default=0, ge=0)
+    updated_memory_ids: list[str] = Field(default_factory=list)
+    deleted_memory_ids: list[str] = Field(default_factory=list)
+    noisy_group_count: int = Field(default=0, ge=0)
+    duplicate_group_count: int = Field(default=0, ge=0)
+
+    @field_validator("root_dir")
+    @classmethod
+    def validate_required_root_dir(cls, value: str) -> str:
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            raise ValueError("Value must not be empty.")
+        return cleaned
+
+    @field_validator("updated_memory_ids", "deleted_memory_ids", mode="before")
+    @classmethod
+    def normalize_memory_id_lists(cls, value: Any) -> list[str]:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        if not isinstance(value, (list, tuple)):
+            raise ValueError("Value must be a list of strings.")
+        return [str(item) for item in value]
+
+    @field_validator("updated_memory_ids", "deleted_memory_ids")
+    @classmethod
+    def validate_memory_id_lists(cls, value: list[str]) -> list[str]:
+        normalized: list[str] = []
+        seen: set[str] = set()
+        for item in value:
+            cleaned = str(item or "").strip()
+            if not cleaned or cleaned in seen:
+                continue
+            seen.add(cleaned)
+            normalized.append(cleaned)
+        return normalized
+
+
 class ConversationCompactionRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

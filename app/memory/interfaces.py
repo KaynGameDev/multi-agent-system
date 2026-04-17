@@ -6,6 +6,7 @@ from app.memory.types import (
     ConversationCompactionRequest,
     ConversationCompactionSummary,
     LongTermMemoryFile,
+    LongTermMemoryConsolidationSummary,
     LongTermMemoryIndexEntry,
     LongTermMemoryWrite,
     MemoryRetrievalQuery,
@@ -57,6 +58,11 @@ class LongTermMemoryBackend(Protocol):
 
 class MemoryRetriever(Protocol):
     def search(self, query: MemoryRetrievalQuery) -> list[MemoryRetrievalResult]:
+        ...
+
+
+class MemoryConsolidator(Protocol):
+    def consolidate(self) -> LongTermMemoryConsolidationSummary:
         ...
 
 

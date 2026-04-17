@@ -259,6 +259,23 @@ class ProjectTaskDirectMemoryWriteGraph:
         }
 
 
+class ProjectTaskPlainReplyGraph:
+    def __init__(self) -> None:
+        self.last_state = None
+
+    def invoke(self, initial_state, config=None):
+        self.last_state = dict(initial_state)
+        return {
+            **initial_state,
+            "route": "project_task_agent",
+            "route_reason": "Standard project-task reply.",
+            "skill_resolution_diagnostics": [],
+            "agent_selection_diagnostics": [],
+            "selection_warnings": [],
+            "messages": [AIMessage(content="Here is the current task summary.")],
+        }
+
+
 class PromptTooLongRecoveryGraph:
     def __init__(self, *, fail_count: int = 1, success_reply: str = "Recovered after compaction.") -> None:
         self.fail_count = fail_count
@@ -646,6 +663,63 @@ class WebServerApiTests(unittest.TestCase):
         store = FileLongTermMemoryStore(context.root_dir)
 
         self.assertEqual(store.list(), [])
+
+    def test_project_task_turn_schedules_background_memory_consolidation_when_enabled(self) -> None:
+        settings = replace(
+            self.settings,
+            long_term_memory_enabled=True,
+            memory_consolidation_enabled=True,
+            memory_consolidation_min_entries=1,
+            memory_consolidation_debounce_seconds=0,
+        )
+        server = WebServer(agent_graph=ProjectTaskPlainReplyGraph(), settings=settings)
+        client = TestClient(server.app)
+
+        conversation = client.post("/api/conversations", json={"title": "Memory consolidation"}).json()
+        state = {
+            "user_id": "tester@example.com",
+            "thread_id": f"web:{conversation['conversation_id']}",
+            "channel_id": conversation["conversation_id"],
+        }
+        context = resolve_agent_memory_context(
+            settings,
+            agent_name="project_task_agent",
+            memory_scope="user",
+            state=state,
+        )
+        store = FileLongTermMemoryStore(context.root_dir)
+        store.upsert(
+            {
+                "memory_id": "session/2026-04-17/preferred-name",
+                "name": "Preferred Name",
+                "description": "User's preferred name for future replies.",
+                "memory_type": "user",
+                "content_markdown": "Call the user `Kay` in future replies.",
+            }
+        )
+        store.upsert(
+            {
+                "memory_id": "daily/2026-04-18/preferred-name",
+                "name": "Preferred Name",
+                "description": "User's preferred name for future replies.",
+                "memory_type": "user",
+                "content_markdown": "Call the user `Kay` in future replies.",
+            }
+        )
+
+        response = client.post(
+            f"/api/conversations/{conversation['conversation_id']}/messages",
+            json={
+                "message": "What tasks are due today?",
+                "display_name": "Tester",
+                "email": "tester@example.com",
+            },
+        )
+
+        self.assertEqual(response.status_code, 200)
+        server.memory_consolidator.flush(str(context.root_dir))
+        self.assertTrue(server.memory_consolidator.wait_for_idle(str(context.root_dir), timeout=1.0))
+        self.assertEqual([entry.memory_id for entry in store.list()], ["user/preferred-name"])
 
     def test_web_transcript_persists_runtime_rehydration_state_in_assistant_metadata(self) -> None:
         graph = RehydrationStateGraph()

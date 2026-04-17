@@ -19,6 +19,7 @@ from app.memory.paths import (
 from app.memory.types import (
     ConversationCompactionRequest,
     LongTermMemoryIndexEntry,
+    LongTermMemoryConsolidationSummary,
     LongTermMemoryRecord,
     LongTermMemoryWrite,
     MemoryReference,
@@ -49,6 +50,9 @@ class MemoryScaffoldingTests(unittest.TestCase):
                 "LONG_TERM_MEMORY_ENABLED": "true",
                 "MEMORY_RETRIEVAL_ENABLED": "true",
                 "MEMORY_RETRIEVAL_DEFAULT_LIMIT": "12",
+                "MEMORY_CONSOLIDATION_ENABLED": "true",
+                "MEMORY_CONSOLIDATION_MIN_ENTRIES": "5",
+                "MEMORY_CONSOLIDATION_DEBOUNCE_SECONDS": "2",
             },
             clear=True,
         ):
@@ -58,6 +62,9 @@ class MemoryScaffoldingTests(unittest.TestCase):
         self.assertTrue(settings.long_term_memory_enabled)
         self.assertTrue(settings.memory_retrieval_enabled)
         self.assertEqual(settings.memory_retrieval_default_limit, 12)
+        self.assertTrue(settings.memory_consolidation_enabled)
+        self.assertEqual(settings.memory_consolidation_min_entries, 5)
+        self.assertEqual(settings.memory_consolidation_debounce_seconds, 2)
 
     def test_memory_paths_resolve_from_memory_work_dir(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
@@ -158,6 +165,16 @@ class MemoryScaffoldingTests(unittest.TestCase):
             scope="workspace",
         )
         self.assertEqual(result.score, 0.92)
+
+        consolidation_summary = LongTermMemoryConsolidationSummary(
+            root_dir="/tmp/runtime/memory/long_term",
+            examined_count=4,
+            updated_memory_ids=["user/preferred-name"],
+            deleted_memory_ids=["session/2026-04-17/preferred-name"],
+            noisy_group_count=1,
+            duplicate_group_count=0,
+        )
+        self.assertEqual(consolidation_summary.noisy_group_count, 1)
 
         compaction_request = ConversationCompactionRequest(
             thread_id="web:test-thread",
