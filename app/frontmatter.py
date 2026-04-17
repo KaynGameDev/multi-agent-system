@@ -87,3 +87,56 @@ def normalize_metadata_keys(metadata: dict[str, Any]) -> dict[str, Any]:
     for key, value in metadata.items():
         normalized[key.replace("-", "_")] = value
     return normalized
+
+
+def dump_frontmatter(metadata: dict[str, Any], *, delimiter: str = FRONTMATTER_DELIMITER) -> str:
+    lines = [delimiter]
+    for key, value in metadata.items():
+        normalized_key = str(key or "").strip()
+        if not normalized_key:
+            continue
+        if isinstance(value, bool):
+            rendered_value = "true" if value else "false"
+            lines.append(f"{normalized_key}: {rendered_value}")
+            continue
+        if isinstance(value, (list, tuple)):
+            lines.append(f"{normalized_key}:")
+            for item in value:
+                lines.append(f"- {_dump_frontmatter_scalar(item)}")
+            continue
+        lines.append(f"{normalized_key}: {_dump_frontmatter_scalar(value)}")
+    lines.append(delimiter)
+    return "\n".join(lines)
+
+
+def render_frontmatter_document(
+    metadata: dict[str, Any],
+    body: str = "",
+    *,
+    delimiter: str = FRONTMATTER_DELIMITER,
+) -> str:
+    normalized_body = str(body or "").strip()
+    parts = [
+        dump_frontmatter(metadata, delimiter=delimiter),
+        "",
+    ]
+    if normalized_body:
+        parts.extend([normalized_body, ""])
+    return "\n".join(parts)
+
+
+def _dump_frontmatter_scalar(value: Any) -> str:
+    if value is None:
+        return '""'
+    if isinstance(value, bool):
+        return "true" if value else "false"
+    if isinstance(value, int):
+        return str(value)
+
+    rendered = str(value)
+    if not rendered:
+        return '""'
+    if re.search(r"[:#\[\],'\"]", rendered) or rendered != rendered.strip():
+        escaped = rendered.replace("\\", "\\\\").replace('"', '\\"')
+        return f'"{escaped}"'
+    return rendered

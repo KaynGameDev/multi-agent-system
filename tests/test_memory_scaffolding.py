@@ -12,11 +12,14 @@ from app.config import load_settings
 from app.memory.paths import (
     build_memory_subsystem_paths,
     resolve_long_term_memory_index_path,
+    resolve_long_term_memory_topics_dir,
     resolve_memory_work_dir,
 )
 from app.memory.types import (
     ConversationCompactionRequest,
+    LongTermMemoryIndexEntry,
     LongTermMemoryRecord,
+    LongTermMemoryWrite,
     MemoryReference,
     MemoryRetrievalQuery,
     MemoryRetrievalResult,
@@ -68,9 +71,11 @@ class MemoryScaffoldingTests(unittest.TestCase):
         self.assertEqual(paths.session_memory_store_path, expected_root / "session_memory.json")
         self.assertEqual(paths.long_term_memory_dir, expected_root / "long_term")
         self.assertEqual(paths.long_term_memory_index_path, expected_root / "long_term" / "MEMORY.md")
+        self.assertEqual(paths.long_term_memory_topics_dir, expected_root / "long_term" / "topics")
         self.assertEqual(paths.retrieval_dir, expected_root / "retrieval")
         self.assertEqual(paths.compaction_dir, expected_root / "compaction")
         self.assertEqual(resolve_long_term_memory_index_path(settings), expected_root / "long_term" / "MEMORY.md")
+        self.assertEqual(resolve_long_term_memory_topics_dir(settings), expected_root / "long_term" / "topics")
 
     def test_memory_contract_models_cover_session_long_term_retrieval_and_compaction(self) -> None:
         session_snapshot = SessionMemorySnapshot(
@@ -91,6 +96,24 @@ class MemoryScaffoldingTests(unittest.TestCase):
         )
         self.assertEqual(record.scope, "workspace")
         self.assertEqual(record.references[0].kind, "document_path")
+
+        index_entry = LongTermMemoryIndexEntry(
+            memory_id="project_overview",
+            relative_path="topics/project_overview.md",
+            name="Project Overview",
+            description="Shared roadmap and release context.",
+            memory_type="project",
+        )
+        self.assertEqual(index_entry.relative_path, "topics/project_overview.md")
+
+        write_request = LongTermMemoryWrite(
+            memory_id="project_overview",
+            name="Project Overview",
+            description="Shared roadmap and release context.",
+            memory_type="project",
+            content_markdown="The roadmap is currently focused on the memory subsystem.",
+        )
+        self.assertEqual(write_request.memory_type, "project")
 
         query = MemoryRetrievalQuery(
             query="release checklist",

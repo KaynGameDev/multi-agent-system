@@ -112,11 +112,53 @@ class LongTermMemoryFile(BaseModel):
         return str(value or "").strip()
 
 
+class LongTermMemoryIndexEntry(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    memory_id: str = Field(min_length=1)
+    relative_path: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    memory_type: LongTermMemoryType
+
+    @field_validator("memory_id", "relative_path", "name", "description")
+    @classmethod
+    def validate_required_index_entry_text(cls, value: str) -> str:
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            raise ValueError("Value must not be empty.")
+        return cleaned
+
+
+class LongTermMemoryWrite(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    memory_id: str = Field(min_length=1)
+    name: str = Field(min_length=1)
+    description: str = Field(min_length=1)
+    memory_type: LongTermMemoryType
+    content_markdown: str = ""
+
+    @field_validator("memory_id", "name", "description")
+    @classmethod
+    def validate_required_write_text(cls, value: str) -> str:
+        cleaned = str(value or "").strip()
+        if not cleaned:
+            raise ValueError("Value must not be empty.")
+        return cleaned
+
+    @field_validator("content_markdown")
+    @classmethod
+    def validate_optional_write_content(cls, value: str) -> str:
+        return str(value or "").strip()
+
+
 class LongTermMemoryCatalog(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     root_dir: str = Field(min_length=1)
     index_file: LongTermMemoryFile
+    index_entries: list[LongTermMemoryIndexEntry] = Field(default_factory=list)
     topic_files: list[LongTermMemoryFile] = Field(default_factory=list)
 
     @field_validator("root_dir")

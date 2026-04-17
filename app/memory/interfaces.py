@@ -5,7 +5,9 @@ from typing import Protocol
 from app.memory.types import (
     ConversationCompactionRequest,
     ConversationCompactionSummary,
-    LongTermMemoryRecord,
+    LongTermMemoryFile,
+    LongTermMemoryIndexEntry,
+    LongTermMemoryWrite,
     MemoryRetrievalQuery,
     MemoryRetrievalResult,
     SessionMemorySnapshot,
@@ -24,13 +26,16 @@ class SessionMemoryBackend(Protocol):
 
 
 class LongTermMemoryBackend(Protocol):
-    def get(self, memory_id: str) -> LongTermMemoryRecord | None:
+    def list(self) -> list[LongTermMemoryIndexEntry]:
         ...
 
-    def upsert(self, record: LongTermMemoryRecord) -> LongTermMemoryRecord:
+    def get(self, memory_id: str) -> LongTermMemoryFile | None:
         ...
 
-    def delete(self, memory_id: str) -> None:
+    def upsert(self, memory: LongTermMemoryWrite) -> LongTermMemoryFile:
+        ...
+
+    def delete(self, memory_id: str) -> bool:
         ...
 
 

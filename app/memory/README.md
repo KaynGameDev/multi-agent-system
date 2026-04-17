@@ -1,13 +1,13 @@
 # Memory Subsystem
 
-This folder is scaffolding for Jade's future memory subsystem. It adds names, paths, and contracts only. It does not change runtime behavior yet.
+This folder contains the shared memory subsystem surface for Jade, including the file-based long-term memory format and persistent store helpers.
 
 ## Folder Layout
 
 - `paths.py`: resolves the future memory work directory and the default paths for session memory, long-term memory, retrieval artifacts, and compaction artifacts.
 - `types.py`: shared contracts for session memory snapshots, long-term memory records, retrieval queries/results, and compaction requests/summaries.
 - `interfaces.py`: backend protocols for the future session-memory store, long-term-memory store, retrieval layer, and compactor.
-- `long_term.py`: reads and validates file-based long-term memory from disk.
+- `long_term.py`: reads, validates, and mutates file-based long-term memory on disk.
 - `__init__.py`: convenience exports for the package surface.
 
 ## Runtime Concepts
@@ -45,10 +45,10 @@ runtime/memory/
 
 ## Long-Term Memory File Format
 
-The long-term memory loader expects a required root index file plus Markdown topic files:
+The long-term memory store expects a required root index file plus Markdown topic files:
 
 - `long_term/MEMORY.md`: required index file
-- `long_term/**/*.md`: topic files, excluding the index file itself
+- `long_term/topics/**/*.md`: topic files managed by the store
 
 Each file must start with frontmatter containing:
 
@@ -67,12 +67,33 @@ Supported `type` values:
 - `project`
 - `reference`
 
-The loader validates that:
+The `MEMORY.md` body is intentionally short. It acts as a catalog and points to topic files instead of storing the full memory text inline. Entries are rendered like:
+
+```md
+## Topics
+
+- [Project Overview](topics/project_overview.md) (`project`): Shared roadmap and release context.
+```
+
+The loader/store validates that:
 
 - a `MEMORY` index file exists at the root of the long-term memory directory
 - each memory file has frontmatter
 - `name`, `description`, and `type` are present and non-empty
 - `type` is one of the supported values above
+- index entries point to files under `topics/`
+- index metadata matches the referenced topic file metadata
+
+## Persistent Store Helpers
+
+`long_term.py` now includes file-store helpers for:
+
+- listing memories from the `MEMORY.md` index
+- loading a single memory topic file by id
+- creating or updating a memory topic file and rewriting the index
+- deleting a memory topic file and removing its index entry
+
+The index stays compact, while full memory content lives only in the topic files.
 
 ## Current Repo Mapping
 
