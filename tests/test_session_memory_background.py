@@ -35,6 +35,32 @@ class SessionMemoryBackgroundUpdaterTests(unittest.TestCase):
 
         self.assertEqual([target.conversation_id for target in calls], ["c2"])
 
+    def test_updater_preserves_force_refresh_when_coalescing_targets(self) -> None:
+        calls: list[SessionMemoryRefreshTarget] = []
+        updater = BackgroundSessionMemoryUpdater(calls.append, debounce_seconds=60.0)
+        self.addCleanup(updater.close)
+
+        updater.schedule(
+            SessionMemoryRefreshTarget(
+                conversation_id="c1",
+                thread_id="web:test",
+                allowed_session_file_path="/tmp/sessions/web/test.md",
+                force_refresh=True,
+            )
+        )
+        updater.schedule(
+            SessionMemoryRefreshTarget(
+                conversation_id="c2",
+                thread_id="web:test",
+                allowed_session_file_path="/tmp/sessions/web/test.md",
+            )
+        )
+        updater.flush("web:test")
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0].conversation_id, "c2")
+        self.assertTrue(calls[0].force_refresh)
+
     def test_scoped_upsert_rejects_mismatched_thread_or_path(self) -> None:
         temp_dir = tempfile.TemporaryDirectory()
         self.addCleanup(temp_dir.cleanup)

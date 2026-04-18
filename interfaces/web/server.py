@@ -341,7 +341,7 @@ class WebServer:
                 except Exception:
                     logger.warning("Failed to delete checkpoint thread=%s", thread_id, exc_info=True)
             self._clear_auto_compact_failures(thread_id)
-            self._clear_session_memory(thread_id)
+            self._delete_session_memory(thread_id)
 
             return {
                 "deleted": True,
@@ -489,6 +489,7 @@ class WebServer:
                     conversation_id=conversation_id,
                     thread_id=thread_id,
                     conversation=updated_conversation,
+                    force_refresh=bool(context_compaction.get("applied")),
                 )
             conversation = self._build_public_conversation_payload(conversation_id)
             return {
@@ -935,16 +936,22 @@ class WebServer:
             ),
             session_memory=session_memory,
         )
+        self._cancel_session_memory_refresh(thread_id)
         self.conversation_store.replace_transcript(
             conversation_id,
             messages=bundle.compacted_messages,
         )
-        self._clear_session_memory(thread_id)
         self._reset_checkpoint_thread(thread_id)
         if record_auto_compact_failure:
             self._clear_auto_compact_failures(thread_id)
 
         compacted_conversation = self.conversation_store.get_full_conversation(conversation_id)
+        self._schedule_session_memory_refresh(
+            conversation_id=conversation_id,
+            thread_id=thread_id,
+            conversation=compacted_conversation,
+            force_refresh=True,
+        )
         compacted_snapshot = self._evaluate_context_window_snapshot(
             thread_id=thread_id,
             messages=compacted_conversation.get("messages", []),
@@ -1038,6 +1045,7 @@ class WebServer:
         conversation_id: str,
         thread_id: str,
         conversation: dict[str, Any],
+        force_refresh: bool = False,
     ) -> None:
         if not self.settings.session_memory_enabled:
             return
@@ -1047,7 +1055,7 @@ class WebServer:
             return
 
         existing_record = self.session_memory_store.get(thread_id)
-        if not should_schedule_background_session_memory_refresh(
+        if not force_refresh and not should_schedule_background_session_memory_refresh(
             transcript_messages,
             existing_record,
             initialize_threshold_tokens=self.settings.session_memory_initialize_threshold_tokens,
@@ -1061,6 +1069,7 @@ class WebServer:
                 conversation_id=conversation_id,
                 thread_id=thread_id,
                 allowed_session_file_path=str(self.session_memory_store.resolve_session_file_path(thread_id)),
+                force_refresh=force_refresh,
             )
         )
 
@@ -1236,7 +1245,8 @@ class WebServer:
             initialize_threshold_tokens=self.settings.session_memory_initialize_threshold_tokens,
             update_growth_threshold_tokens=self.settings.session_memory_update_growth_threshold_tokens,
             force_refresh=(
-                activity.turn_count >= DEFAULT_SESSION_MEMORY_BACKGROUND_MIN_TURNS
+                target.force_refresh
+                or activity.turn_count >= DEFAULT_SESSION_MEMORY_BACKGROUND_MIN_TURNS
                 or activity.tool_activity_count > 0
             ),
         )
@@ -1256,12 +1266,15 @@ class WebServer:
             updated_record.covered_tokens,
         )
 
-    def _clear_session_memory(self, thread_id: str) -> None:
+    def _cancel_session_memory_refresh(self, thread_id: str) -> None:
         self.session_memory_updater.cancel(thread_id)
+
+    def _delete_session_memory(self, thread_id: str) -> None:
+        self._cancel_session_memory_refresh(thread_id)
         try:
             self.session_memory_store.delete(thread_id)
         except Exception:
-            logger.warning("Failed to clear session memory thread=%s", thread_id, exc_info=True)
+            logger.warning("Failed to delete session memory thread=%s", thread_id, exc_info=True)
 
     def _versioned_static_path(self, relative_path: str) -> str:
         asset_path = self.static_dir / relative_path

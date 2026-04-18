@@ -18,6 +18,7 @@ class SessionMemoryRefreshTarget:
     conversation_id: str
     thread_id: str
     allowed_session_file_path: str
+    force_refresh: bool = False
 
 
 class BackgroundSessionMemoryUpdater:
@@ -46,7 +47,16 @@ class BackgroundSessionMemoryUpdater:
             existing_timer = self._timers.pop(normalized_thread_id, None)
             if existing_timer is not None:
                 existing_timer.cancel()
-            self._pending_targets[normalized_thread_id] = target
+            existing_target = self._pending_targets.get(normalized_thread_id)
+            self._pending_targets[normalized_thread_id] = SessionMemoryRefreshTarget(
+                conversation_id=target.conversation_id,
+                thread_id=target.thread_id,
+                allowed_session_file_path=target.allowed_session_file_path,
+                force_refresh=(
+                    target.force_refresh
+                    or (existing_target.force_refresh if existing_target is not None else False)
+                ),
+            )
             timer = Timer(self._debounce_seconds, self._run_pending_target, args=(normalized_thread_id,))
             timer.daemon = True
             self._timers[normalized_thread_id] = timer

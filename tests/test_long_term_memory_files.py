@@ -3,7 +3,9 @@ from __future__ import annotations
 import tempfile
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
+import app.memory.file_transaction as file_transaction
 from app.frontmatter import render_frontmatter_document
 from app.memory.long_term import (
     FileLongTermMemoryStore,
@@ -264,6 +266,37 @@ class LongTermMemoryFilesTests(unittest.TestCase):
         self.assertEqual(reloaded.content_markdown, "Version two.")
         self.assertEqual(index_entries[0].description, "Updated durable feedback summary.")
 
+    def test_upsert_long_term_memory_does_not_leave_orphan_topic_when_index_is_invalid(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir) / "long_term"
+            write_memory_markdown(
+                root / "MEMORY.md",
+                name="Memory Index",
+                description="Broken index for rollback testing.",
+                memory_type="reference",
+                body="\n".join(
+                    [
+                        "## Topics",
+                        "",
+                        "- invalid entry",
+                    ]
+                ),
+            )
+            topic_path = resolve_long_term_memory_topic_path(root, "project_overview")
+
+            with self.assertRaisesRegex(LongTermMemoryFormatError, "Invalid long-term memory index entry"):
+                upsert_long_term_memory(
+                    root,
+                    {
+                        "memory_id": "project_overview",
+                        "name": "Project Overview",
+                        "description": "Shared roadmap and release context.",
+                        "memory_type": "project",
+                        "content_markdown": "Should not be written when the index is invalid.",
+                    },
+                )
+            self.assertFalse(topic_path.exists())
+
     def test_delete_long_term_memory_removes_topic_file_and_index_entry(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:
             root = Path(tempdir) / "long_term"
@@ -285,6 +318,48 @@ class LongTermMemoryFilesTests(unittest.TestCase):
         self.assertTrue(deleted)
         self.assertFalse(topic_path.exists())
         self.assertEqual(index_entries, [])
+
+    def test_delete_long_term_memory_rolls_back_if_transaction_commit_fails(self) -> None:
+        with tempfile.TemporaryDirectory() as tempdir:
+            root = Path(tempdir) / "long_term"
+            upsert_long_term_memory(
+                root,
+                {
+                    "memory_id": "users/tester_preferences",
+                    "name": "Tester Preferences",
+                    "description": "Stable user preferences for the current workspace.",
+                    "memory_type": "user",
+                    "content_markdown": "Prefer concise updates with file references.",
+                },
+            )
+            index_path = resolve_long_term_memory_index_file(root)
+            topic_path = resolve_long_term_memory_topic_path(root, "users/tester_preferences")
+            original_index_text = index_path.read_text(encoding="utf-8")
+            original_topic_text = topic_path.read_text(encoding="utf-8")
+            apply_call_count = 0
+            real_apply = file_transaction._apply_root_file_transaction_operation
+
+            def failing_apply(operation):
+                nonlocal apply_call_count
+                apply_call_count += 1
+                if apply_call_count == 2:
+                    raise OSError("boom")
+                return real_apply(operation)
+
+            with patch(
+                "app.memory.file_transaction._apply_root_file_transaction_operation",
+                side_effect=failing_apply,
+            ):
+                with self.assertRaisesRegex(OSError, "boom"):
+                    delete_long_term_memory(root, "users/tester_preferences")
+
+            restored_index_text = index_path.read_text(encoding="utf-8")
+            restored_topic_text = topic_path.read_text(encoding="utf-8")
+            restored_entries = list_long_term_memories(root)
+
+        self.assertEqual(restored_index_text, original_index_text)
+        self.assertEqual(restored_topic_text, original_topic_text)
+        self.assertEqual([entry.memory_id for entry in restored_entries], ["users/tester_preferences"])
 
     def test_file_store_supports_save_load_list_and_delete(self) -> None:
         with tempfile.TemporaryDirectory() as tempdir:

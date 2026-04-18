@@ -8,6 +8,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from app.frontmatter import normalize_metadata_keys, render_frontmatter_document, split_frontmatter
+from app.memory.file_transaction import RootFileTransaction
 from app.memory.observability import emit_memory_telemetry
 from app.memory.types import (
     LongTermMemoryCatalog,
@@ -277,10 +278,7 @@ def upsert_long_term_memory(
         normalized_memory_id = normalize_long_term_memory_id(memory_write.memory_id)
         topic_relative_path = build_long_term_memory_topic_relative_path(normalized_memory_id)
         topic_path = (resolved_root_dir / topic_relative_path).resolve()
-        topic_path.parent.mkdir(parents=True, exist_ok=True)
-
         topic_document = render_long_term_memory_topic(memory_write, relative_path=topic_relative_path.as_posix())
-        topic_path.write_text(topic_document, encoding="utf-8")
 
         existing_index_file = _load_existing_index_file_or_default(resolved_root_dir)
         entry_map = {
@@ -295,11 +293,16 @@ def upsert_long_term_memory(
             description=memory_write.description,
             memory_type=memory_write.memory_type,
         )
-        _write_index_file(
-            resolved_root_dir,
-            index_file=existing_index_file,
-            index_entries=sorted(entry_map.values(), key=lambda item: item.memory_id),
+        transaction = RootFileTransaction(resolved_root_dir)
+        transaction.write_text(topic_relative_path, topic_document)
+        transaction.write_text(
+            f"{LONG_TERM_MEMORY_INDEX_BASENAME}.md",
+            render_long_term_memory_index_document(
+                existing_index_file,
+                sorted(entry_map.values(), key=lambda item: item.memory_id),
+            ),
         )
+        transaction.commit()
         memory_file = load_long_term_memory_file(topic_path, root_dir=resolved_root_dir)
     except Exception as exc:
         emit_memory_telemetry(
@@ -365,15 +368,17 @@ def delete_long_term_memory(root_dir: str | Path, memory_id: str) -> bool:
         return False
 
     topic_path = _resolve_indexed_topic_path(resolved_root_dir, entry.relative_path)
+    transaction = RootFileTransaction(resolved_root_dir)
     if topic_path.exists():
-        topic_path.unlink()
-        _prune_empty_parent_directories(topic_path.parent, stop_at=(resolved_root_dir / LONG_TERM_MEMORY_TOPICS_DIRNAME).resolve())
-
-    _write_index_file(
-        resolved_root_dir,
-        index_file=existing_index_file,
-        index_entries=sorted(entry_map.values(), key=lambda item: item.memory_id),
+        transaction.delete(topic_path)
+    transaction.write_text(
+        f"{LONG_TERM_MEMORY_INDEX_BASENAME}.md",
+        render_long_term_memory_index_document(
+            existing_index_file,
+            sorted(entry_map.values(), key=lambda item: item.memory_id),
+        ),
     )
+    transaction.commit()
     emit_memory_telemetry(
         logger,
         "long_term.delete",
@@ -524,7 +529,17 @@ def _write_index_file(
 ) -> LongTermMemoryFile:
     resolved_root_dir = Path(root_dir).expanduser().resolve()
     index_path = (resolved_root_dir / f"{LONG_TERM_MEMORY_INDEX_BASENAME}.md").resolve()
-    index_document = render_frontmatter_document(
+    index_document = render_long_term_memory_index_document(index_file, index_entries)
+    index_path.parent.mkdir(parents=True, exist_ok=True)
+    index_path.write_text(index_document, encoding="utf-8")
+    return load_long_term_memory_file(index_path, root_dir=resolved_root_dir)
+
+
+def render_long_term_memory_index_document(
+    index_file: LongTermMemoryFile,
+    index_entries: list[LongTermMemoryIndexEntry],
+) -> str:
+    return render_frontmatter_document(
         {
             "name": index_file.name,
             "description": index_file.description,
@@ -532,9 +547,6 @@ def _write_index_file(
         },
         format_long_term_memory_index(index_entries),
     )
-    index_path.parent.mkdir(parents=True, exist_ok=True)
-    index_path.write_text(index_document, encoding="utf-8")
-    return load_long_term_memory_file(index_path, root_dir=resolved_root_dir)
 
 
 def _resolve_indexed_topic_path(root_dir: str | Path, relative_path: str) -> Path:

@@ -12,6 +12,8 @@ from app.contracts import build_assistant_response
 from app.graph import build_graph
 from app.memory.agent_scope import resolve_agent_memory_context
 from app.memory.long_term import FileLongTermMemoryStore
+from app.memory.session_files import load_session_memory_file
+from app.session_memory_background import BackgroundSessionMemoryUpdater
 from fastapi.testclient import TestClient
 from langchain_core.messages import AIMessage, HumanMessage, SystemMessage
 from langgraph.checkpoint.memory import InMemorySaver
@@ -869,6 +871,71 @@ class WebServerApiTests(unittest.TestCase):
         self.assertTrue(isinstance(rebuilt_messages[2], HumanMessage))
         self.assertIn("## Continuation Summary", rebuilt_messages[1].content)
         self.assertEqual(rebuilt_messages[2].content, "What should we do next?")
+
+    def test_auto_compact_preserves_session_memory_until_forced_refresh_rebuilds_it(self) -> None:
+        settings = replace(
+            self.settings,
+            context_window_effective_window=1_000,
+            context_window_warning_threshold=600,
+            context_window_auto_compact_threshold=700,
+            context_window_hard_block_threshold=950,
+            context_window_auto_compact_enabled=True,
+            context_window_auto_compact_preserved_tail_count=1,
+            session_memory_enabled=True,
+            session_memory_initialize_threshold_tokens=1,
+            session_memory_update_growth_threshold_tokens=1,
+        )
+        graph = SessionMemoryAutoCompactGraph()
+        server = WebServer(agent_graph=graph, settings=settings)
+        server.session_memory_updater.close()
+        server.session_memory_updater = BackgroundSessionMemoryUpdater(
+            server._refresh_session_memory_in_background,
+            debounce_seconds=60.0,
+        )
+        self.addCleanup(server.session_memory_updater.close)
+        client = TestClient(server.app)
+
+        conversation = client.post("/api/conversations", json={"title": "Session memory retention"}).json()
+        conversation_id = conversation["conversation_id"]
+        thread_id = f"web:{conversation_id}"
+        session_file_path = server.session_memory_store.resolve_session_file_path(thread_id)
+
+        first_response = client.post(
+            f"/api/conversations/{conversation_id}/messages",
+            json={"message": "Start a long session", "display_name": "Tester", "email": "tester@example.com"},
+        )
+        self.assertEqual(first_response.status_code, 200)
+        server.session_memory_updater.flush(thread_id)
+
+        original_record = server.session_memory_store.get(thread_id)
+        self.assertIsNotNone(original_record)
+        self.assertTrue(session_file_path.exists())
+        self.assertEqual(load_session_memory_file(session_file_path).current_state, original_record.summary_markdown)
+
+        second_response = client.post(
+            f"/api/conversations/{conversation_id}/messages",
+            json={"message": "What should we do next?", "display_name": "Tester", "email": "tester@example.com"},
+        )
+
+        self.assertEqual(second_response.status_code, 200)
+        second_payload = second_response.json()
+        self.assertTrue(second_payload["context_compaction"]["applied"])
+        retained_record = server.session_memory_store.get(thread_id)
+        self.assertEqual(retained_record, original_record)
+        self.assertTrue(session_file_path.exists())
+        self.assertEqual(load_session_memory_file(session_file_path).current_state, original_record.summary_markdown)
+
+        server.session_memory_updater.flush(thread_id)
+
+        refreshed_record = server.session_memory_store.get(thread_id)
+        self.assertIsNotNone(refreshed_record)
+        self.assertEqual(refreshed_record.source, "reinitialize")
+        self.assertNotEqual(refreshed_record.last_message_id, original_record.last_message_id)
+        self.assertEqual(
+            refreshed_record.last_message_id,
+            server.conversation_store.get_full_conversation(conversation_id)["messages"][-1]["id"],
+        )
+        self.assertEqual(load_session_memory_file(session_file_path).current_state, refreshed_record.summary_markdown)
 
     def test_session_memory_refresh_runs_in_background_without_blocking_response(self) -> None:
         settings = replace(

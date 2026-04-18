@@ -9,13 +9,20 @@ from pathlib import Path
 
 from pydantic import ValidationError
 
+from app.memory.file_transaction import RootFileTransaction
 from app.memory.long_term import (
-    FileLongTermMemoryStore,
     LongTermMemoryFormatError,
-    delete_long_term_memory,
-    get_long_term_memory,
-    list_long_term_memories,
+    LongTermMemoryIndexEntry,
+    LongTermMemoryWrite,
+    _load_existing_index_file_or_default,
+    _resolve_indexed_topic_path,
+    build_long_term_memory_topic_relative_path,
     load_long_term_memory_catalog,
+    load_long_term_memory_file,
+    normalize_long_term_memory_id,
+    parse_long_term_memory_index,
+    render_long_term_memory_index_document,
+    render_long_term_memory_topic,
 )
 from app.memory.observability import emit_memory_telemetry
 from app.memory.types import (
@@ -135,17 +142,12 @@ def write_long_term_memory_snapshot_sync_state(
     resolved_user_root_dir = Path(user_root_dir).expanduser().resolve()
     resolved_user_root_dir.mkdir(parents=True, exist_ok=True)
 
-    sync_state = LongTermMemorySnapshotSyncState(
-        snapshot_id=snapshot.snapshot_id,
-        fingerprint=snapshot.fingerprint,
-        action=normalize_long_term_memory_snapshot_choice(action),
-        updated_at=datetime.now(timezone.utc).isoformat(),
+    sync_state = _build_long_term_memory_snapshot_sync_state(
+        snapshot=snapshot,
+        action=action,
     )
     sync_path = resolve_long_term_memory_snapshot_sync_path(resolved_user_root_dir)
-    sync_path.write_text(
-        json.dumps(sync_state.model_dump(mode="python"), indent=2, sort_keys=True) + "\n",
-        encoding="utf-8",
-    )
+    sync_path.write_text(_render_long_term_memory_snapshot_sync_state(sync_state), encoding="utf-8")
     return sync_state
 
 
@@ -266,33 +268,71 @@ def merge_long_term_memory_snapshot(
             project_root_dir,
             snapshot_id=snapshot_id,
         )
-        store = FileLongTermMemoryStore(resolved_user_root_dir)
+        existing_index_file = _load_existing_index_file_or_default(resolved_user_root_dir)
+        existing_entries = {
+            entry.memory_id: entry
+            for entry in parse_long_term_memory_index(existing_index_file.content_markdown)
+        }
+        desired_entry_map = dict(existing_entries)
+        transaction = RootFileTransaction(resolved_user_root_dir)
         for snapshot_memory in snapshot.memories:
-            existing_memory = get_long_term_memory(
-                resolved_user_root_dir,
-                snapshot_memory.memory_id,
+            existing_entry = existing_entries.get(snapshot_memory.memory_id)
+            existing_memory = (
+                load_long_term_memory_file(
+                    _resolve_indexed_topic_path(resolved_user_root_dir, existing_entry.relative_path),
+                    root_dir=resolved_user_root_dir,
+                )
+                if existing_entry is not None
+                else None
             )
             if existing_memory is None:
-                store.upsert(_build_snapshot_memory_write(snapshot_memory))
+                merged_payload = _build_snapshot_memory_write(snapshot_memory)
                 created_memory_ids.append(snapshot_memory.memory_id)
-                continue
+            else:
+                merged_payload = _build_merged_snapshot_memory(existing_memory, snapshot_memory)
+                if (
+                    existing_memory.name == merged_payload["name"]
+                    and existing_memory.description == merged_payload["description"]
+                    and existing_memory.memory_type == merged_payload["memory_type"]
+                    and existing_memory.content_markdown == merged_payload["content_markdown"]
+                ):
+                    continue
+                updated_memory_ids.append(snapshot_memory.memory_id)
 
-            merged_payload = _build_merged_snapshot_memory(existing_memory, snapshot_memory)
-            if (
-                existing_memory.name == merged_payload["name"]
-                and existing_memory.description == merged_payload["description"]
-                and existing_memory.memory_type == merged_payload["memory_type"]
-                and existing_memory.content_markdown == merged_payload["content_markdown"]
-            ):
-                continue
-            store.upsert(merged_payload)
-            updated_memory_ids.append(snapshot_memory.memory_id)
+            memory_write = LongTermMemoryWrite.model_validate(merged_payload)
+            normalized_memory_id = normalize_long_term_memory_id(memory_write.memory_id)
+            topic_relative_path = build_long_term_memory_topic_relative_path(normalized_memory_id)
+            transaction.write_text(
+                topic_relative_path,
+                render_long_term_memory_topic(
+                    memory_write,
+                    relative_path=topic_relative_path.as_posix(),
+                ),
+            )
+            desired_entry_map[normalized_memory_id] = LongTermMemoryIndexEntry(
+                memory_id=normalized_memory_id,
+                relative_path=topic_relative_path.as_posix(),
+                name=memory_write.name,
+                description=memory_write.description,
+                memory_type=memory_write.memory_type,
+            )
 
-        write_long_term_memory_snapshot_sync_state(
-            resolved_user_root_dir,
+        sync_state = _build_long_term_memory_snapshot_sync_state(
             snapshot=snapshot,
             action="merge",
         )
+        transaction.write_text(
+            LONG_TERM_MEMORY_SNAPSHOT_SYNC_FILENAME,
+            _render_long_term_memory_snapshot_sync_state(sync_state),
+        )
+        transaction.write_text(
+            "MEMORY.md",
+            render_long_term_memory_index_document(
+                existing_index_file,
+                sorted(desired_entry_map.values(), key=lambda item: item.memory_id),
+            ),
+        )
+        transaction.commit()
         summary = LongTermMemorySnapshotApplySummary(
             snapshot_id=snapshot.snapshot_id,
             fingerprint=snapshot.fingerprint,
@@ -330,21 +370,59 @@ def replace_long_term_memory_snapshot(
             project_root_dir,
             snapshot_id=snapshot_id,
         )
-        store = FileLongTermMemoryStore(resolved_user_root_dir)
-        existing_entries = {entry.memory_id: entry for entry in list_long_term_memories(resolved_user_root_dir)}
-        for memory_id in sorted(existing_entries):
-            if delete_long_term_memory(resolved_user_root_dir, memory_id):
-                deleted_memory_ids.append(memory_id)
-
+        existing_index_file = _load_existing_index_file_or_default(resolved_user_root_dir)
+        existing_entries = {
+            entry.memory_id: entry
+            for entry in parse_long_term_memory_index(existing_index_file.content_markdown)
+        }
+        transaction = RootFileTransaction(resolved_user_root_dir)
+        replacement_relative_paths: set[str] = set()
+        replacement_entries: list[LongTermMemoryIndexEntry] = []
         for snapshot_memory in snapshot.memories:
-            store.upsert(_build_snapshot_memory_write(snapshot_memory))
+            memory_write = LongTermMemoryWrite.model_validate(_build_snapshot_memory_write(snapshot_memory))
+            normalized_memory_id = normalize_long_term_memory_id(memory_write.memory_id)
+            topic_relative_path = build_long_term_memory_topic_relative_path(normalized_memory_id)
+            replacement_relative_paths.add(topic_relative_path.as_posix())
+            transaction.write_text(
+                topic_relative_path,
+                render_long_term_memory_topic(
+                    memory_write,
+                    relative_path=topic_relative_path.as_posix(),
+                ),
+            )
+            replacement_entries.append(
+                LongTermMemoryIndexEntry(
+                    memory_id=normalized_memory_id,
+                    relative_path=topic_relative_path.as_posix(),
+                    name=memory_write.name,
+                    description=memory_write.description,
+                    memory_type=memory_write.memory_type,
+                )
+            )
             created_memory_ids.append(snapshot_memory.memory_id)
 
-        write_long_term_memory_snapshot_sync_state(
-            resolved_user_root_dir,
+        for memory_id in sorted(existing_entries):
+            deleted_memory_ids.append(memory_id)
+            existing_entry = existing_entries[memory_id]
+            if existing_entry.relative_path not in replacement_relative_paths:
+                transaction.delete(existing_entry.relative_path)
+
+        sync_state = _build_long_term_memory_snapshot_sync_state(
             snapshot=snapshot,
             action="replace",
         )
+        transaction.write_text(
+            LONG_TERM_MEMORY_SNAPSHOT_SYNC_FILENAME,
+            _render_long_term_memory_snapshot_sync_state(sync_state),
+        )
+        transaction.write_text(
+            "MEMORY.md",
+            render_long_term_memory_index_document(
+                existing_index_file,
+                replacement_entries,
+            ),
+        )
+        transaction.commit()
         summary = LongTermMemorySnapshotApplySummary(
             snapshot_id=snapshot.snapshot_id,
             fingerprint=snapshot.fingerprint,
@@ -523,6 +601,23 @@ def _normalize_snapshot_id(value: str) -> str:
             raise LongTermMemorySnapshotError(f"Invalid snapshot id: {value}")
         parts.append(cleaned_part)
     return "/".join(parts)
+
+
+def _build_long_term_memory_snapshot_sync_state(
+    *,
+    snapshot: LongTermMemorySnapshot,
+    action: LongTermMemorySnapshotChoice,
+) -> LongTermMemorySnapshotSyncState:
+    return LongTermMemorySnapshotSyncState(
+        snapshot_id=snapshot.snapshot_id,
+        fingerprint=snapshot.fingerprint,
+        action=normalize_long_term_memory_snapshot_choice(action),
+        updated_at=datetime.now(timezone.utc).isoformat(),
+    )
+
+
+def _render_long_term_memory_snapshot_sync_state(sync_state: LongTermMemorySnapshotSyncState) -> str:
+    return json.dumps(sync_state.model_dump(mode="python"), indent=2, sort_keys=True) + "\n"
 
 
 def _normalize_text(value: str) -> str:
