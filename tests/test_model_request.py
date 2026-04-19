@@ -205,6 +205,46 @@ class ModelRequestTests(unittest.TestCase):
         self.assertEqual(len(built), 3)
         self.assertEqual([type(message).__name__ for message in built], ["HumanMessage", "SystemMessage", "HumanMessage"])
 
+    def test_orphaned_tool_invocation_is_removed_before_model_call(self) -> None:
+        built = build_model_request_messages(
+            transcript_messages=[
+                HumanMessage(content="Open the guide"),
+                AIMessage(
+                    content="",
+                    tool_calls=[{"id": "call_orphaned", "name": "read_knowledge_document", "args": {"document": "Guide"}}],
+                ),
+                HumanMessage(content="What next?"),
+            ],
+        )
+
+        self.assertEqual(len(built), 2)
+        self.assertEqual([type(message).__name__ for message in built], ["HumanMessage", "HumanMessage"])
+        self.assertEqual([message.content for message in built], ["Open the guide", "What next?"])
+
+    def test_partial_tool_result_block_is_downgraded_to_plain_assistant_text(self) -> None:
+        built = build_model_request_messages(
+            transcript_messages=[
+                HumanMessage(content="Write the draft"),
+                AIMessage(
+                    content="I started the write request.",
+                    tool_calls=[
+                        {"id": "call_write_1", "name": "write_knowledge_markdown_document", "args": {"path": "a.md"}},
+                        {"id": "call_write_2", "name": "write_knowledge_markdown_document", "args": {"path": "b.md"}},
+                    ],
+                ),
+                ToolMessage(
+                    content='{"ok": true, "relative_path": "a.md"}',
+                    tool_call_id="call_write_1",
+                ),
+                HumanMessage(content="Continue"),
+            ],
+        )
+
+        self.assertEqual(len(built), 3)
+        self.assertEqual([type(message).__name__ for message in built], ["HumanMessage", "AIMessage", "HumanMessage"])
+        self.assertEqual(built[1].content, "I started the write request.")
+        self.assertFalse(getattr(built[1], "tool_calls", []) or [])
+
 
 if __name__ == "__main__":
     unittest.main()

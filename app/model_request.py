@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import datetime, timezone
 import json
+import logging
 from collections.abc import Callable, Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -11,6 +12,8 @@ from langchain_core.messages import AIMessage, SystemMessage, ToolMessage
 from app.tool_runtime import parse_tool_message_content
 
 from interfaces.web.conversations import TRANSCRIPT_TYPE_COMPACT_BOUNDARY
+
+logger = logging.getLogger(__name__)
 
 RequestReducer = Callable[[list[Any]], list[Any]]
 DEFAULT_MICROCOMPACT_TOOL_RESULT_THRESHOLD_CHARS = 600
@@ -89,6 +92,7 @@ def project_transcript_messages(
     projected_messages = _apply_optional_reducer(projected_messages, hooks.microcompact)
     projected_messages = _apply_optional_reducer(projected_messages, hooks.collapse)
     projected_messages = _apply_optional_reducer(projected_messages, hooks.auto_compact)
+    projected_messages = _sanitize_tool_message_sequences(projected_messages)
     return projected_messages
 
 
@@ -488,3 +492,82 @@ def _truncate_text(text: str, *, limit: int) -> str:
     if len(cleaned) <= limit:
         return cleaned
     return cleaned[: max(limit - 1, 0)].rstrip() + "…"
+
+
+def _sanitize_tool_message_sequences(messages: list[Any]) -> list[Any]:
+    sanitized: list[Any] = []
+    index = 0
+    while index < len(messages):
+        message = messages[index]
+        if _is_tool_invocation_message(message):
+            block_end = index + 1
+            while block_end < len(messages) and isinstance(messages[block_end], ToolMessage):
+                block_end += 1
+
+            tool_block = messages[index + 1 : block_end]
+            if _has_valid_tool_message_block(message, tool_block):
+                sanitized.append(message)
+                sanitized.extend(tool_block)
+            else:
+                replacement = _strip_or_drop_tool_invocation_message(message)
+                if replacement is not None:
+                    sanitized.append(replacement)
+                if tool_block:
+                    logger.warning(
+                        "Dropping invalid tool-call history from model request: tool_call_ids=%s tool_results=%s",
+                        sorted(_extract_tool_call_ids(message)),
+                        [
+                            str(getattr(tool_message, "tool_call_id", "") or "").strip()
+                            for tool_message in tool_block
+                        ],
+                    )
+                else:
+                    logger.warning(
+                        "Dropping orphaned assistant tool call from model request: tool_call_ids=%s",
+                        sorted(_extract_tool_call_ids(message)),
+                    )
+            index = block_end
+            continue
+
+        if isinstance(message, ToolMessage):
+            logger.warning(
+                "Dropping stray tool result from model request: tool_call_id=%s",
+                str(getattr(message, "tool_call_id", "") or "").strip(),
+            )
+            index += 1
+            continue
+
+        sanitized.append(message)
+        index += 1
+
+    return sanitized
+
+
+def _has_valid_tool_message_block(message: Any, tool_block: list[Any]) -> bool:
+    tool_call_ids = _extract_tool_call_ids(message)
+    if not tool_call_ids:
+        return False
+    if not tool_block:
+        return False
+
+    matched_ids = {
+        str(getattr(tool_message, "tool_call_id", "") or "").strip()
+        for tool_message in tool_block
+        if isinstance(tool_message, ToolMessage) and str(getattr(tool_message, "tool_call_id", "") or "").strip()
+    }
+    if not tool_call_ids.issubset(matched_ids):
+        return False
+    return all(
+        isinstance(tool_message, ToolMessage)
+        and str(getattr(tool_message, "tool_call_id", "") or "").strip() in tool_call_ids
+        for tool_message in tool_block
+    )
+
+
+def _extract_tool_call_ids(message: Any) -> set[str]:
+    tool_calls = getattr(message, "tool_calls", []) or []
+    return {
+        str(tool_call.get("id", "") or "").strip()
+        for tool_call in tool_calls
+        if isinstance(tool_call, dict) and str(tool_call.get("id", "") or "").strip()
+    }
