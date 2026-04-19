@@ -18,6 +18,7 @@ from app.pending_actions import (
     is_pending_action_active,
     update_pending_action,
 )
+from app.pending_action_responder import run_pending_action_response
 from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
 from app.routing.pending_action_router import PendingActionRouter, PendingActionTurnResult, resolve_owned_pending_action_turn
 from app.skill_runtime import build_skill_prompt_context
@@ -288,135 +289,108 @@ def build_pending_action_response(
     latest_user_text = extract_latest_human_text(state)
     preferred_language = detect_response_language(latest_user_text)
     contract = pending_action_turn.execution_contract
-    validation = pending_action_turn.validation
-    if contract is None or validation is None:
+
+    def clarification_result(current_action: dict[str, Any], current_validation: dict[str, Any]) -> dict[str, Any]:
         content = build_pending_action_clarification(
+            current_action,
+            current_validation,
+            preferred_language=preferred_language,
+        )
+        return {
+            "messages": [AIMessage(content=content)],
+            "assistant_response": build_assistant_response(
+                kind="await_confirmation",
+                content=content,
+                pending_action=current_action,
+            ),
+            "pending_action": current_action,
+            "execution_contract": None,
+        }
+
+    def on_valid_resolution(updated_action: dict[str, Any], _decision, validation: dict[str, Any]) -> dict[str, Any]:
+        resolved_contract = contract
+        if resolved_contract is None:
+            return clarification_result(updated_action, {"reason": "The pending-action decision could not be validated."})
+
+        runtime_action = validation.get("runtime_action")
+        if runtime_action == "request_revision":
+            content = build_pending_action_revision_response(
+                updated_action,
+                resolved_contract,
+                preferred_language=preferred_language,
+            )
+            return {
+                "messages": [AIMessage(content=content)],
+                "assistant_response": build_assistant_response(
+                    kind="await_confirmation",
+                    content=content,
+                    pending_action=updated_action,
+                    execution_contract=None,
+                ),
+                "pending_action": updated_action,
+                "execution_contract": None,
+            }
+
+        if runtime_action != "execute":
+            return clarification_result(updated_action, validation)
+
+        retry_payload = build_pending_action_retry_tool_call(
+            updated_action,
+            source="knowledge_base_builder_agent",
+            reason="The pending knowledge-base write requires explicit confirmation.",
+            fallback_tool_call_id=f"call_retry_write_{len(state.get('messages', []))}",
+        )
+        if retry_payload is None:
+            content = translate_builder_text(
+                "I could not reconstruct the pending write request to execute it safely.",
+                preferred_language,
+            )
+            return {
+                "messages": [AIMessage(content=content)],
+                "assistant_response": build_assistant_response(
+                    kind="text",
+                    content=content,
+                    pending_action=updated_action,
+                    execution_contract=None,
+                ),
+                "pending_action": updated_action,
+                "execution_contract": None,
+            }
+
+        retry_message, tool_invocation = retry_payload
+        return {
+            "messages": [retry_message],
+            "assistant_response": build_assistant_response(
+                kind="invoke_tool",
+                content="",
+                pending_action=updated_action,
+                execution_contract=resolved_contract,
+                tool_invocation=tool_invocation,
+            ),
+            "pending_action": updated_action,
+            "execution_contract": resolved_contract,
+            "tool_invocation": tool_invocation,
+        }
+
+    return run_pending_action_response(
+        pending_action=pending_action,
+        pending_action_turn=pending_action_turn,
+        cannot_validate_text=build_pending_action_clarification(
             pending_action,
             {"reason": "The pending-action decision could not be validated."},
             preferred_language=preferred_language,
-        )
-        return {
-            "messages": [AIMessage(content=content)],
-            "assistant_response": build_assistant_response(
-                kind="await_confirmation",
-                content=content,
-                pending_action=pending_action,
-            ),
-            "pending_action": pending_action,
-            "execution_contract": None,
-        }
-
-    if validation.get("runtime_action") == "cancel":
-        content = translate_builder_text("Cancelled the pending knowledge-base write.", preferred_language)
-        return {
-            "messages": [AIMessage(content=content)],
-            "assistant_response": build_assistant_response(
-                kind="text",
-                content=content,
-                pending_action=None,
-                execution_contract=None,
-            ),
-            "pending_action": None,
-            "execution_contract": None,
-        }
-
-    normalized_scope = validation.get("normalized_scope") or {}
-    next_status = str(validation.get("next_status", "ask_clarification")).strip() or "ask_clarification"
-    updated_action = update_pending_action(
-        pending_action,
-        status=next_status,
-        target_scope=normalized_scope or None,
-        metadata_updates={"last_contract": dict(contract)},
-    )
-
-    if not validation.get("valid"):
-        content = build_pending_action_clarification(
-            updated_action,
-            validation,
-            preferred_language=preferred_language,
-        )
-        return {
-            "messages": [AIMessage(content=content)],
-            "assistant_response": build_assistant_response(
-                kind="await_confirmation",
-                content=content,
-                pending_action=updated_action,
-            ),
-            "pending_action": updated_action,
-            "execution_contract": None,
-        }
-
-    runtime_action = validation.get("runtime_action")
-
-    if runtime_action == "request_revision":
-        content = build_pending_action_revision_response(
-            updated_action,
-            contract,
-            preferred_language=preferred_language,
-        )
-        return {
-            "messages": [AIMessage(content=content)],
-            "assistant_response": build_assistant_response(
-                kind="await_confirmation",
-                content=content,
-                pending_action=updated_action,
-                execution_contract=None,
-            ),
-            "pending_action": updated_action,
-            "execution_contract": None,
-        }
-
-    if runtime_action != "execute":
-        content = build_pending_action_clarification(
-            updated_action,
-            validation,
-            preferred_language=preferred_language,
-        )
-        return {
-            "messages": [AIMessage(content=content)],
-            "assistant_response": build_assistant_response(
-                kind="await_confirmation",
-                content=content,
-                pending_action=updated_action,
-            ),
-            "pending_action": updated_action,
-            "execution_contract": None,
-        }
-
-    retry_payload = build_pending_action_retry_tool_call(
-        updated_action,
-        source="knowledge_base_builder_agent",
-        reason="The pending knowledge-base write requires explicit confirmation.",
-        fallback_tool_call_id=f"call_retry_write_{len(state.get('messages', []))}",
-    )
-    if retry_payload is None:
-        content = translate_builder_text("I could not reconstruct the pending write request to execute it safely.", preferred_language)
-        return {
-            "messages": [AIMessage(content=content)],
-            "assistant_response": build_assistant_response(
-                kind="text",
-                content=content,
-                pending_action=updated_action,
-                execution_contract=None,
-            ),
-            "pending_action": updated_action,
-            "execution_contract": None,
-        }
-
-    retry_message, tool_invocation = retry_payload
-    return {
-        "messages": [retry_message],
-        "assistant_response": build_assistant_response(
-            kind="invoke_tool",
-            content="",
-            pending_action=updated_action,
-            execution_contract=contract,
-            tool_invocation=tool_invocation,
         ),
-        "pending_action": updated_action,
-        "execution_contract": contract,
-        "tool_invocation": tool_invocation,
-    }
+        cancel_text=translate_builder_text("Cancelled the pending knowledge-base write.", preferred_language),
+        build_clarification_text=lambda updated_action, validation: build_pending_action_clarification(
+            updated_action,
+            validation,
+            preferred_language=preferred_language,
+        ),
+        on_valid_resolution=on_valid_resolution,
+        cannot_validate_result_updates={"execution_contract": None},
+        cancel_result_updates={"execution_contract": None},
+        clarification_result_updates={"execution_contract": None},
+    )
 
 
 def build_pending_action_clarification(

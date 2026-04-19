@@ -936,12 +936,12 @@ class WebServer:
             ),
             session_memory=session_memory,
         )
+        self._reset_checkpoint_thread(thread_id, raise_on_failure=True)
         self._cancel_session_memory_refresh(thread_id)
         self.conversation_store.replace_transcript(
             conversation_id,
             messages=bundle.compacted_messages,
         )
-        self._reset_checkpoint_thread(thread_id)
         if record_auto_compact_failure:
             self._clear_auto_compact_failures(thread_id)
 
@@ -1333,13 +1333,17 @@ class WebServer:
             return transcript_to_langchain_messages(transcript_messages)
         return [HumanMessage(content=latest_user_message)]
 
-    def _reset_checkpoint_thread(self, thread_id: str) -> None:
+    def _reset_checkpoint_thread(self, thread_id: str, *, raise_on_failure: bool = False) -> bool:
         if self.checkpoint_store is None:
-            return
+            return True
         try:
             self.checkpoint_store.delete_thread(thread_id)
-        except Exception:
+        except Exception as exc:
+            if raise_on_failure:
+                raise RuntimeError(f"Failed to reset checkpoint thread={thread_id}") from exc
             logger.warning("Failed to reset checkpoint thread=%s", thread_id, exc_info=True)
+            return False
+        return True
 
     def _extract_transcript_usage_metadata(self, final_state: dict) -> tuple[dict[str, int] | None, dict[str, object] | None]:
         messages = final_state.get("messages") or []

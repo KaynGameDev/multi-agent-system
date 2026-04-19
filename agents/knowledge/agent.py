@@ -20,6 +20,7 @@ from app.pending_actions import (
     is_pending_action_active,
     update_pending_action,
 )
+from app.pending_action_responder import run_pending_action_response
 from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
 from app.routing.pending_action_router import PendingActionRouter, PendingActionTurnResult, resolve_owned_pending_action_turn
 from app.skill_runtime import build_skill_prompt_context
@@ -366,12 +367,11 @@ def build_knowledge_pending_action_response(
         return render_knowledge_update(state, latest_tool_result, preferred_language=preferred_language)
 
     contract = pending_action_turn.execution_contract
-    validation = pending_action_turn.validation
-    if contract is None or validation is None:
-        fallback_validation = {"reason": "The pending-action decision could not be validated."}
+
+    def clarification_result(current_action: dict[str, Any], current_validation: dict[str, Any]) -> dict[str, Any]:
         content = build_knowledge_clarification_text(
-            pending_action=pending_action,
-            validation=fallback_validation,
+            pending_action=current_action,
+            validation=current_validation,
             preferred_language=preferred_language,
         )
         return {
@@ -379,61 +379,19 @@ def build_knowledge_pending_action_response(
             "assistant_response": build_assistant_response(
                 kind="await_confirmation",
                 content=content,
-                pending_action=pending_action,
+                pending_action=current_action,
             ),
-            "pending_action": pending_action,
+            "pending_action": current_action,
         }
 
-    if validation.get("runtime_action") == "cancel":
-        content = translate_knowledge_text("Cancelled the pending document follow-up.", preferred_language)
-        return {
-            "messages": [AIMessage(content=content)],
-            "assistant_response": build_assistant_response(kind="text", content=content),
-            "pending_action": None,
-        }
+    def on_valid_resolution(updated_action: dict[str, Any], _decision, validation: dict[str, Any]) -> dict[str, Any]:
+        runtime_action = validation.get("runtime_action")
+        if runtime_action != "select":
+            return clarification_result(updated_action, validation)
 
-    normalized_scope = validation.get("normalized_scope") or {}
-    updated_action = update_pending_action(
-        pending_action,
-        status=str(validation.get("next_status", "ask_clarification")).strip() or "ask_clarification",
-        target_scope=normalized_scope or None,
-        metadata_updates={"last_contract": dict(contract)},
-    )
-
-    if not validation.get("valid"):
-        content = build_knowledge_clarification_text(
-            pending_action=updated_action,
-            validation=validation,
-            preferred_language=preferred_language,
-        )
-        return {
-            "messages": [AIMessage(content=content)],
-            "assistant_response": build_assistant_response(
-                kind="await_confirmation",
-                content=content,
-                pending_action=updated_action,
-            ),
-            "pending_action": updated_action,
-        }
-
-    runtime_action = validation.get("runtime_action")
-    if runtime_action == "select":
         selected_option = validation.get("selected_option") if isinstance(validation.get("selected_option"), dict) else None
         if selected_option is None:
-            content = build_knowledge_clarification_text(
-                pending_action=updated_action,
-                validation=validation,
-                preferred_language=preferred_language,
-            )
-            return {
-                "messages": [AIMessage(content=content)],
-                "assistant_response": build_assistant_response(
-                    kind="await_confirmation",
-                    content=content,
-                    pending_action=updated_action,
-                ),
-                "pending_action": updated_action,
-            }
+            return clarification_result(updated_action, validation)
 
         source_tool_id = str(get_pending_action_metadata(pending_action).get("source_tool_id", "")).strip()
         if source_tool_id == TOOL_KNOWLEDGE_READ_DOCUMENT:
@@ -458,20 +416,7 @@ def build_knowledge_pending_action_response(
 
         document_name = str(selected_option.get("value") or selected_option.get("payload", {}).get("document_name", "")).strip()
         if not document_name:
-            content = build_knowledge_clarification_text(
-                pending_action=updated_action,
-                validation=validation,
-                preferred_language=preferred_language,
-            )
-            return {
-                "messages": [AIMessage(content=content)],
-                "assistant_response": build_assistant_response(
-                    kind="await_confirmation",
-                    content=content,
-                    pending_action=updated_action,
-                ),
-                "pending_action": updated_action,
-            }
+            return clarification_result(updated_action, validation)
 
         tool_call_id = f"call_read_knowledge_follow_up_{len(state.get('messages', []))}"
         tool_invocation = build_runtime_tool_invocation(
@@ -501,26 +446,28 @@ def build_knowledge_pending_action_response(
                     "selection_phase": "render_after_tool_result",
                     "selected_option": dict(selected_option),
                     "selected_index": int(validation.get("selected_index", 0) or 0),
-                    "last_contract": dict(contract),
+                    "last_contract": dict(contract or {}),
                 },
             ),
             "tool_invocation": tool_invocation,
         }
 
-    content = build_knowledge_clarification_text(
-        pending_action=updated_action,
-        validation=validation,
-        preferred_language=preferred_language,
-    )
-    return {
-        "messages": [AIMessage(content=content)],
-        "assistant_response": build_assistant_response(
-            kind="await_confirmation",
-            content=content,
-            pending_action=updated_action,
+    return run_pending_action_response(
+        pending_action=pending_action,
+        pending_action_turn=pending_action_turn,
+        cannot_validate_text=build_knowledge_clarification_text(
+            pending_action=pending_action,
+            validation={"reason": "The pending-action decision could not be validated."},
+            preferred_language=preferred_language,
         ),
-        "pending_action": updated_action,
-    }
+        cancel_text=translate_knowledge_text("Cancelled the pending document follow-up.", preferred_language),
+        build_clarification_text=lambda updated_action, validation: build_knowledge_clarification_text(
+            pending_action=updated_action,
+            validation=validation,
+            preferred_language=preferred_language,
+        ),
+        on_valid_resolution=on_valid_resolution,
+    )
 
 
 def resolve_knowledge_source_tool_id(tool_result: dict[str, Any], payload: dict[str, Any]) -> str:

@@ -22,6 +22,7 @@ from app.pending_actions import (
     is_pending_action_active,
     update_pending_action,
 )
+from app.pending_action_responder import run_pending_action_response
 from app.prompt_loader import join_prompt_layers, load_prompt_sections, load_shared_instruction_text
 from app.routing.pending_action_router import PendingActionRouter, PendingActionTurnResult, resolve_owned_pending_action_turn
 from app.skill_runtime import build_skill_prompt_context
@@ -550,12 +551,10 @@ def build_memory_snapshot_pending_action_response(
     if settings is None or str(memory_scope or "").strip().lower() != "user":
         return None
 
-    contract = pending_action_turn.execution_contract
-    validation = pending_action_turn.validation
-    if contract is None or validation is None:
+    def clarification_result(current_action: dict[str, Any], current_validation: dict[str, Any]) -> dict[str, Any]:
         content = build_task_clarification_text(
-            pending_action=pending_action,
-            validation={"reason": "The snapshot decision could not be validated."},
+            pending_action=current_action,
+            validation=current_validation,
             preferred_language=preferred_language,
         )
         return {
@@ -563,114 +562,71 @@ def build_memory_snapshot_pending_action_response(
             "assistant_response": build_assistant_response(
                 kind="await_confirmation",
                 content=content,
-                pending_action=pending_action,
+                pending_action=current_action,
             ),
-            "pending_action": pending_action,
+            "pending_action": current_action,
         }
 
-    if validation.get("runtime_action") == "cancel":
-        content = (
-            "已取消此次快照更新，之后需要时可以再选择。"
-            if preferred_language == "zh"
-            else "Cancelled this snapshot update for now."
-        )
+    def on_valid_resolution(updated_action: dict[str, Any], _decision, validation: dict[str, Any]) -> dict[str, Any]:
+        if validation.get("runtime_action") != "select":
+            return clarification_result(updated_action, validation)
+
+        selected_option = validation.get("selected_option") if isinstance(validation.get("selected_option"), dict) else None
+        payload = selected_option.get("payload") if isinstance(selected_option, dict) else {}
+        action = str(payload.get("action") or selected_option.get("value") or selected_option.get("id") or "").strip().lower()
+        if action not in {"keep", "merge", "replace"}:
+            return clarification_result(
+                updated_action,
+                {"reason": "The snapshot choice did not resolve to keep, merge, or replace."},
+            )
+
+        metadata = get_pending_action_metadata(updated_action)
+        project_memory_root = str(metadata.get("project_memory_root", "")).strip()
+        user_memory_root = str(metadata.get("user_memory_root", "")).strip()
+        snapshot_id = str(metadata.get("snapshot_id", "")).strip()
+        if not project_memory_root or not user_memory_root:
+            return clarification_result(
+                updated_action,
+                {"reason": "The snapshot roots were missing from the pending action."},
+            )
+
+        try:
+            summary = apply_long_term_memory_snapshot(
+                user_memory_root,
+                project_memory_root,
+                action=action,
+                snapshot_id=snapshot_id,
+            )
+        except LongTermMemorySnapshotError as exc:
+            return clarification_result(updated_action, {"reason": str(exc)})
+
+        content = build_memory_snapshot_result_text(summary, preferred_language=preferred_language)
         return {
             "messages": [AIMessage(content=content)],
             "assistant_response": build_assistant_response(kind="text", content=content),
             "pending_action": None,
         }
 
-    normalized_scope = validation.get("normalized_scope") or {}
-    updated_action = update_pending_action(
-        pending_action,
-        status=str(validation.get("next_status", "ask_clarification")).strip() or "ask_clarification",
-        target_scope=normalized_scope or None,
-        metadata_updates={"last_contract": dict(contract)},
+    return run_pending_action_response(
+        pending_action=pending_action,
+        pending_action_turn=pending_action_turn,
+        cannot_validate_text=build_task_clarification_text(
+            pending_action=pending_action,
+            validation={"reason": "The snapshot decision could not be validated."},
+            preferred_language=preferred_language,
+        ),
+        cancel_text=(
+            "已取消此次快照更新，之后需要时可以再选择。"
+            if preferred_language == "zh"
+            else "Cancelled this snapshot update for now."
+        ),
+        build_clarification_text=lambda updated_action, validation: build_task_clarification_text(
+            pending_action=updated_action,
+            validation=validation,
+            preferred_language=preferred_language,
+        ),
+        on_valid_resolution=on_valid_resolution,
     )
-
-    if not validation.get("valid") or validation.get("runtime_action") != "select":
-        content = build_task_clarification_text(
-            pending_action=updated_action,
-            validation=validation or {"reason": "The snapshot decision was unclear."},
-            preferred_language=preferred_language,
-        )
-        return {
-            "messages": [AIMessage(content=content)],
-            "assistant_response": build_assistant_response(
-                kind="await_confirmation",
-                content=content,
-                pending_action=updated_action,
-            ),
-            "pending_action": updated_action,
-        }
-
-    selected_option = validation.get("selected_option") if isinstance(validation.get("selected_option"), dict) else None
-    payload = selected_option.get("payload") if isinstance(selected_option, dict) else {}
-    action = str(payload.get("action") or selected_option.get("value") or selected_option.get("id") or "").strip().lower()
-    if action not in {"keep", "merge", "replace"}:
-        content = build_task_clarification_text(
-            pending_action=updated_action,
-            validation={"reason": "The snapshot choice did not resolve to keep, merge, or replace."},
-            preferred_language=preferred_language,
-        )
-        return {
-            "messages": [AIMessage(content=content)],
-            "assistant_response": build_assistant_response(
-                kind="await_confirmation",
-                content=content,
-                pending_action=updated_action,
-            ),
-            "pending_action": updated_action,
-        }
-
-    metadata = get_pending_action_metadata(updated_action)
-    project_memory_root = str(metadata.get("project_memory_root", "")).strip()
-    user_memory_root = str(metadata.get("user_memory_root", "")).strip()
-    snapshot_id = str(metadata.get("snapshot_id", "")).strip()
-    if not project_memory_root or not user_memory_root:
-        content = build_task_clarification_text(
-            pending_action=updated_action,
-            validation={"reason": "The snapshot roots were missing from the pending action."},
-            preferred_language=preferred_language,
-        )
-        return {
-            "messages": [AIMessage(content=content)],
-            "assistant_response": build_assistant_response(
-                kind="await_confirmation",
-                content=content,
-                pending_action=updated_action,
-            ),
-            "pending_action": updated_action,
-        }
-
-    try:
-        summary = apply_long_term_memory_snapshot(
-            user_memory_root,
-            project_memory_root,
-            action=action,
-            snapshot_id=snapshot_id,
-        )
-    except LongTermMemorySnapshotError as exc:
-        content = build_task_clarification_text(
-            pending_action=updated_action,
-            validation={"reason": str(exc)},
-            preferred_language=preferred_language,
-        )
-        return {
-            "messages": [AIMessage(content=content)],
-            "assistant_response": build_assistant_response(
-                kind="await_confirmation",
-                content=content,
-                pending_action=updated_action,
-            ),
-            "pending_action": updated_action,
-        }
-    content = build_memory_snapshot_result_text(summary, preferred_language=preferred_language)
-    return {
-        "messages": [AIMessage(content=content)],
-        "assistant_response": build_assistant_response(kind="text", content=content),
-        "pending_action": None,
-    }
 
 
 def build_memory_snapshot_result_text(summary, *, preferred_language: str) -> str:
@@ -707,12 +663,10 @@ def build_task_pending_action_response(
     pending_action_turn: PendingActionTurnResult,
     preferred_language: str,
 ) -> dict[str, Any] | None:
-    contract = pending_action_turn.execution_contract
-    validation = pending_action_turn.validation
-    if contract is None or validation is None:
+    def clarification_result(current_action: dict[str, Any], current_validation: dict[str, Any]) -> dict[str, Any]:
         content = build_task_clarification_text(
-            pending_action=pending_action,
-            validation={"reason": "The pending-action decision could not be validated."},
+            pending_action=current_action,
+            validation=current_validation,
             preferred_language=preferred_language,
         )
         return {
@@ -720,124 +674,67 @@ def build_task_pending_action_response(
             "assistant_response": build_assistant_response(
                 kind="await_confirmation",
                 content=content,
-                pending_action=pending_action,
+                pending_action=current_action,
             ),
-            "pending_action": pending_action,
+            "pending_action": current_action,
         }
 
-    if validation.get("runtime_action") == "cancel":
-        content = "已取消待处理的任务跟进。" if preferred_language == "zh" else "Cancelled the pending task follow-up."
+    def on_valid_resolution(updated_action: dict[str, Any], _decision, validation: dict[str, Any]) -> dict[str, Any]:
+        if validation.get("runtime_action") != "select":
+            return clarification_result(updated_action, validation)
+
+        selected_option = validation.get("selected_option") if isinstance(validation.get("selected_option"), dict) else None
+        if selected_option is None:
+            return clarification_result(updated_action, validation)
+
+        task = selected_option.get("payload", {}).get("task")
+        if not isinstance(task, dict):
+            return clarification_result(updated_action, validation)
+
+        metadata = get_pending_action_metadata(pending_action)
+        header = (
+            str(metadata.get("payload", {}).get("header", "")).strip()
+            if isinstance(metadata.get("payload"), dict)
+            else ""
+        )
+        rendered = render_task_payload(
+            {"tasks": [task], "filters": {}, "match_count": 1},
+            preferred_language=preferred_language,
+            header_override=header,
+        )
+        if rendered is None:
+            return clarification_result(updated_action, validation)
+
         return {
-            "messages": [AIMessage(content=content)],
-            "assistant_response": build_assistant_response(kind="text", content=content),
+            "messages": [AIMessage(content=rendered)],
+            "assistant_response": build_assistant_response(
+                kind="text",
+                content=rendered,
+                pending_action=updated_action,
+            ),
             "pending_action": None,
         }
 
-    normalized_scope = validation.get("normalized_scope") or {}
-    updated_action = update_pending_action(
-        pending_action,
-        status=str(validation.get("next_status", "ask_clarification")).strip() or "ask_clarification",
-        target_scope=normalized_scope or None,
-        metadata_updates={"last_contract": dict(contract)},
-    )
-
-    if not validation.get("valid"):
-        content = build_task_clarification_text(
-            pending_action=updated_action,
-            validation=validation,
+    return run_pending_action_response(
+        pending_action=pending_action,
+        pending_action_turn=pending_action_turn,
+        cannot_validate_text=build_task_clarification_text(
+            pending_action=pending_action,
+            validation={"reason": "The pending-action decision could not be validated."},
             preferred_language=preferred_language,
-        )
-        return {
-            "messages": [AIMessage(content=content)],
-            "assistant_response": build_assistant_response(
-                kind="await_confirmation",
-                content=content,
-                pending_action=updated_action,
-            ),
-            "pending_action": updated_action,
-        }
-
-    if validation.get("runtime_action") != "select":
-        content = build_task_clarification_text(
-            pending_action=updated_action,
-            validation=validation,
-            preferred_language=preferred_language,
-        )
-        return {
-            "messages": [AIMessage(content=content)],
-            "assistant_response": build_assistant_response(
-                kind="await_confirmation",
-                content=content,
-                pending_action=updated_action,
-            ),
-            "pending_action": updated_action,
-        }
-
-    selected_option = validation.get("selected_option") if isinstance(validation.get("selected_option"), dict) else None
-    if selected_option is None:
-        content = build_task_clarification_text(
-            pending_action=updated_action,
-            validation=validation,
-            preferred_language=preferred_language,
-        )
-        return {
-            "messages": [AIMessage(content=content)],
-            "assistant_response": build_assistant_response(
-                kind="await_confirmation",
-                content=content,
-                pending_action=updated_action,
-            ),
-            "pending_action": updated_action,
-        }
-
-    task = selected_option.get("payload", {}).get("task")
-    if not isinstance(task, dict):
-        content = build_task_clarification_text(
-            pending_action=updated_action,
-            validation=validation,
-            preferred_language=preferred_language,
-        )
-        return {
-            "messages": [AIMessage(content=content)],
-            "assistant_response": build_assistant_response(
-                kind="await_confirmation",
-                content=content,
-                pending_action=updated_action,
-            ),
-            "pending_action": updated_action,
-        }
-
-    metadata = get_pending_action_metadata(pending_action)
-    header = str(metadata.get("payload", {}).get("header", "")).strip() if isinstance(metadata.get("payload"), dict) else ""
-    rendered = render_task_payload(
-        {"tasks": [task], "filters": {}, "match_count": 1},
-        preferred_language=preferred_language,
-        header_override=header,
-    )
-    if rendered is None:
-        content = build_task_clarification_text(
-            pending_action=updated_action,
-            validation=validation,
-            preferred_language=preferred_language,
-        )
-        return {
-            "messages": [AIMessage(content=content)],
-            "assistant_response": build_assistant_response(
-                kind="await_confirmation",
-                content=content,
-                pending_action=updated_action,
-            ),
-            "pending_action": updated_action,
-        }
-    return {
-        "messages": [AIMessage(content=rendered)],
-        "assistant_response": build_assistant_response(
-            kind="text",
-            content=rendered,
-            pending_action=updated_action,
         ),
-        "pending_action": None,
-    }
+        cancel_text=(
+            "已取消待处理的任务跟进。"
+            if preferred_language == "zh"
+            else "Cancelled the pending task follow-up."
+        ),
+        build_clarification_text=lambda updated_action, validation: build_task_clarification_text(
+            pending_action=updated_action,
+            validation=validation,
+            preferred_language=preferred_language,
+        ),
+        on_valid_resolution=on_valid_resolution,
+    )
 
 
 def build_task_clarification_text(

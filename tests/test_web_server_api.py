@@ -94,6 +94,18 @@ class StickyCheckpointStore:
         self._has_checkpoint = False
 
 
+class BrokenCheckpointStore:
+    def __init__(self) -> None:
+        self.delete_attempts: list[str] = []
+
+    def has_checkpoint(self, _thread_id: str) -> bool:
+        return True
+
+    def delete_thread(self, thread_id: str) -> None:
+        self.delete_attempts.append(thread_id)
+        raise RuntimeError("checkpoint delete failed")
+
+
 class UsageBaselineGraph:
     def __init__(self) -> None:
         self.last_state = None
@@ -1032,6 +1044,65 @@ class WebServerApiTests(unittest.TestCase):
             ],
         )
         self.assertIn("## Continuation Summary", payload["messages"][0]["markdown"])
+
+    def test_auto_compact_aborts_before_transcript_rewrite_when_checkpoint_reset_fails(self) -> None:
+        settings = replace(
+            self.settings,
+            context_window_effective_window=1_000,
+            context_window_warning_threshold=600,
+            context_window_auto_compact_threshold=700,
+            context_window_hard_block_threshold=950,
+            context_window_auto_compact_enabled=True,
+            context_window_auto_compact_preserved_tail_count=1,
+        )
+        checkpoint_store = BrokenCheckpointStore()
+        graph = RecordingGraph(reply_text="Should not run.")
+        server = WebServer(
+            agent_graph=graph,
+            settings=settings,
+            checkpoint_store=checkpoint_store,
+        )
+        client = TestClient(server.app)
+
+        conversation = client.post("/api/conversations", json={"title": "Auto compact failure"}).json()
+        conversation_id = conversation["conversation_id"]
+        server.conversation_store.append_message(conversation_id, role="user", markdown="Old request")
+        server.conversation_store.append_transcript_message(
+            conversation_id,
+            role="assistant",
+            message_type="message",
+            markdown="Old answer",
+            usage={"input_tokens": 760, "output_tokens": 20, "total_tokens": 780},
+        )
+
+        response = client.post(
+            f"/api/conversations/{conversation_id}/messages",
+            json={"message": "Need the next step", "display_name": "Tester", "email": "tester@example.com"},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        payload = response.json()
+        self.assertTrue(payload["blocked"])
+        self.assertTrue(payload["context_compaction"]["attempted"])
+        self.assertFalse(payload["context_compaction"]["applied"])
+        self.assertEqual(graph.invoke_count, 0)
+        self.assertEqual(checkpoint_store.delete_attempts, [f"web:{conversation_id}"])
+
+        full_conversation = server.conversation_store.get_full_conversation(conversation_id)
+        self.assertFalse(
+            any(message["type"] == TRANSCRIPT_TYPE_COMPACT_BOUNDARY for message in full_conversation["messages"])
+        )
+        self.assertFalse(
+            any("## Continuation Summary" in message["markdown"] for message in full_conversation["messages"])
+        )
+        self.assertEqual(
+            [(message["role"], message["markdown"]) for message in payload["messages"]],
+            [
+                ("user", "Old request"),
+                ("assistant", "Old answer"),
+                ("user", "Need the next step"),
+            ],
+        )
 
     def test_compacted_transcript_does_not_block_on_archived_pre_boundary_usage(self) -> None:
         settings = replace(
