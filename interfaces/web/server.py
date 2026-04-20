@@ -86,6 +86,21 @@ def format_web_chat_url(host: str, port: int) -> str:
     return f"http://{normalized_host}:{port}"
 
 
+def format_model_label(provider: str, model: str) -> str:
+    normalized_provider = str(provider or "").strip().lower()
+    normalized_model = str(model or "").strip()
+    if not normalized_model:
+        return "Model unavailable"
+
+    if normalized_provider == "google" and normalized_model == "gemini-3-flash-preview":
+        return "Gemini Flash 3"
+    if normalized_provider == "minimax" and normalized_model == "MiniMax-M2.7-highspeed":
+        return "MiniMax M2.7 Highspeed"
+    if normalized_provider == "openai" and normalized_model == "gpt-5-mini":
+        return "GPT-5 Mini"
+    return normalized_model
+
+
 class ConversationCreateRequest(BaseModel):
     title: str = "New chat"
 
@@ -214,6 +229,7 @@ class WebServer:
                 .replace("{{ FAVICON_PNG_HREF }}", self._versioned_static_path("branding/favicon-32.png"))
                 .replace("{{ APPLE_TOUCH_ICON_HREF }}", self._versioned_static_path("branding/apple-touch-icon.png"))
                 .replace("{{ FAVICON_ICO_HREF }}", self._versioned_static_path("branding/favicon.ico"))
+                .replace("{{ CHAT_MODEL_LABEL }}", format_model_label(self.settings.llm_provider, self.settings.llm_model))
                 .replace("{{ APP_CSS_HREF }}", self._versioned_static_path("app.css"))
                 .replace("{{ APP_JS_HREF }}", self._versioned_static_path("app.js"))
             )

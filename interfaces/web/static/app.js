@@ -1,6 +1,8 @@
 const state = {
   activeConversationId: null,
   activeConversationTitle: "New chat",
+  conversationListHasLoaded: false,
+  conversationListLoading: false,
   contextMenuConversationId: null,
   contextMenuConversationTitle: "New chat",
   conversations: [],
@@ -12,6 +14,7 @@ const state = {
 const elements = {
   conversationList: document.getElementById("conversationList"),
   chatStage: document.getElementById("chatStage"),
+  chatHeaderTitle: document.getElementById("chatHeaderTitle"),
   emptyState: document.getElementById("emptyState"),
   messages: document.getElementById("messages"),
   composerForm: document.getElementById("composerForm"),
@@ -35,6 +38,7 @@ const PROFILE_STORAGE_KEY = "jade-web-profile";
 const ACTIVE_CONVERSATION_STORAGE_KEY = "jade-active-conversation";
 const CONTEXT_MENU_DEBUG_VERSION = "2026-04-09-ctx-debug-1";
 const CONTEXT_MENU_DEBUG_ENABLED = new URLSearchParams(window.location.search).has("debugContextMenu");
+const CHAT_BOTTOM_STICK_THRESHOLD_PX = 96;
 
 let contextMenuDebugPanel = null;
 
@@ -165,6 +169,31 @@ function autoResizeTextarea() {
   elements.messageInput.style.height = `${Math.min(elements.messageInput.scrollHeight, 224)}px`;
 }
 
+function getChatStageBottomOffset() {
+  return elements.chatStage.scrollHeight - elements.chatStage.scrollTop - elements.chatStage.clientHeight;
+}
+
+function isChatStageNearBottom(threshold = CHAT_BOTTOM_STICK_THRESHOLD_PX) {
+  return getChatStageBottomOffset() <= threshold;
+}
+
+function scrollChatStageToBottom(behavior = "auto") {
+  const normalizedBehavior = window.matchMedia?.("(prefers-reduced-motion: reduce)")?.matches
+    ? "auto"
+    : behavior;
+
+  elements.chatStage.scrollTo({
+    top: elements.chatStage.scrollHeight,
+    behavior: normalizedBehavior,
+  });
+}
+
+function setConversationListLoading(isLoading) {
+  state.conversationListLoading = isLoading;
+  elements.conversationList.setAttribute("aria-busy", String(isLoading));
+  elements.conversationList.classList.toggle("is-loading", isLoading);
+}
+
 function formatRelativeTime(isoString) {
   const timestamp = new Date(isoString);
   if (Number.isNaN(timestamp.getTime())) {
@@ -275,6 +304,47 @@ function openConversationContextMenu(conversationId, conversationTitle, clientX,
 function updateConversationHeader(title) {
   const normalizedTitle = (title || "New chat").trim() || "New chat";
   state.activeConversationTitle = normalizedTitle;
+  elements.chatHeaderTitle.textContent = normalizedTitle;
+}
+
+function renderConversationListSkeleton(count = 5) {
+  elements.conversationList.innerHTML = "";
+
+  const skeletonGroup = document.createElement("section");
+  skeletonGroup.className = "conversation-group conversation-group--skeleton";
+
+  for (let index = 0; index < count; index += 1) {
+    const row = document.createElement("div");
+    row.className = "conversation-list__row conversation-list__row--skeleton";
+    row.innerHTML = `
+      <div class="conversation-list__skeleton-card" aria-hidden="true">
+        <span class="conversation-list__skeleton-line conversation-list__skeleton-line--title"></span>
+        <span class="conversation-list__skeleton-line conversation-list__skeleton-line--meta"></span>
+      </div>
+      <div class="conversation-list__skeleton-action" aria-hidden="true"></div>
+    `;
+    skeletonGroup.appendChild(row);
+  }
+
+  elements.conversationList.appendChild(skeletonGroup);
+}
+
+function renderConversationLoading(title = "Loading chat") {
+  elements.emptyState.classList.add("is-hidden");
+  elements.messages.innerHTML = `
+    <article class="message message--assistant message--loading" aria-busy="true">
+      <div class="message__meta">Jade Agent</div>
+      <div class="message__card message__card--loading">
+        <span class="message__skeleton-line message__skeleton-line--long"></span>
+        <span class="message__skeleton-line message__skeleton-line--mid"></span>
+        <span class="message__skeleton-line message__skeleton-line--short"></span>
+      </div>
+    </article>
+  `;
+  elements.chatHeaderTitle.textContent = (title || "Loading chat").trim() || "Loading chat";
+  requestAnimationFrame(() => {
+    elements.chatStage.scrollTo({ top: 0, behavior: "auto" });
+  });
 }
 
 async function renameConversation(conversationId, currentTitle) {
@@ -311,8 +381,13 @@ async function deleteConversation(conversationId, currentTitle) {
   if (wasActiveConversation) {
     state.activeConversationId = null;
     window.localStorage.removeItem(ACTIVE_CONVERSATION_STORAGE_KEY);
-    updateConversationHeader("New chat");
-    renderMessages({ messages: [] });
+    renderMessages({
+      title: "New chat",
+      messages: [],
+    }, null, {
+      forceScroll: true,
+      scrollBehavior: "auto",
+    });
   }
 
   await refreshConversationList();
@@ -361,21 +436,6 @@ function renderConversationList() {
       row.className = "conversation-list__row";
       row.dataset.conversationId = conversation.conversation_id;
       row.dataset.conversationTitle = conversation.title || "New chat";
-      const openActionsMenuFromPointer = (event) => {
-        logContextMenuDebug("row-open-request", event, {
-          conversationId: conversation.conversation_id,
-          source: describeDebugTarget(event.currentTarget),
-        });
-        event.preventDefault();
-        event.stopPropagation();
-        openConversationContextMenu(
-          conversation.conversation_id,
-          conversation.title || "New chat",
-          event.clientX,
-          event.clientY,
-        );
-      };
-
       const button = document.createElement("button");
       button.type = "button";
       button.className = "conversation-list__item";
@@ -386,41 +446,11 @@ function renderConversationList() {
         <span class="conversation-list__title">${escapeHtml(conversation.title || "New chat")}</span>
         <span class="conversation-list__time">${escapeHtml(formatRelativeTime(conversation.updated_at))}</span>
       `;
-      button.title = "Right-click for chat actions";
       button.addEventListener("click", async () => {
-        await loadConversation(conversation.conversation_id);
+        await loadConversation(conversation.conversation_id, {
+          titleHint: conversation.title || "New chat",
+        });
         closeSidebar();
-      });
-      button.addEventListener("keydown", (event) => {
-        if (event.key !== "ContextMenu" && !(event.shiftKey && event.key === "F10")) {
-          return;
-        }
-
-        logContextMenuDebug("button-keydown-open-request", event, {
-          conversationId: conversation.conversation_id,
-          key: event.key,
-          shiftKey: event.shiftKey,
-        });
-        event.preventDefault();
-        const rect = button.getBoundingClientRect();
-        openConversationContextMenu(
-          conversation.conversation_id,
-          conversation.title || "New chat",
-          rect.right - 8,
-          rect.bottom + 6,
-        );
-      });
-      button.addEventListener("contextmenu", openActionsMenuFromPointer);
-
-      row.addEventListener("contextmenu", (event) => {
-        logContextMenuDebug("row-contextmenu", event, {
-          conversationId: conversation.conversation_id,
-          hitRowDirectly: event.target === row,
-        });
-        if (event.target !== row) {
-          return;
-        }
-        openActionsMenuFromPointer(event);
       });
 
       const actionsButton = document.createElement("button");
@@ -445,7 +475,6 @@ function renderConversationList() {
           rect.bottom + 6,
         );
       });
-      actionsButton.addEventListener("contextmenu", openActionsMenuFromPointer);
 
       row.append(button, actionsButton);
       group.appendChild(row);
@@ -463,12 +492,17 @@ function renderConversationList() {
   }
 }
 
-function renderMessages(conversation, routeMeta = null) {
+function renderMessages(conversation, routeMeta = null, options = {}) {
   const messages = conversation.messages || [];
+  const shouldStickToBottom = Boolean(options.forceScroll) || isChatStageNearBottom();
+  updateConversationHeader(conversation.title || state.activeConversationTitle);
   elements.messages.innerHTML = "";
 
   if (!messages.length) {
     elements.emptyState.classList.remove("is-hidden");
+    requestAnimationFrame(() => {
+      elements.chatStage.scrollTo({ top: 0, behavior: "auto" });
+    });
     return;
   }
 
@@ -505,9 +539,11 @@ function renderMessages(conversation, routeMeta = null) {
 
   injectCodeCopyButtons();
 
-  requestAnimationFrame(() => {
-    elements.chatStage.scrollTo({ top: elements.chatStage.scrollHeight, behavior: "smooth" });
-  });
+  if (shouldStickToBottom) {
+    requestAnimationFrame(() => {
+      scrollChatStageToBottom(options.scrollBehavior || "smooth");
+    });
+  }
 }
 
 function injectCodeCopyButtons() {
@@ -546,9 +582,25 @@ function injectCodeCopyButtons() {
 }
 
 async function refreshConversationList() {
-  const payload = await api("/api/conversations");
-  state.conversations = payload.conversations || [];
-  renderConversationList();
+  const preserveScrollTop = elements.conversationList.scrollTop;
+  const shouldRenderSkeleton = !state.conversationListHasLoaded && !state.conversations.length;
+  setConversationListLoading(true);
+
+  if (shouldRenderSkeleton) {
+    renderConversationListSkeleton();
+  }
+
+  try {
+    const payload = await api("/api/conversations");
+    state.conversations = payload.conversations || [];
+    state.conversationListHasLoaded = true;
+    renderConversationList();
+    requestAnimationFrame(() => {
+      elements.conversationList.scrollTop = preserveScrollTop;
+    });
+  } finally {
+    setConversationListLoading(false);
+  }
 }
 
 async function createConversation() {
@@ -562,11 +614,21 @@ async function createConversation() {
 }
 
 async function loadConversation(conversationId, options = {}) {
+  const titleHint = (options.titleHint || "").trim()
+    || state.conversations.find((conversation) => conversation.conversation_id === conversationId)?.title
+    || "Loading chat";
+
+  if (!options.skipLoadingState) {
+    renderConversationLoading(titleHint);
+  }
+
   const conversation = await api(`/api/conversations/${conversationId}`);
   state.activeConversationId = conversation.conversation_id;
   window.localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, conversation.conversation_id);
-  updateConversationHeader(conversation.title || "New chat");
-  renderMessages(conversation);
+  renderMessages(conversation, null, {
+    forceScroll: true,
+    scrollBehavior: "auto",
+  });
 
   if (!options.skipListRefresh) {
     await refreshConversationList();
@@ -590,7 +652,7 @@ function appendPendingAssistant() {
   elements.messages.appendChild(wrapper);
   elements.emptyState.classList.add("is-hidden");
   requestAnimationFrame(() => {
-    elements.chatStage.scrollTo({ top: elements.chatStage.scrollHeight, behavior: "smooth" });
+    scrollChatStageToBottom("smooth");
   });
 }
 
@@ -621,7 +683,10 @@ async function handleSubmit(event) {
     markdown: message,
     created_at: new Date().toISOString(),
   });
-  renderMessages(optimisticConversation);
+  renderMessages(optimisticConversation, null, {
+    forceScroll: true,
+    scrollBehavior: "smooth",
+  });
   appendPendingAssistant();
   elements.messageInput.value = "";
   autoResizeTextarea();
@@ -635,9 +700,13 @@ async function handleSubmit(event) {
         email: elements.emailInput.value.trim(),
       }),
     });
+    const shouldStickToBottom = isChatStageNearBottom();
     renderMessages(payload, {
       route: payload.route,
       route_reason: payload.route_reason,
+    }, {
+      forceScroll: shouldStickToBottom,
+      scrollBehavior: "smooth",
     });
     await refreshConversationList();
   } catch (error) {
@@ -695,10 +764,6 @@ elements.displayNameInput.addEventListener("change", saveProfile);
 elements.emailInput.addEventListener("change", saveProfile);
 elements.mobileMenuButton.addEventListener("click", openSidebar);
 elements.sidebarOverlay.addEventListener("click", closeSidebar);
-elements.conversationContextMenu.addEventListener("contextmenu", (event) => {
-  logContextMenuDebug("menu-contextmenu", event);
-  event.preventDefault();
-});
 document.addEventListener("pointerdown", (event) => {
   logContextMenuDebug("document-pointerdown", event, {
     menuOpen: isConversationContextMenuOpen(),
@@ -717,18 +782,6 @@ document.addEventListener("pointerdown", (event) => {
     closeConversationContextMenu();
   }
 }, true);
-document.addEventListener("contextmenu", (event) => {
-  logContextMenuDebug("document-contextmenu", event, {
-    menuOpen: isConversationContextMenuOpen(),
-    insideMenu: elements.conversationContextMenu.contains(event.target),
-  });
-  if (elements.conversationContextMenu.contains(event.target)) {
-    event.preventDefault();
-  } else if (isConversationContextMenuOpen()) {
-    logContextMenuDebug("document-contextmenu-close", event);
-    closeConversationContextMenu();
-  }
-});
 document.addEventListener("keydown", (event) => {
   if (event.key === "Escape") {
     logContextMenuDebug("document-keydown-escape", event);

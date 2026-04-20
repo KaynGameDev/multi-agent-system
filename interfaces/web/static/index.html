@@ -31,7 +31,7 @@
         <section class="sidebar__section">
           <div class="sidebar__label">
             Recent chats
-            <span class="sidebar__label-hint">Right-click or use ... for actions</span>
+            <span class="sidebar__label-hint">Use ... for actions</span>
           </div>
           <nav class="conversation-list" id="conversationList"></nav>
         </section>
@@ -68,6 +68,13 @@
             <div class="mobile-header__title">Jade Agent</div>
           </div>
         </header>
+
+        <section class="chat-header" aria-label="Current conversation">
+          <div class="chat-header__inner">
+            <h1 class="chat-header__title" id="chatHeaderTitle">New chat</h1>
+            <div class="chat-header__model" id="chatHeaderModel">{{ CHAT_MODEL_LABEL }}</div>
+          </div>
+        </section>
 
         <section class="chat-stage" id="chatStage">
           <div class="empty-state" id="emptyState">
