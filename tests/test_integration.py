@@ -9,7 +9,7 @@ from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langchain_core.tools import tool
 from langgraph.checkpoint.memory import InMemorySaver
 
-from app.graph import build_default_agent_registrations, build_graph, build_web_agent_registrations
+from app.graph import build_default_agent_registrations, build_graph
 from app.skills import SkillRegistry
 from interfaces.web.server import WebServer
 from tests.common import build_registration, make_settings, write_skill
@@ -298,14 +298,12 @@ class DeterministicIntegrationTests(unittest.TestCase):
         self.assertEqual(second_state["resolved_skill_ids"], [])
         self.assertNotIn("Explicit requested agent", second_state["route_reason"])
 
-    def test_default_and_web_registrations_include_builder_agent(self) -> None:
+    def test_default_registrations_are_single_builder_runtime(self) -> None:
         settings = make_settings(self.root / "runtime")
 
         default_names = {registration.name for registration in build_default_agent_registrations(settings=settings)}
-        web_names = {registration.name for registration in build_web_agent_registrations(settings=settings)}
 
-        self.assertIn("knowledge_base_builder_agent", default_names)
-        self.assertIn("knowledge_base_builder_agent", web_names)
+        self.assertEqual(default_names, {"knowledge_base_builder_agent"})
 
 
 if __name__ == "__main__":

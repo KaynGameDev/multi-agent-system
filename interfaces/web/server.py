@@ -20,7 +20,6 @@ from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from app.checkpoints import GraphCheckpointStore
 from app.config import Settings
-from app.conversation_mode import conversation_mode_for_requested_agent
 from app.context_window import (
     ContextWindowThresholdOverrides,
     USAGE_BASELINE_STAGE_BEFORE_MESSAGE,
@@ -70,6 +69,8 @@ from interfaces.web.conversations import (
 from tools.document_conversion import ConversionSessionStore
 
 logger = logging.getLogger(__name__)
+
+KNOWLEDGE_BUILD_REQUESTED_AGENT = "knowledge_base_builder_agent"
 
 def _rate_limit_exceeded_handler(request: Request, exc: RateLimitExceeded) -> JSONResponse:
     return JSONResponse(
@@ -138,11 +139,11 @@ class WebServer:
             credential.username: credential.password
             for credential in self.settings.web_auth_credentials
         }
-        from app.graph import build_web_agent_registrations
+        from app.graph import build_default_agent_registrations
 
         self._agent_memory_scopes = {
             registration.name: registration.memory_scope
-            for registration in build_web_agent_registrations(settings=self.settings)
+            for registration in build_default_agent_registrations(settings=self.settings)
             if registration.memory_scope is not None
         }
         self.app = self._build_app()
@@ -299,8 +300,7 @@ class WebServer:
         def create_conversation(request: Request, payload: ConversationCreateRequest | None = None) -> dict:
             self._require_api_auth(request)
             title = (payload.title if payload is not None else "New chat").strip() or "New chat"
-            conversation = self.conversation_store.create_conversation(title=title)
-            return {**conversation, "mode": ""}
+            return self.conversation_store.create_conversation(title=title)
 
         @app.get("/api/conversations/{conversation_id}")
         def get_conversation(request: Request, conversation_id: str) -> dict:
@@ -532,7 +532,7 @@ class WebServer:
             "thread_id": thread_id,
             "user_id": payload.email.strip() or payload.display_name.strip() or thread_id,
             "channel_id": conversation_id,
-            "requested_agent": "",
+            "requested_agent": KNOWLEDGE_BUILD_REQUESTED_AGENT,
             "requested_skill_ids": [],
             "uploaded_files": [],
             "context_paths": [],
@@ -1028,24 +1028,10 @@ class WebServer:
 
     def _build_public_conversation_payload(self, conversation_id: str) -> dict[str, Any]:
         public_conversation = self.conversation_store.get_conversation(conversation_id)
-        full_conversation = self.conversation_store.get_full_conversation(conversation_id)
-        return {
-            **public_conversation,
-            "mode": conversation_mode_for_requested_agent(
-                self._resolve_requested_agent_from_transcript(full_conversation)
-            ),
-        }
+        return public_conversation
 
     def _resolve_requested_agent_from_transcript(self, conversation: dict[str, Any]) -> str:
-        transcript_messages = conversation.get("messages", [])
-        if not isinstance(transcript_messages, list):
-            return ""
-
-        runtime_rehydration_state = extract_runtime_rehydration_state_from_transcript(
-            transcript_messages,
-            require_compact_boundary=False,
-        )
-        return str(runtime_rehydration_state.get("requested_agent", "") or "").strip()
+        return KNOWLEDGE_BUILD_REQUESTED_AGENT
 
     def _augment_transcript_metadata_with_runtime_state(
         self,

@@ -3,7 +3,6 @@ from __future__ import annotations
 import json
 import unittest
 
-from agents.knowledge.rendering import is_knowledge_payload, render_knowledge_payload
 from langchain_core.messages import AIMessage, ToolMessage
 
 from app.contracts import (
@@ -158,35 +157,19 @@ class RuntimeContractTests(unittest.TestCase):
         self.assertEqual(envelope["arguments"]["query"], "setup")
         self.assertEqual(envelope["arguments"]["limit"], 5)
 
-    def test_retrieval_payload_is_a_knowledge_payload_but_not_directly_rendered(self) -> None:
-        payload = {
-            "ok": True,
-            "query": "How does setup work?",
-            "retrieved_context": "Retrieved context block",
-            "retrieved_chunks": [
-                {
-                    "title": "Setup Guide",
-                    "path": "knowledge/Docs/00_Shared/SetupGuide.md",
-                }
-            ],
-        }
-
-        self.assertTrue(is_knowledge_payload(payload))
-        self.assertIsNone(render_knowledge_payload(payload))
-
     def test_skill_runtime_state_tracks_active_contracts_for_selected_agent(self) -> None:
         contracts = [
             build_skill_invocation_contract(
                 skill_id="shared-inline",
                 name="Shared Inline",
-                target_agent="knowledge_agent",
+                target_agent="knowledge_base_builder_agent",
                 source="gateway.auto_skill_match",
                 reason="Token overlap matched: shared, inline.",
             ),
             build_skill_invocation_contract(
                 skill_id="forked-review",
                 mode="forked",
-                target_agent="knowledge_base_builder_agent",
+                target_agent="legacy_review_agent",
                 source="gateway.explicit_skill_request",
                 reason="Explicit forked skill request.",
             ),
@@ -194,13 +177,16 @@ class RuntimeContractTests(unittest.TestCase):
 
         active_contracts = get_active_skill_invocation_contracts(
             {"skill_invocation_contracts": contracts},
-            agent_name="knowledge_agent",
+            agent_name="knowledge_base_builder_agent",
         )
-        runtime_state = build_skill_runtime_state(active_contracts, agent_name="knowledge_agent")
+        runtime_state = build_skill_runtime_state(active_contracts, agent_name="knowledge_base_builder_agent")
 
         self.assertEqual(len(active_contracts), 1)
         self.assertEqual(active_contracts[0]["skill_id"], "shared-inline")
-        self.assertEqual(runtime_state["active_skill_invocation_contracts"][0]["target_agent"], "knowledge_agent")
+        self.assertEqual(
+            runtime_state["active_skill_invocation_contracts"][0]["target_agent"],
+            "knowledge_base_builder_agent",
+        )
         self.assertEqual(runtime_state["skill_execution_diagnostics"][0]["mode"], "inline")
 
     def test_routing_decision_tracks_policy_step(self) -> None:

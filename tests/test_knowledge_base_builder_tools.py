@@ -335,21 +335,11 @@ class KnowledgeBaseBuilderToolTests(unittest.TestCase):
         self.assertIn("Architecture Overview", result["retrieved_context"])
         self.assertIn("answer repository questions", result["retrieved_context"].lower())
 
-    def test_builder_agent_gets_write_tools_but_reader_does_not(self) -> None:
+    def test_default_registrations_expose_only_builder_tools(self) -> None:
         registrations = {registration.name: registration for registration in build_default_agent_registrations()}
 
-        knowledge_tool_names = {tool.name for tool in registrations["knowledge_agent"].tools}
         builder_tool_names = {tool.name for tool in registrations["knowledge_base_builder_agent"].tools}
 
-        self.assertEqual(
-            knowledge_tool_names,
-            {
-                "list_knowledge_documents",
-                "search_knowledge_documents",
-                "read_knowledge_document",
-                "retrieve_knowledge_context",
-            },
-        )
         self.assertEqual(
             builder_tool_names,
             {
@@ -361,6 +351,7 @@ class KnowledgeBaseBuilderToolTests(unittest.TestCase):
                 "write_knowledge_markdown_document",
             },
         )
+        self.assertEqual(set(registrations), {"knowledge_base_builder_agent"})
 
     def test_builder_prompt_requires_distinguishing_recorded_context_from_real_file_write(self) -> None:
         prompt = build_knowledge_base_builder_prompt(
@@ -373,6 +364,8 @@ class KnowledgeBaseBuilderToolTests(unittest.TestCase):
 
         self.assertIn("不要说“已保存”", prompt)
         self.assertIn("已记录在当前会话", prompt)
+        self.assertIn("运行时知识库状态扫描", prompt)
+        self.assertIn("当前最优先补齐的空位", prompt)
 
     def test_builder_normalizes_structured_content_blocks_from_model(self) -> None:
         class StructuredContentLLM:

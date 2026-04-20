@@ -7,7 +7,6 @@ const state = {
   sending: false,
   authEnabled: false,
   authenticatedUsername: "",
-  activeConversationMode: "",
 };
 
 const elements = {
@@ -18,8 +17,6 @@ const elements = {
   composerForm: document.getElementById("composerForm"),
   messageInput: document.getElementById("messageInput"),
   sendButton: document.getElementById("sendButton"),
-  chatModeToggle: document.getElementById("chatModeToggle"),
-  chatModeToggleButton: document.getElementById("chatModeToggleButton"),
   newChatButton: document.getElementById("newChatButton"),
   displayNameInput: document.getElementById("displayNameInput"),
   emailInput: document.getElementById("emailInput"),
@@ -280,20 +277,6 @@ function updateConversationHeader(title) {
   state.activeConversationTitle = normalizedTitle;
 }
 
-function updateConversationMode(mode) {
-  const normalizedMode = (mode || "").trim();
-  state.activeConversationMode = normalizedMode;
-
-  if (normalizedMode === "knowledge_build") {
-    elements.chatModeToggle.hidden = false;
-    elements.messageInput.placeholder = "Message Jade Agent in Knowledge Build Mode";
-    return;
-  }
-
-  elements.chatModeToggle.hidden = true;
-  elements.messageInput.placeholder = "Message Jade Agent";
-}
-
 async function renameConversation(conversationId, currentTitle) {
   const nextTitle = window.prompt("Rename chat", currentTitle || "New chat");
   if (nextTitle === null) {
@@ -329,7 +312,6 @@ async function deleteConversation(conversationId, currentTitle) {
     state.activeConversationId = null;
     window.localStorage.removeItem(ACTIVE_CONVERSATION_STORAGE_KEY);
     updateConversationHeader("New chat");
-    updateConversationMode("");
     renderMessages({ messages: [] });
   }
 
@@ -584,7 +566,6 @@ async function loadConversation(conversationId, options = {}) {
   state.activeConversationId = conversation.conversation_id;
   window.localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, conversation.conversation_id);
   updateConversationHeader(conversation.title || "New chat");
-  updateConversationMode(conversation.mode || "");
   renderMessages(conversation);
 
   if (!options.skipListRefresh) {
@@ -611,51 +592,6 @@ function appendPendingAssistant() {
   requestAnimationFrame(() => {
     elements.chatStage.scrollTo({ top: elements.chatStage.scrollHeight, behavior: "smooth" });
   });
-}
-
-async function sendModeExitCommand() {
-  if (state.sending) {
-    return;
-  }
-
-  if (!state.activeConversationId) {
-    await createConversation();
-  }
-
-  state.sending = true;
-  elements.sendButton.disabled = true;
-  saveProfile();
-  appendPendingAssistant();
-
-  try {
-    const payload = await api(`/api/conversations/${state.activeConversationId}/messages`, {
-      method: "POST",
-      body: JSON.stringify({
-        message: "/kb off",
-        display_name: elements.displayNameInput.value.trim(),
-        email: elements.emailInput.value.trim(),
-      }),
-    });
-    updateConversationMode(payload.mode || "");
-    renderMessages(payload, {
-      route: payload.route,
-      route_reason: payload.route_reason,
-    });
-    await refreshConversationList();
-  } catch (error) {
-    const pending = document.getElementById("pendingAssistant");
-    if (pending) {
-      const card = pending.querySelector(".message__card");
-      if (card) {
-        card.innerHTML = `<p class="message__error">${escapeHtml(error.message || "Something went wrong. Please try again.")}</p>`;
-      }
-      pending.removeAttribute("id");
-    }
-  } finally {
-    state.sending = false;
-    elements.sendButton.disabled = false;
-    elements.messageInput.focus();
-  }
 }
 
 async function handleSubmit(event) {
@@ -699,7 +635,6 @@ async function handleSubmit(event) {
         email: elements.emailInput.value.trim(),
       }),
     });
-    updateConversationMode(payload.mode || "");
     renderMessages(payload, {
       route: payload.route,
       route_reason: payload.route_reason,
@@ -750,7 +685,6 @@ elements.newChatButton.addEventListener("click", async () => {
 });
 elements.composerForm.addEventListener("submit", handleSubmit);
 elements.messageInput.addEventListener("input", autoResizeTextarea);
-elements.chatModeToggleButton.addEventListener("click", sendModeExitCommand);
 elements.messageInput.addEventListener("keydown", (event) => {
   if (event.key === "Enter" && !event.shiftKey) {
     event.preventDefault();

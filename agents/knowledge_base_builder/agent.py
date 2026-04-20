@@ -7,6 +7,7 @@ from typing import Any
 from langchain_core.messages import AIMessage
 
 from app.contracts import build_assistant_response
+from app.knowledge_status import build_knowledge_base_status_prompt_context
 from app.language import detect_response_language
 from app.messages import extract_latest_human_text, stringify_message_content
 from app.model_request import build_model_request_messages
@@ -117,6 +118,7 @@ def build_knowledge_base_builder_prompt(
         agent_name=agent_name,
     )
     tool_prompt = build_agent_tool_prompt(tool_ids)
+    status_prompt = build_knowledge_base_status_prompt_context()
     return join_prompt_layers(
         load_shared_instruction_text(),
         sections["role"],
@@ -124,6 +126,7 @@ def build_knowledge_base_builder_prompt(
         sections["tool_usage"],
         tool_prompt,
         skill_prompt,
+        status_prompt,
         sections["boundaries"],
         sections["output"],
     )

@@ -387,12 +387,6 @@ def validate_interface_settings(settings: Settings) -> None:
     if not is_agent_runtime_enabled(settings):
         raise RuntimeError("No communication interface is configured.")
 
-    if settings.slack_enabled:
-        if settings.slack_bot_token and not settings.slack_app_token:
-            raise RuntimeError("Missing required environment variables: SLACK_APP_TOKEN")
-        if settings.slack_app_token and not settings.slack_bot_token:
-            raise RuntimeError("Missing required environment variables: SLACK_BOT_TOKEN")
-
     if settings.web_enabled and settings.web_port <= 0:
         raise RuntimeError("WEB_PORT must be a positive integer.")
     if settings.web_enabled and settings.web_auth_enabled:
@@ -406,12 +400,8 @@ def validate_interface_settings(settings: Settings) -> None:
             raise RuntimeError("WEB_AUTH_SESSION_MAX_AGE_SECONDS must be a positive integer.")
 
 
-def is_slack_enabled(settings: Settings) -> bool:
-    return bool(settings.slack_enabled and settings.slack_bot_token and settings.slack_app_token)
-
-
 def is_agent_runtime_enabled(settings: Settings) -> bool:
-    return bool(is_slack_enabled(settings) or settings.web_enabled)
+    return bool(settings.web_enabled)
 
 
 def normalize_knowledge_file_type(value: str) -> str:

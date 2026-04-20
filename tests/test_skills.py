@@ -5,7 +5,6 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from agents.general_chat.agent import build_general_chat_prompt
 from agents.knowledge_base_builder.agent import build_knowledge_base_builder_prompt
 from app.skills import SkillRegistry, normalize_metadata_keys, split_skill_frontmatter
 from tests.common import build_registration, write_skill
@@ -141,45 +140,6 @@ class SkillRegistryTests(unittest.TestCase):
             resolution.effective_definition.available_to_agents,
             ("knowledge_base_builder_agent",),
         )
-
-    def test_prompt_builder_consumes_runtime_skill_contract_context(self) -> None:
-        registrations = (
-            build_registration("general_chat_agent", namespace="general_chat", is_general_assistant=True),
-        )
-        write_skill(
-            self.root,
-            ".jade/skills/greeting-enhancer",
-            frontmatter={
-                "name": "Greeting Enhancer",
-                "description": "Makes greetings warmer.",
-                "available_to_agents": ["general_chat_agent"],
-            },
-            body="# Greeting Enhancer\n\nAlways greet the user warmly and concisely.",
-        )
-        registry = SkillRegistry(registrations, project_root=self.root)
-        contract = registry.build_skill_invocation_contract(
-            "greeting-enhancer",
-            target_agent="general_chat_agent",
-            source="gateway.explicit_skill_request",
-            reason="Explicit skill `greeting-enhancer` was requested and applies to `general_chat_agent`.",
-        )
-
-        prompt = build_general_chat_prompt(
-            {
-                "interface_name": "web",
-                "skill_invocation_contracts": [contract],
-            },
-            skill_registry=registry,
-            agent_name="general_chat_agent",
-        )
-
-        self.assertIn("Active Skill Runtime", prompt)
-        self.assertIn("gateway.explicit_skill_request", prompt)
-        self.assertIn("Execution mode: `inline`", prompt)
-        self.assertIn("Greeting Enhancer", prompt)
-        self.assertIn("Always greet the user warmly and concisely.", prompt)
-        self.assertIn("Skill Instructions", prompt)
-        self.assertNotIn("temporary compatibility adapter", prompt)
 
     def test_builder_skill_frontmatter_is_parsed(self) -> None:
         registrations = (
