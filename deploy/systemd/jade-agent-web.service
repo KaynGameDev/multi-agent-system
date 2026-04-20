@@ -1,5 +1,5 @@
 [Unit]
-Description=Jade Agent Web Interface
+Description=Jade KB Builder Web Interface
 After=network-online.target
 Wants=network-online.target
 

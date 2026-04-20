@@ -1,6 +1,15 @@
-# Jade Agent Multi-Agent System
+# Jade Knowledge Base Builder
 
-A lean LangGraph + Slack starter for a company-facing multi-agent assistant with Google, MiniMax, and OpenAI LLM support.
+A web-first knowledge-base building workspace built on Jade's LangGraph runtime. It helps teams scan KB gaps, review document structure, convert source docs and Sheets into canonical packages, and approval-gate writes into the repository knowledge base.
+
+## Product focus
+
+This repo is the standalone home for the Jade knowledge-base builder product.
+
+- The web interface is the primary surface for day-to-day KB building
+- `knowledge_base_builder_agent` drives gap discovery, elicitation, structure review, and draft planning
+- `document_conversion_agent` converts design docs and Sheets into approval-gated canonical knowledge packages
+- Slack support remains available as an optional interface, but it is no longer the product center of gravity
 
 ## Current architecture
 
@@ -13,7 +22,7 @@ A lean LangGraph + Slack starter for a company-facing multi-agent assistant with
 - `project_task_agent` answers questions that depend on the Google Sheets project tracker
 - `knowledge_agent` answers questions about internal docs, architecture, and setup guidance
 - `knowledge_base_builder_agent` handles knowledge elicitation, KB document review, layer placement, and KB V1 tracking
-- `document_conversion_agent` handles Slack-driven design document conversion into canonical AI-friendly knowledge packages
+- `document_conversion_agent` handles document conversion into canonical AI-friendly knowledge packages
 - `general_chat_agent` handles greetings, general chat, and everything outside the project tracker
 - `project_tools` executes Google Sheets tools when the project agent decides they are needed
 - `knowledge_tools` search and read repository documentation when the knowledge agent needs evidence
@@ -181,9 +190,9 @@ ROUTING_MINIMAX_BASE_URL=https://api.minimaxi.com/v1
 
 `GOOGLE_APPLICATION_CREDENTIALS` and `JADE_PROJECT_SHEET_ID` remain required for the Google Sheets/Docs integrations regardless of which LLM provider is selected.
 
-## Slack setup
+## Optional Slack setup
 
-The bot expects Socket Mode.
+Slack remains available for teams that still want a chatops surface or upload-driven flows such as document conversion follow-ups. The bot expects Socket Mode.
 
 Recommended scopes/events:
 - Bot token scopes:
@@ -202,9 +211,17 @@ Recommended scopes/events:
 
 ## Run
 
+For the standalone KB builder experience, the web app is the main entrypoint:
+
 ```bash
+WEB_ENABLED=true
+SLACK_ENABLED=false
 python main.py
 ```
+
+Then open `http://127.0.0.1:8000`.
+
+If you also want Slack enabled, keep the Slack tokens configured and set `SLACK_ENABLED=true`.
 
 ## Hosting the web interface
 
