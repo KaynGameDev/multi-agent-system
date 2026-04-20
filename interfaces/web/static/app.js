@@ -6,6 +6,7 @@ const state = {
   contextMenuConversationId: null,
   contextMenuConversationTitle: "New chat",
   conversations: [],
+  lastSuccessfulConversationView: null,
   sending: false,
   authEnabled: false,
   authenticatedUsername: "",
@@ -39,8 +40,44 @@ const ACTIVE_CONVERSATION_STORAGE_KEY = "jade-active-conversation";
 const CONTEXT_MENU_DEBUG_VERSION = "2026-04-09-ctx-debug-1";
 const CONTEXT_MENU_DEBUG_ENABLED = new URLSearchParams(window.location.search).has("debugContextMenu");
 const CHAT_BOTTOM_STICK_THRESHOLD_PX = 96;
+const CONVERSATION_LIST_SCROLL_RESTORE_TOLERANCE_PX = 4;
 
 let contextMenuDebugPanel = null;
+
+function cloneViewData(value) {
+  if (typeof structuredClone === "function") {
+    return structuredClone(value);
+  }
+  return JSON.parse(JSON.stringify(value));
+}
+
+function captureLastSuccessfulConversationView(conversation, routeMeta = null) {
+  state.lastSuccessfulConversationView = {
+    activeConversationId: state.activeConversationId,
+    conversation: cloneViewData(conversation),
+    routeMeta: routeMeta ? cloneViewData(routeMeta) : null,
+  };
+}
+
+function restoreLastSuccessfulConversationView(snapshot) {
+  if (!snapshot) {
+    return false;
+  }
+
+  state.activeConversationId = snapshot.activeConversationId;
+  if (snapshot.activeConversationId) {
+    window.localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, snapshot.activeConversationId);
+  } else {
+    window.localStorage.removeItem(ACTIVE_CONVERSATION_STORAGE_KEY);
+  }
+
+  renderMessages(snapshot.conversation, snapshot.routeMeta, {
+    forceScroll: false,
+    rememberView: false,
+    scrollBehavior: "auto",
+  });
+  return true;
+}
 
 function describeDebugTarget(target) {
   if (!(target instanceof Element)) {
@@ -447,10 +484,14 @@ function renderConversationList() {
         <span class="conversation-list__time">${escapeHtml(formatRelativeTime(conversation.updated_at))}</span>
       `;
       button.addEventListener("click", async () => {
-        await loadConversation(conversation.conversation_id, {
-          titleHint: conversation.title || "New chat",
-        });
-        closeSidebar();
+        try {
+          await loadConversation(conversation.conversation_id, {
+            titleHint: conversation.title || "New chat",
+          });
+          closeSidebar();
+        } catch (error) {
+          window.alert(error.message || "Could not open that chat.");
+        }
       });
 
       const actionsButton = document.createElement("button");
@@ -496,6 +537,9 @@ function renderMessages(conversation, routeMeta = null, options = {}) {
   const messages = conversation.messages || [];
   const shouldStickToBottom = Boolean(options.forceScroll) || isChatStageNearBottom();
   updateConversationHeader(conversation.title || state.activeConversationTitle);
+  if (options.rememberView !== false) {
+    captureLastSuccessfulConversationView(conversation, routeMeta);
+  }
   elements.messages.innerHTML = "";
 
   if (!messages.length) {
@@ -592,12 +636,17 @@ async function refreshConversationList() {
 
   try {
     const payload = await api("/api/conversations");
+    const currentScrollTop = elements.conversationList.scrollTop;
+    const shouldRestoreScroll = Math.abs(currentScrollTop - preserveScrollTop)
+      <= CONVERSATION_LIST_SCROLL_RESTORE_TOLERANCE_PX;
     state.conversations = payload.conversations || [];
     state.conversationListHasLoaded = true;
     renderConversationList();
-    requestAnimationFrame(() => {
-      elements.conversationList.scrollTop = preserveScrollTop;
-    });
+    if (shouldRestoreScroll) {
+      requestAnimationFrame(() => {
+        elements.conversationList.scrollTop = preserveScrollTop;
+      });
+    }
   } finally {
     setConversationListLoading(false);
   }
@@ -617,12 +666,24 @@ async function loadConversation(conversationId, options = {}) {
   const titleHint = (options.titleHint || "").trim()
     || state.conversations.find((conversation) => conversation.conversation_id === conversationId)?.title
     || "Loading chat";
+  const previousView = state.lastSuccessfulConversationView
+    ? cloneViewData(state.lastSuccessfulConversationView)
+    : null;
 
   if (!options.skipLoadingState) {
     renderConversationLoading(titleHint);
   }
 
-  const conversation = await api(`/api/conversations/${conversationId}`);
+  let conversation;
+  try {
+    conversation = await api(`/api/conversations/${conversationId}`);
+  } catch (error) {
+    if (previousView) {
+      restoreLastSuccessfulConversationView(previousView);
+    }
+    throw error;
+  }
+
   state.activeConversationId = conversation.conversation_id;
   window.localStorage.setItem(ACTIVE_CONVERSATION_STORAGE_KEY, conversation.conversation_id);
   renderMessages(conversation, null, {
@@ -685,6 +746,7 @@ async function handleSubmit(event) {
   });
   renderMessages(optimisticConversation, null, {
     forceScroll: true,
+    rememberView: false,
     scrollBehavior: "smooth",
   });
   appendPendingAssistant();
