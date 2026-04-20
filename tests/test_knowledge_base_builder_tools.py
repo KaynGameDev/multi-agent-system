@@ -237,6 +237,39 @@ class KnowledgeBaseBuilderToolTests(unittest.TestCase):
         self.assertTrue(written["ok"])
         self.assertTrue(Path(written["absolute_path"]).exists())
 
+    def test_builder_overwrite_creates_versioned_hidden_backup(self) -> None:
+        relative_path = "Docs/10_GameLines/BuYuDaLuanDou/LineOverview/Protected.md"
+        target_path = self.kb_root / relative_path
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target_path.write_text("# Original\n\nKeep this safe.\n", encoding="utf-8")
+
+        pending_action = self._build_write_pending_action(
+            relative_path=relative_path,
+            content="# Updated\n\nReplacement body.\n",
+            overwrite=True,
+        )
+        execution_contract = build_execution_contract(pending_action)
+
+        written = write_knowledge_markdown_document.func(
+            relative_path=relative_path,
+            content="# Updated\n\nReplacement body.\n",
+            overwrite=True,
+            state={
+                "pending_action": pending_action,
+                "execution_contract": execution_contract,
+            },
+        )
+
+        self.assertTrue(written["ok"])
+        self.assertTrue(written["overwritten"])
+        self.assertTrue(written["backup_created"])
+        backup_path = Path(str(written["backup_absolute_path"]))
+        self.assertTrue(backup_path.exists())
+        self.assertEqual(backup_path.read_text(encoding="utf-8"), "# Original\n\nKeep this safe.\n")
+        self.assertEqual(target_path.read_text(encoding="utf-8"), "# Updated\n\nReplacement body.\n")
+        self.assertTrue(str(written["backup_relative_path"]).startswith(".history/"))
+        self.assertTrue(backup_path.name.endswith(".bak.md"))
+
     def test_builder_write_rejects_changed_path_or_overwrite_flag_after_approval(self) -> None:
         approved_path = "Docs/10_GameLines/BuYuDaLuanDou/LineOverview/Approved.md"
         approved_content = "# Approved\n\nBody.\n"

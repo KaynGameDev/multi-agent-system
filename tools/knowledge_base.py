@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import csv
+from datetime import datetime, timezone
 import json
 import re
+import shutil
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -98,6 +100,7 @@ KNOWLEDGE_CHUNK_MAX_CHARS = 2_200
 KNOWLEDGE_RETRIEVAL_LIMIT = 6
 KNOWLEDGE_RETRIEVAL_MAX_CHUNKS_PER_DOCUMENT = 3
 KNOWLEDGE_RETRIEVED_CONTEXT_MAX_CHARS = 12_000
+KNOWLEDGE_BACKUP_DIRNAME = ".history"
 
 
 def get_knowledge_base_root() -> Path:
@@ -1332,6 +1335,34 @@ def resolve_knowledge_markdown_target(relative_path: str) -> tuple[Path, Path]:
     return root, candidate
 
 
+def build_knowledge_backup_path(root: Path, absolute_path: Path) -> Path:
+    relative_path = absolute_path.relative_to(root)
+    timestamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S%fZ")
+    backup_dir = root / KNOWLEDGE_BACKUP_DIRNAME / relative_path.parent
+    backup_stem = absolute_path.stem or absolute_path.name
+    backup_suffix = absolute_path.suffix
+    candidate = backup_dir / f"{backup_stem}.{timestamp}.bak{backup_suffix}"
+    counter = 1
+    while candidate.exists():
+        candidate = backup_dir / f"{backup_stem}.{timestamp}.{counter}.bak{backup_suffix}"
+        counter += 1
+    return candidate
+
+
+def create_knowledge_document_backup(root: Path, absolute_path: Path) -> dict[str, object]:
+    if not absolute_path.exists() or not absolute_path.is_file():
+        raise FileNotFoundError(f"Cannot back up missing knowledge document: {absolute_path}")
+
+    backup_path = build_knowledge_backup_path(root, absolute_path)
+    backup_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(absolute_path, backup_path)
+    return {
+        "backup_relative_path": safe_relative_path(backup_path, root),
+        "backup_absolute_path": str(backup_path),
+        "backup_bytes_written": backup_path.stat().st_size,
+    }
+
+
 @tool
 def list_knowledge_documents() -> dict[str, object]:
     """List knowledge documents available to the knowledge agent."""
@@ -1666,6 +1697,26 @@ def write_knowledge_markdown_document(
             "absolute_path": str(absolute_path),
         }
 
+    backup_details: dict[str, object] = {"backup_created": False}
+    if existed:
+        try:
+            backup_details = {
+                "backup_created": True,
+                **create_knowledge_document_backup(_root, absolute_path),
+            }
+        except Exception as exc:
+            return {
+                "ok": False,
+                **context,
+                "knowledge_mutation": "write_markdown",
+                "requires_confirmation": False,
+                "error": f"Failed to create a pre-overwrite backup: {exc}",
+                "relative_path": relative_path,
+                "absolute_path": str(absolute_path),
+                "target_exists": True,
+                **backup_details,
+            }
+
     absolute_path.parent.mkdir(parents=True, exist_ok=True)
     absolute_path.write_text(content, encoding="utf-8")
 
@@ -1679,4 +1730,5 @@ def write_knowledge_markdown_document(
         "created": not existed,
         "overwritten": existed,
         "bytes_written": absolute_path.stat().st_size,
+        **backup_details,
     }
