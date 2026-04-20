@@ -42,6 +42,11 @@ class DummyGraph:
         }
 
 
+class RaisingGraph:
+    def invoke(self, initial_state, config=None):
+        raise RuntimeError("boom")
+
+
 class RecordingGraph:
     def __init__(self, reply_text: str = "Recorded reply.") -> None:
         self.reply_text = reply_text
@@ -791,6 +796,83 @@ class WebServerApiTests(unittest.TestCase):
         self.assertEqual(payload["context_compaction"]["reason"], "prompt_too_long")
         self.assertEqual(payload["assistant_message"]["markdown"], "Recovered after compaction.")
         self.assertTrue(any("## Continuation Summary" in message["markdown"] for message in payload["messages"]))
+
+    def test_unhandled_invoke_exception_returns_500_with_error_flag(self) -> None:
+        server = WebServer(agent_graph=RaisingGraph(), settings=self.settings)
+        client = TestClient(server.app)
+
+        conversation = client.post("/api/conversations", json={"title": "Unhandled error"}).json()
+        response = client.post(
+            f"/api/conversations/{conversation['conversation_id']}/messages",
+            json={"message": "Trigger the failure", "display_name": "Tester", "email": "tester@example.com"},
+        )
+
+        self.assertEqual(response.status_code, 500)
+        payload = response.json()
+        self.assertTrue(payload["error"])
+        self.assertFalse(payload["blocked"])
+        self.assertTrue(payload["detail"])
+        self.assertIsNone(payload["assistant_message"])
+
+    def test_unhandled_invoke_exception_does_not_persist_apology_to_transcript(self) -> None:
+        server = WebServer(agent_graph=RaisingGraph(), settings=self.settings)
+        client = TestClient(server.app)
+
+        conversation = client.post("/api/conversations", json={"title": "Unhandled error transcript"}).json()
+        conversation_id = conversation["conversation_id"]
+        client.post(
+            f"/api/conversations/{conversation_id}/messages",
+            json={"message": "Trigger the failure", "display_name": "Tester", "email": "tester@example.com"},
+        )
+
+        transcript = client.get(f"/api/conversations/{conversation_id}")
+
+        self.assertEqual(transcript.status_code, 200)
+        messages = transcript.json()["messages"]
+        self.assertEqual(len(messages), 1)
+        self.assertEqual(messages[0]["role"], "user")
+        self.assertNotIn("I hit an error while processing that request.", [message["markdown"] for message in messages])
+
+    def test_unhandled_invoke_exception_preserves_user_message(self) -> None:
+        server = WebServer(agent_graph=RaisingGraph(), settings=self.settings)
+        client = TestClient(server.app)
+
+        conversation = client.post("/api/conversations", json={"title": "Unhandled error user turn"}).json()
+        conversation_id = conversation["conversation_id"]
+        submitted_message = "Keep my message in the transcript"
+
+        client.post(
+            f"/api/conversations/{conversation_id}/messages",
+            json={"message": submitted_message, "display_name": "Tester", "email": "tester@example.com"},
+        )
+
+        transcript = client.get(f"/api/conversations/{conversation_id}")
+
+        self.assertEqual(transcript.status_code, 200)
+        self.assertEqual(
+            [(message["role"], message["markdown"]) for message in transcript.json()["messages"]],
+            [("user", submitted_message)],
+        )
+
+    def test_recovery_signal_path_unaffected(self) -> None:
+        graph = PromptTooLongRecoveryGraph(fail_count=2)
+        server = WebServer(agent_graph=graph, settings=self.settings)
+        client = TestClient(server.app)
+
+        conversation = client.post("/api/conversations", json={"title": "Recovery signal"}).json()
+        conversation_id = conversation["conversation_id"]
+        server.conversation_store.append_message(conversation_id, role="user", markdown="Earlier request")
+        server.conversation_store.append_message(conversation_id, role="assistant", markdown="Earlier answer")
+
+        response = client.post(
+            f"/api/conversations/{conversation_id}/messages",
+            json={"message": "Latest question", "display_name": "Tester", "email": "tester@example.com"},
+        )
+
+        self.assertEqual(response.status_code, 409)
+        payload = response.json()
+        self.assertTrue(payload["blocked"])
+        self.assertFalse(payload.get("error", False))
 
     def test_max_output_truncation_triggers_reactive_recovery_retry(self) -> None:
         graph = MaxOutputRecoveryGraph()

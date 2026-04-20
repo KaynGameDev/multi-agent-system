@@ -442,7 +442,6 @@ class WebServer:
             if isinstance(invoke_result, JSONResponse):
                 return invoke_result
 
-            invoke_succeeded = invoke_result["invoke_succeeded"]
             assistant_text = invoke_result["assistant_text"]
             route = invoke_result["route"]
             route_reason = invoke_result["route_reason"]
@@ -463,34 +462,33 @@ class WebServer:
                 usage=assistant_usage,
                 metadata=assistant_metadata,
             )
-            if invoke_succeeded:
-                updated_conversation = self.conversation_store.get_full_conversation(conversation_id)
-                memory_state = self._build_web_memory_runtime_state(
-                    conversation_id=conversation_id,
-                    thread_id=thread_id,
-                    payload=payload,
-                    conversation=updated_conversation,
-                    route=route,
-                    active_session=active_session,
-                )
-                self._extract_durable_memories_after_turn(
-                    conversation_id=conversation_id,
-                    thread_id=thread_id,
-                    route=route,
-                    state=memory_state,
-                    conversation=updated_conversation,
-                    assistant_metadata=assistant_metadata,
-                )
-                self._schedule_memory_consolidation(
-                    route=route,
-                    state=memory_state,
-                )
-                self._schedule_session_memory_refresh(
-                    conversation_id=conversation_id,
-                    thread_id=thread_id,
-                    conversation=updated_conversation,
-                    force_refresh=bool(context_compaction.get("applied")),
-                )
+            updated_conversation = self.conversation_store.get_full_conversation(conversation_id)
+            memory_state = self._build_web_memory_runtime_state(
+                conversation_id=conversation_id,
+                thread_id=thread_id,
+                payload=payload,
+                conversation=updated_conversation,
+                route=route,
+                active_session=active_session,
+            )
+            self._extract_durable_memories_after_turn(
+                conversation_id=conversation_id,
+                thread_id=thread_id,
+                route=route,
+                state=memory_state,
+                conversation=updated_conversation,
+                assistant_metadata=assistant_metadata,
+            )
+            self._schedule_memory_consolidation(
+                route=route,
+                state=memory_state,
+            )
+            self._schedule_session_memory_refresh(
+                conversation_id=conversation_id,
+                thread_id=thread_id,
+                conversation=updated_conversation,
+                force_refresh=bool(context_compaction.get("applied")),
+            )
             conversation = self._build_public_conversation_payload(conversation_id)
             return {
                 **conversation,
@@ -645,20 +643,12 @@ class WebServer:
                     )
 
                 logger.exception("Failed while processing web conversation=%s", conversation_id)
-                return {
-                    "invoke_succeeded": False,
-                    "assistant_text": "I hit an error while processing that request. Please try again.",
-                    "route": "",
-                    "route_reason": "Request failed before a route completed.",
-                    "skill_resolution_diagnostics": [],
-                    "agent_selection_diagnostics": [],
-                    "selection_warnings": [],
-                    "assistant_usage": None,
-                    "assistant_metadata": None,
-                    "context_snapshot": current_context_snapshot,
-                    "context_compaction": current_context_compaction,
-                    "limit_recovery": limit_recovery,
-                }
+                return self._build_unhandled_invoke_error_response(
+                    conversation_id=conversation_id,
+                    snapshot=current_context_snapshot,
+                    context_compaction=current_context_compaction,
+                    limit_recovery=limit_recovery,
+                )
 
             signal = detect_reactive_recovery_signal_from_final_state(final_state)
             if signal is not None and attempt_index == 0:
@@ -717,7 +707,6 @@ class WebServer:
             if limit_recovery["attempted"]:
                 limit_recovery["recovered"] = True
             return {
-                "invoke_succeeded": True,
                 "assistant_text": assistant_text,
                 "route": route,
                 "route_reason": route_reason,
@@ -825,6 +814,38 @@ class WebServer:
             "selection_warnings": [detail],
         }
         return JSONResponse(status_code=409, content=payload)
+
+    def _build_unhandled_invoke_error_response(
+        self,
+        *,
+        conversation_id: str,
+        snapshot: Any,
+        context_compaction: dict[str, Any],
+        limit_recovery: dict[str, Any] | None = None,
+        detail: str = "I hit an error while processing that request. Please try again.",
+    ) -> JSONResponse:
+        conversation = self._build_public_conversation_payload(conversation_id)
+        payload = {
+            **conversation,
+            "assistant_message": None,
+            "blocked": False,
+            "error": True,
+            "detail": detail,
+            "context_window": serialize_context_window_snapshot(snapshot),
+            "context_compaction": context_compaction,
+            "limit_recovery": limit_recovery or {
+                "attempted": False,
+                "recovered": False,
+                "reason": "",
+                "retry_count": 0,
+            },
+            "route": "",
+            "route_reason": "",
+            "skill_resolution_diagnostics": [],
+            "agent_selection_diagnostics": [],
+            "selection_warnings": [],
+        }
+        return JSONResponse(status_code=500, content=payload)
 
     def _build_context_window_block_detail(
         self,
