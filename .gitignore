@@ -68,6 +68,8 @@ data/knowledge/*
 # Conversion workflow state
 data/conversion/
 runtime/conversion/web_conversations.json
+runtime/conversion/session_memory.json
+runtime/conversion/sessions/
 runtime/conversion/*.sqlite3-shm
 runtime/conversion/*.sqlite3-wal
 
