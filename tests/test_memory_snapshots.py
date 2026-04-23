@@ -7,6 +7,7 @@ from unittest.mock import patch
 
 import app.memory.file_transaction as file_transaction
 from app.frontmatter import render_frontmatter_document
+from app.memory.file_transaction import RootFileTransaction
 from app.memory.long_term import get_long_term_memory, list_long_term_memories, upsert_long_term_memory
 from app.memory.snapshots import (
     apply_long_term_memory_snapshot,
@@ -205,6 +206,47 @@ class MemorySnapshotsTests(unittest.TestCase):
         self.assertIsNotNone(sync_state)
         self.assertEqual(sync_state.action, "replace")
 
+    def test_replace_long_term_memory_snapshot_does_not_report_overwritten_entries_as_deleted(self) -> None:
+        self._write_snapshot_memory(
+            "default",
+            memory_id="project/overview",
+            name="Project Overview",
+            description="Shared roadmap context.",
+            memory_type="project",
+            content="Snapshot overview.",
+        )
+        upsert_long_term_memory(
+            self.user_root,
+            {
+                "memory_id": "project/overview",
+                "name": "Project Overview",
+                "description": "Shared roadmap context.",
+                "memory_type": "project",
+                "content_markdown": "Old overview that should be replaced.",
+            },
+        )
+        upsert_long_term_memory(
+            self.user_root,
+            {
+                "memory_id": "feedback/old",
+                "name": "Old Feedback",
+                "description": "Old personal feedback.",
+                "memory_type": "feedback",
+                "content_markdown": "Do not keep this.",
+            },
+        )
+
+        summary = replace_long_term_memory_snapshot(self.user_root, self.project_root)
+        overview = get_long_term_memory(self.user_root, "project/overview")
+        remaining_ids = [entry.memory_id for entry in list_long_term_memories(self.user_root)]
+
+        self.assertEqual(summary.action, "replace")
+        self.assertEqual(summary.created_memory_ids, ["project/overview"])
+        self.assertEqual(summary.deleted_memory_ids, ["feedback/old"])
+        self.assertEqual(remaining_ids, ["project/overview"])
+        self.assertIsNotNone(overview)
+        self.assertEqual(overview.content_markdown, "Snapshot overview.")
+
     def test_merge_long_term_memory_snapshot_rolls_back_if_transaction_commit_fails(self) -> None:
         self._write_snapshot_memory(
             "default",
@@ -324,6 +366,25 @@ class MemorySnapshotsTests(unittest.TestCase):
             [entry.memory_id for entry in list_long_term_memories(self.user_root)],
             ["feedback/old", "preferences/task-view"],
         )
+
+    def test_root_file_transaction_fsyncs_written_content(self) -> None:
+        root_dir = Path(self.tempdir.name) / "transaction-root"
+        transaction = RootFileTransaction(root_dir)
+        transaction.write_text("notes/example.md", "hello")
+
+        fsync_call_count = 0
+        real_fsync = file_transaction.os.fsync
+
+        def counting_fsync(fd: int) -> None:
+            nonlocal fsync_call_count
+            fsync_call_count += 1
+            return real_fsync(fd)
+
+        with patch("app.memory.file_transaction.os.fsync", side_effect=counting_fsync):
+            transaction.commit()
+
+        self.assertGreaterEqual(fsync_call_count, 2)
+        self.assertEqual((root_dir / "notes" / "example.md").read_text(encoding="utf-8"), "hello")
 
     def test_apply_long_term_memory_snapshot_dispatches_to_first_class_actions(self) -> None:
         self._write_snapshot_memory(

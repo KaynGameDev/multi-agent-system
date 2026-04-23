@@ -1,0 +1,22 @@
+id: frontdoor
+version: 0.1.0
+kind: agent_group
+runtime: adk
+entrypoint: agents.frontdoor.agent:build_app
+owner: platform-team
+description: Front-door routing agent that greets users and delegates to the best merged team agent.
+tags:
+  - front-door
+  - routing
+required_secrets:
+  - LLM_PROVIDER
+  - LLM_MODEL
+  - LLM_TEMPERATURE
+  - OPENAI_API_KEY
+  - OPENAI_BASE_URL
+capabilities:
+  - routing
+  - delegation
+  - greeting
+test_paths:
+  - tests

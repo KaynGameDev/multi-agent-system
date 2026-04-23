@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from pathlib import Path
 from tempfile import NamedTemporaryFile
@@ -111,12 +112,26 @@ def _write_bytes_atomically(path: Path, content_bytes: bytes) -> None:
             delete=False,
         ) as temp_file:
             temp_file.write(content_bytes)
+            temp_file.flush()
+            os.fsync(temp_file.fileno())
             temp_path = Path(temp_file.name)
         temp_path.replace(path)
+        _fsync_directory(path.parent)
     except Exception:
         if temp_path is not None and temp_path.exists():
             temp_path.unlink()
         raise
+
+
+def _fsync_directory(directory: Path) -> None:
+    try:
+        dir_fd = os.open(str(directory), os.O_RDONLY)
+    except (OSError, NotImplementedError):
+        return
+    try:
+        os.fsync(dir_fd)
+    finally:
+        os.close(dir_fd)
 
 
 def _prune_empty_parent_directories(start_dir: Path, *, stop_at: Path) -> None:

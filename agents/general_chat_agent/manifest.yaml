@@ -1,0 +1,18 @@
+id: general_chat_agent
+version: 0.1.0
+kind: agent
+runtime: adk
+entrypoint: agents.general_chat_agent.agent:build_app
+owner: platform-team
+description: General chat fallback agent that welcomes users and handles broad requests when no specialist is a better match.
+tags:
+  - default
+  - greeting
+  - fallback
+required_secrets: []
+capabilities:
+  - greeting
+  - general-chat
+  - adk-web-compatible
+test_paths:
+  - tests

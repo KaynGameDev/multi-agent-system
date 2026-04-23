@@ -1,0 +1,38 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "mas-platform"
+version = "0.1.0"
+description = "Engineer-first monorepo platform for publishing and running shared ADK agents."
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+  "google-adk>=1.31.1,<2",
+  "litellm>=1.83,<2",
+  "pydantic>=2.13,<3",
+  "python-dotenv>=1.0,<2",
+  "PyYAML>=6.0,<7",
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=9.0,<10",
+]
+
+[project.scripts]
+mas = "mas_platform.cli:run_cli"
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+addopts = "-q"
+pythonpath = [
+  "src",
+  ".",
+]

@@ -1,76 +1,10 @@
-# Python bytecode / caches
-__pycache__/
-*.py[cod]
-*$py.class
-
-# Virtual environments
 .venv/
-venv/
-env/
-ENV/
-agent_env/
-
-# Environment / secrets
-.env
-.env.*
-!.env.example
-credentials.json
-*.pem
-*.key
-*.crt
-secrets.json
-
-# IDE / editor
-.idea/
-.vscode/
-*.code-workspace
-
-# OS files
-.DS_Store
-Thumbs.db
-
-# Test / coverage / tooling caches
+__pycache__/
 .pytest_cache/
 .mypy_cache/
-.ruff_cache/
-.coverage
-.coverage.*
-htmlcov/
-
-# Build / packaging
-build/
+.DS_Store
 dist/
+build/
 *.egg-info/
-.eggs/
-
-# Jupyter
-.ipynb_checkpoints/
-
-# Logs
-*.log
-logs/
-
-# Local databases / temp files
-*.sqlite3
-*.db
-*.tmp
-*.bak
-
-# Local knowledge documents
-data/knowledge/*
-!data/knowledge/.gitkeep
-!data/knowledge/google_sheets_catalog.example.json
-!data/knowledge/company/
-!data/knowledge/company/**
-!data/knowledge/games/
-!data/knowledge/games/**
-
-# Conversion workflow state
-data/conversion/
-runtime/conversion/web_conversations.json
-runtime/conversion/*.sqlite3-shm
-runtime/conversion/*.sqlite3-wal
-
-# PyInstaller
-*.manifest
-*.spec
+.env
+.adk/

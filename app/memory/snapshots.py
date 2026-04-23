@@ -402,9 +402,9 @@ def replace_long_term_memory_snapshot(
             created_memory_ids.append(snapshot_memory.memory_id)
 
         for memory_id in sorted(existing_entries):
-            deleted_memory_ids.append(memory_id)
             existing_entry = existing_entries[memory_id]
             if existing_entry.relative_path not in replacement_relative_paths:
+                deleted_memory_ids.append(memory_id)
                 transaction.delete(existing_entry.relative_path)
 
         sync_state = _build_long_term_memory_snapshot_sync_state(
